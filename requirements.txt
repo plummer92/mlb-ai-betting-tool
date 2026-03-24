@@ -5,3 +5,6 @@ psycopg2-binary
 pydantic
 requests
 python-dotenv
+httpx
+apscheduler
+scipy
