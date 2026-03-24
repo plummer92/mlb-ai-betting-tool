@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Optional
 from pydantic import BaseModel
 
@@ -36,6 +37,39 @@ class PredictionOut(BaseModel):
     confidence_score: float
     recommended_side: Optional[str] = None
     created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class EdgeResultOut(BaseModel):
+    id: int
+    game_id: int
+    prediction_id: int
+    odds_id: int
+    movement_id: Optional[int] = None
+    calculated_at: Optional[datetime] = None
+
+    model_away_win_pct: Optional[Decimal] = None
+    model_home_win_pct: Optional[Decimal] = None
+    implied_away_pct: Optional[Decimal] = None
+    implied_home_pct: Optional[Decimal] = None
+
+    edge_away: Optional[Decimal] = None
+    edge_home: Optional[Decimal] = None
+    ev_away: Optional[Decimal] = None
+    ev_home: Optional[Decimal] = None
+    movement_boost: Optional[Decimal] = None
+
+    model_total: Optional[Decimal] = None
+    book_total: Optional[Decimal] = None
+    total_edge: Optional[Decimal] = None
+    ev_over: Optional[Decimal] = None
+    ev_under: Optional[Decimal] = None
+
+    recommended_play: Optional[str] = None
+    confidence_tier: Optional[str] = None
+    edge_pct: Optional[Decimal] = None
 
     class Config:
         from_attributes = True

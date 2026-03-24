@@ -14,3 +14,6 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL is missing from .env")
+
+THE_ODDS_API_KEY = os.getenv("THE_ODDS_API_KEY", "")
+THE_ODDS_API_URL = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
