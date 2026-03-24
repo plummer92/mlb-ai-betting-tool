@@ -1,4 +1,5 @@
-from datetime import date
+from datetime import datetime, date
+from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -12,7 +13,7 @@ router = APIRouter(prefix="/api/games", tags=["games"])
 
 @router.post("/sync-today")
 def sync_today_games(db: Session = Depends(get_db)):
-    today = date.today().isoformat()
+    today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
     games = fetch_schedule_for_date(today)
 
     for g in games:
@@ -52,7 +53,7 @@ def sync_today_games(db: Session = Depends(get_db)):
 
 @router.get("/today", response_model=list[GameOut])
 def get_today_games(db: Session = Depends(get_db)):
-    today = date.today()
+    today = datetime.now(ZoneInfo("America/New_York")).date()
     games = db.query(Game).filter(Game.game_date == today).all()
     return games
 

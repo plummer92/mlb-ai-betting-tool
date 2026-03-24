@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -32,7 +33,7 @@ async def morning_odds_snapshot():
 async def schedule_pregame_jobs():
     db = SessionLocal()
     try:
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now(ZoneInfo("America/New_York")).date()
         games = db.query(Game).filter(Game.game_date == today).all()
 
         for game in games:
