@@ -1,4 +1,6 @@
-from datetime import datetime, timezone
+import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from scipy.stats import norm
 from sqlalchemy import desc
@@ -66,10 +68,13 @@ def calculate_edge_for_game(
         model_total = float(prediction.projected_total)
         book_total = float(odds.total_line)
 
-        # Normal distribution approximation for over/under probability.
-        # A better approach once Monte Carlo stores full distributions is to
-        # count what fraction of 1000 sims landed over the line directly.
-        model_over_prob = 1 - norm.cdf(book_total, loc=model_total, scale=TOTAL_STD_DEV)
+        # Use simulated total distribution if available (stored by run_monte_carlo).
+        # Falls back to normal CDF approximation for older predictions.
+        if prediction.sim_totals_json:
+            sim_totals = json.loads(prediction.sim_totals_json)
+            model_over_prob = sum(1 for t in sim_totals if t > book_total) / len(sim_totals)
+        else:
+            model_over_prob = 1 - norm.cdf(book_total, loc=model_total, scale=TOTAL_STD_DEV)
         model_under_prob = 1 - model_over_prob
 
         ev_over = calc_ev(model_over_prob, american_to_decimal(odds.over_odds))
@@ -143,6 +148,6 @@ def calculate_edge_for_game(
 
 
 def calculate_all_edges_today(db: Session) -> list[EdgeResult]:
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(ZoneInfo("America/New_York")).date()
     games = db.query(Game).filter(Game.game_date == today).all()
     return [r for g in games if (r := calculate_edge_for_game(db, g.game_id))]

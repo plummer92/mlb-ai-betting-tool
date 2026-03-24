@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import desc
@@ -58,7 +59,7 @@ def edges_today(
     Core endpoint. Returns today's edges sorted by EV descending.
     Optionally filter by minimum edge or confidence tier.
     """
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(ZoneInfo("America/New_York")).date()
 
     query = (
         db.query(EdgeResult, Game)

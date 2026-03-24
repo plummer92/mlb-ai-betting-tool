@@ -68,6 +68,7 @@ class Prediction(Base):
 
     confidence_score = Column(Float, nullable=False)
     recommended_side = Column(String, nullable=True)
+    sim_totals_json  = Column(String, nullable=True)  # JSON list of simulated game totals
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

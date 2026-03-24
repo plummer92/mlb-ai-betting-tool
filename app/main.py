@@ -7,6 +7,7 @@ from app.db import Base, engine
 from app.routes.games import router as games_router
 from app.routes.model import router as model_router
 from app.routes.edges import router as edges_router
+from app.routes.daily import router as daily_router
 from app.scheduler import scheduler
 
 Base.metadata.create_all(bind=engine)
@@ -28,6 +29,7 @@ app = FastAPI(
 app.include_router(games_router)
 app.include_router(model_router)
 app.include_router(edges_router)
+app.include_router(daily_router)
 
 
 @app.get("/")

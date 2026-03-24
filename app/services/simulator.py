@@ -37,6 +37,7 @@ def run_monte_carlo(
         away_scores.append(away_runs)
         home_scores.append(home_runs)
 
+
         if away_runs > home_runs:
             away_wins += 1
         elif home_runs > away_runs:
@@ -54,6 +55,8 @@ def run_monte_carlo(
 
     recommended_side = "AWAY" if away_win_pct > home_win_pct else "HOME"
 
+    sim_totals = [a + h for a, h in zip(away_scores, home_scores)]
+
     return {
         "away_win_pct": round(away_win_pct, 4),
         "home_win_pct": round(home_win_pct, 4),
@@ -63,4 +66,5 @@ def run_monte_carlo(
         "confidence_score": round(confidence_score, 2),
         "recommended_side": recommended_side,
         "sim_count": sim_count,
+        "sim_totals": sim_totals,
     }
