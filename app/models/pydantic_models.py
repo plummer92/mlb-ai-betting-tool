@@ -20,6 +20,12 @@ class GameOut(BaseModel):
     final_away_score: Optional[int] = None
     final_home_score: Optional[int] = None
 
+    weather_condition: Optional[str] = None
+    weather_temp:      Optional[int] = None
+    weather_wind:      Optional[str] = None
+    weather_wind_mph:  Optional[int] = None
+    weather_wind_dir:  Optional[str] = None
+
     class Config:
         from_attributes = True
 

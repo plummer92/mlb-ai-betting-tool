@@ -9,17 +9,49 @@ from app.db import SessionLocal
 from app.models.schema import Game, SnapshotType
 from app.services.edge_service import calculate_edge_for_game
 from app.services.odds_service import compute_line_movement, fetch_and_store_odds
+from app.services.weather_service import fetch_game_forecast, wind_deg_to_park_direction
 
 scheduler = AsyncIOScheduler(timezone="America/New_York")
 
 
-# ── Job 1: Morning open snapshot ────────────────────────────────────────────
-# Runs at 10:00 AM ET every day. Grabs opening lines for all today's games
-# in a single API call.
+# ── Job 1: Morning weather + open snapshot ───────────────────────────────────
+# Runs at 10:00 AM ET every day.
+# 1. Fetches Open-Meteo forecasts and stores them on each game row.
+# 2. Grabs opening lines for all today's games in a single API call.
 @scheduler.scheduled_job(CronTrigger(hour=10, minute=0, timezone="America/New_York"))
 async def morning_odds_snapshot():
     db = SessionLocal()
     try:
+        # Fetch and store weather forecasts for all today's games
+        today = datetime.now(ZoneInfo("America/New_York")).date()
+        games = db.query(Game).filter(Game.game_date == today).all()
+        weather_updated = 0
+        for game in games:
+            if not game.start_time or not game.venue:
+                continue
+            try:
+                game_dt = datetime.fromisoformat(game.start_time)
+                if game_dt.tzinfo is None:
+                    game_dt = game_dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+
+            forecast = await fetch_game_forecast(game.venue, game_dt)
+            if forecast:
+                game.weather_temp     = forecast["temp"]
+                game.weather_wind_mph = forecast["wind_mph"]
+                game.weather_wind_dir = wind_deg_to_park_direction(
+                    forecast["wind_direction_deg"], game.venue
+                )
+                game.weather_wind = (
+                    f"{forecast['wind_mph']} mph, {game.weather_wind_dir}"
+                    if game.weather_wind_dir else f"{forecast['wind_mph']} mph"
+                )
+                weather_updated += 1
+
+        db.commit()
+        print(f"[scheduler] Weather forecasts stored for {weather_updated}/{len(games)} games")
+
         stored = await fetch_and_store_odds(db, snapshot_type=SnapshotType.open)
         print(f"[scheduler] Morning snapshot: {len(stored)} odds rows stored")
     finally:

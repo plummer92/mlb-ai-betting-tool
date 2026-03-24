@@ -41,6 +41,12 @@ class Game(Base):
     final_away_score = Column(Integer, nullable=True)
     final_home_score = Column(Integer, nullable=True)
 
+    weather_condition = Column(String(50), nullable=True)
+    weather_temp      = Column(Integer, nullable=True)
+    weather_wind      = Column(String(100), nullable=True)
+    weather_wind_mph  = Column(Integer, nullable=True)
+    weather_wind_dir  = Column(String(30), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

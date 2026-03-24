@@ -12,6 +12,7 @@ def run_monte_carlo(
     away_team: dict,
     home_team: dict,
     sim_count: int = 1000,
+    weather_modifier: float = 1.0,
 ) -> dict:
     away_wins = 0
     home_wins = 0
@@ -23,12 +24,15 @@ def run_monte_carlo(
             offense_rpg=away_team["runs_per_game"],
             opponent_era=home_team["era"],
             home_boost=0.0,
-        )
+        ) * weather_modifier
         home_runs = simulate_runs(
             offense_rpg=home_team["runs_per_game"],
             opponent_era=away_team["era"],
             home_boost=0.25,
-        )
+        ) * weather_modifier
+
+        away_runs = max(0, round(away_runs))
+        home_runs = max(0, round(home_runs))
 
         away_scores.append(away_runs)
         home_scores.append(home_runs)

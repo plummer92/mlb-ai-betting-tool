@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models.schema import Game, Prediction
 from app.models.pydantic_models import PredictionOut
-from app.services.feature_builder import build_team_features
+from app.services.feature_builder import build_team_features, is_dome_venue, weather_run_modifier
 from app.services.mlb_api import fetch_all_team_records, fetch_team_stats
 from app.services.simulator import run_monte_carlo
 
@@ -27,10 +27,18 @@ def run_model(game_id: int, db: Session = Depends(get_db)):
     away_features = build_team_features(away_raw, wins=away_record["wins"], losses=away_record["losses"])
     home_features = build_team_features(home_raw, wins=home_record["wins"], losses=home_record["losses"])
 
+    weather_mod = weather_run_modifier(
+        temp=game.weather_temp,
+        wind_mph=game.weather_wind_mph,
+        wind_dir=game.weather_wind_dir,
+        is_dome=is_dome_venue(game.venue),
+    )
+
     result = run_monte_carlo(
         away_team=away_features,
         home_team=home_features,
         sim_count=1000,
+        weather_modifier=weather_mod,
     )
 
     prediction = Prediction(
