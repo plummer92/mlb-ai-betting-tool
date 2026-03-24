@@ -1,7 +1,11 @@
+import time
 from datetime import datetime
 import requests
 
 from app.config import MLB_API_BASE
+
+# In-process cache for pitcher stats — keyed by (pitcher_id, season)
+_pitcher_cache: dict[tuple[int, int], dict] = {}
 
 
 # ── Schedule ─────────────────────────────────────────────────────────────────
@@ -68,6 +72,8 @@ def fetch_schedule_for_date(date_str: str) -> list[dict]:
                     "start_time": local_time,
                     "away_probable_pitcher": g["teams"]["away"].get("probablePitcher", {}).get("fullName"),
                     "home_probable_pitcher": g["teams"]["home"].get("probablePitcher", {}).get("fullName"),
+                    "away_pitcher_id": g["teams"]["away"].get("probablePitcher", {}).get("id"),
+                    "home_pitcher_id": g["teams"]["home"].get("probablePitcher", {}).get("id"),
                     "final_away_score": g["teams"]["away"].get("score"),
                     "final_home_score": g["teams"]["home"].get("score"),
                     **_parse_weather(g),
@@ -149,6 +155,104 @@ def fetch_team_stats(team_id: int, season: int) -> dict:
     return {"era": 4.20, "whip": 1.30, "avg": 0.248, "ops": 0.720, "home_runs": 180, "runs": 700}
 
 
+# ── Pitcher stats ─────────────────────────────────────────────────────────────
+
+def fetch_pitcher_stats(pitcher_id: int, season: int, _throttle: bool = True) -> dict:
+    """
+    Return season pitching stats for an individual pitcher.
+    Results are cached in-process so each (pitcher_id, season) is fetched once.
+    """
+    key = (pitcher_id, season)
+    if key in _pitcher_cache:
+        return _pitcher_cache[key]
+
+    if _throttle:
+        time.sleep(0.05)  # be polite to the public MLB API
+
+    url = (
+        f"{MLB_API_BASE}/people/{pitcher_id}/stats"
+        f"?stats=season&group=pitching&season={season}"
+    )
+    resp = requests.get(url, timeout=30)
+    if resp.status_code in (404, 503):
+        result = {"era": 4.50, "whip": 1.35, "innings_pitched": 0}
+        _pitcher_cache[key] = result
+        return result
+
+    resp.raise_for_status()
+    stat = resp.json().get("stats", [{}])[0].get("splits", [{}])[0].get("stat", {})
+    result = {
+        "era":             float(stat.get("era", 4.50) or 4.50),
+        "whip":            float(stat.get("whip", 1.35) or 1.35),
+        "innings_pitched": float(stat.get("inningsPitched", 0) or 0),
+    }
+    _pitcher_cache[key] = result
+    return result
+
+
+# ── Historical schedule (backtest) ────────────────────────────────────────────
+
+def fetch_season_schedule(season: int) -> list[dict]:
+    """
+    Fetch every completed regular-season game for a full season.
+    Fetches month-by-month to avoid oversized responses.
+    Returns games with scores, pitcher IDs, and team IDs.
+    """
+    months = [
+        (f"{season}-03-20", f"{season}-03-31"),  # opening series (late March)
+        (f"{season}-04-01", f"{season}-04-30"),
+        (f"{season}-05-01", f"{season}-05-31"),
+        (f"{season}-06-01", f"{season}-06-30"),
+        (f"{season}-07-01", f"{season}-07-31"),
+        (f"{season}-08-01", f"{season}-08-31"),
+        (f"{season}-09-01", f"{season}-09-30"),
+        (f"{season}-10-01", f"{season}-10-15"),  # end-of-season / wild card
+    ]
+
+    all_games: list[dict] = []
+    for start, end in months:
+        url = (
+            f"{MLB_API_BASE}/schedule"
+            f"?sportId=1&startDate={start}&endDate={end}"
+            f"&hydrate=team,linescore,probablePitcher"
+            f"&gameType=R"  # regular season only
+        )
+        resp = requests.get(url, timeout=60)
+        if resp.status_code in (404, 503):
+            continue
+        resp.raise_for_status()
+
+        for day in resp.json().get("dates", []):
+            for g in day.get("games", []):
+                status = g.get("status", {}).get("abstractGameState", "")
+                if status != "Final":
+                    continue
+
+                teams = g["teams"]
+                home_score = teams["home"].get("score")
+                away_score = teams["away"].get("score")
+                if home_score is None or away_score is None:
+                    continue
+
+                all_games.append({
+                    "game_id":          g["gamePk"],
+                    "game_date":        day.get("date"),
+                    "home_team_id":     teams["home"]["team"]["id"],
+                    "away_team_id":     teams["away"]["team"]["id"],
+                    "home_team":        teams["home"]["team"]["name"],
+                    "away_team":        teams["away"]["team"]["name"],
+                    "venue":            g.get("venue", {}).get("name"),
+                    "home_score":       int(home_score),
+                    "away_score":       int(away_score),
+                    "home_starter_id":  teams["home"].get("probablePitcher", {}).get("id"),
+                    "away_starter_id":  teams["away"].get("probablePitcher", {}).get("id"),
+                    "home_starter_name": teams["home"].get("probablePitcher", {}).get("fullName"),
+                    "away_starter_name": teams["away"].get("probablePitcher", {}).get("fullName"),
+                })
+
+    return all_games
+
+
 # ── Standings ─────────────────────────────────────────────────────────────────
 
 def fetch_all_team_records(season: int) -> dict[int, dict]:
@@ -166,3 +270,30 @@ def fetch_all_team_records(season: int) -> dict[int, dict]:
                 "losses": int(tr.get("losses", 0)),
             }
     return records
+
+
+def fetch_full_standings(season: int) -> dict[int, dict]:
+    """
+    Extended standings including run differential and win percentage.
+    Returns {team_id: {wins, losses, win_pct, run_diff, runs_scored, runs_allowed}}
+    """
+    url = f"{MLB_API_BASE}/standings?leagueId=103,104&season={season}"
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+
+    standings: dict[int, dict] = {}
+    for division in resp.json().get("records", []):
+        for tr in division.get("teamRecords", []):
+            team_id = tr["team"]["id"]
+            wins    = int(tr.get("wins", 0))
+            losses  = int(tr.get("losses", 0))
+            gp      = wins + losses
+            standings[team_id] = {
+                "wins":         wins,
+                "losses":       losses,
+                "win_pct":      wins / gp if gp > 0 else 0.5,
+                "run_diff":     int(tr.get("runDifferential", 0)),
+                "runs_scored":  int(tr.get("runsScored", 0)),
+                "runs_allowed": int(tr.get("runsAllowed", 0)),
+            }
+    return standings

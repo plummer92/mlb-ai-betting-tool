@@ -37,6 +37,8 @@ class Game(Base):
 
     away_probable_pitcher = Column(String, nullable=True)
     home_probable_pitcher = Column(String, nullable=True)
+    away_pitcher_id = Column(Integer, nullable=True)
+    home_pitcher_id = Column(Integer, nullable=True)
 
     final_away_score = Column(Integer, nullable=True)
     final_home_score = Column(Integer, nullable=True)
@@ -165,3 +167,63 @@ class EdgeResult(Base):
     recommended_play = Column(String(20))
     confidence_tier = Column(String(10))
     edge_pct = Column(Numeric(5, 4))
+
+
+class BacktestGame(Base):
+    __tablename__ = "backtest_games"
+
+    game_id      = Column(Integer, primary_key=True)
+    game_date    = Column(Date, nullable=False, index=True)
+    season       = Column(Integer, nullable=False, index=True)
+
+    home_team_id = Column(Integer, nullable=False)
+    away_team_id = Column(Integer, nullable=False)
+    home_team    = Column(String, nullable=False)
+    away_team    = Column(String, nullable=False)
+    venue        = Column(String, nullable=True)
+
+    # Outcome
+    home_score = Column(Integer, nullable=True)
+    away_score = Column(Integer, nullable=True)
+    home_win   = Column(Boolean, nullable=True)
+
+    # Starting pitchers
+    home_starter_id   = Column(Integer, nullable=True)
+    away_starter_id   = Column(Integer, nullable=True)
+    home_starter_name = Column(String, nullable=True)
+    away_starter_name = Column(String, nullable=True)
+    home_starter_era  = Column(Float, nullable=True)
+    away_starter_era  = Column(Float, nullable=True)
+
+    # Team season stats (full-season, not point-in-time)
+    home_team_era  = Column(Float, nullable=True)
+    away_team_era  = Column(Float, nullable=True)
+    home_team_ops  = Column(Float, nullable=True)
+    away_team_ops  = Column(Float, nullable=True)
+    home_team_whip = Column(Float, nullable=True)
+    away_team_whip = Column(Float, nullable=True)
+
+    # Standings-based
+    home_win_pct  = Column(Float, nullable=True)
+    away_win_pct  = Column(Float, nullable=True)
+    home_run_diff = Column(Integer, nullable=True)
+    away_run_diff = Column(Integer, nullable=True)
+
+    collected_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class BacktestResult(Base):
+    __tablename__ = "backtest_results"
+
+    id      = Column(Integer, primary_key=True)
+    run_at  = Column(DateTime(timezone=True), server_default=func.now())
+    seasons = Column(String, nullable=False)   # "2022,2023,2024"
+    n_games = Column(Integer, nullable=False)
+
+    accuracy    = Column(Float, nullable=False)  # held-out test accuracy
+    cv_accuracy = Column(Float, nullable=False)  # 5-fold cross-val accuracy
+    log_loss    = Column(Float, nullable=True)
+
+    # JSON: {"feature": coefficient, ...} sorted by abs(coef) descending
+    coefficients_json    = Column(String, nullable=False)
+    feature_ranks_json   = Column(String, nullable=False)
