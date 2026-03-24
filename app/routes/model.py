@@ -5,7 +5,7 @@ from app.db import get_db
 from app.models.schema import Game, Prediction
 from app.models.pydantic_models import PredictionOut
 from app.services.feature_builder import build_team_features
-from app.services.mlb_api import fetch_team_stats
+from app.services.mlb_api import fetch_all_team_records, fetch_team_stats
 from app.services.simulator import run_monte_carlo
 
 router = APIRouter(prefix="/api/model", tags=["model"])
@@ -20,8 +20,12 @@ def run_model(game_id: int, db: Session = Depends(get_db)):
     away_raw = fetch_team_stats(team_id=game.away_team_id, season=game.season)
     home_raw = fetch_team_stats(team_id=game.home_team_id, season=game.season)
 
-    away_features = build_team_features(away_raw)
-    home_features = build_team_features(home_raw)
+    team_records = fetch_all_team_records(season=game.season)
+    away_record = team_records.get(game.away_team_id, {"wins": 0, "losses": 0})
+    home_record = team_records.get(game.home_team_id, {"wins": 0, "losses": 0})
+
+    away_features = build_team_features(away_raw, wins=away_record["wins"], losses=away_record["losses"])
+    home_features = build_team_features(home_raw, wins=home_record["wins"], losses=home_record["losses"])
 
     result = run_monte_carlo(
         away_team=away_features,

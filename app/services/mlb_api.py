@@ -52,23 +52,18 @@ def fetch_schedule_for_date(date_str: str) -> list[dict]:
 
 
 def fetch_team_stats(team_id: int, season: int) -> dict:
-    pitching_url = (
-        f"{MLB_API_BASE}/teams/{team_id}/stats"
-        f"?stats=season&group=pitching&season={season}"
-    )
-    hitting_url = (
-        f"{MLB_API_BASE}/teams/{team_id}/stats"
-        f"?stats=season&group=hitting&season={season}"
-    )
+    # Fall back to prior season if current season stats aren't published yet
+    def _get_stats(group: str, s: int):
+        url = f"{MLB_API_BASE}/teams/{team_id}/stats?stats=season&group={group}&season={s}"
+        resp = requests.get(url, timeout=30)
+        if resp.status_code == 404 and s > 2020:
+            url = f"{MLB_API_BASE}/teams/{team_id}/stats?stats=season&group={group}&season={s - 1}"
+            resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
 
-    pitching_resp = requests.get(pitching_url, timeout=30)
-    hitting_resp = requests.get(hitting_url, timeout=30)
-
-    pitching_resp.raise_for_status()
-    hitting_resp.raise_for_status()
-
-    pitching_json = pitching_resp.json()
-    hitting_json = hitting_resp.json()
+    pitching_json = _get_stats("pitching", season)
+    hitting_json = _get_stats("hitting", season)
 
     pitching_split = (
         pitching_json.get("stats", [{}])[0].get("splits", [{}])[0].get("stat", {})
@@ -85,3 +80,20 @@ def fetch_team_stats(team_id: int, season: int) -> dict:
         "home_runs": int(hitting_split.get("homeRuns", 180) or 180),
         "runs": int(hitting_split.get("runs", 700) or 700),
     }
+
+
+def fetch_all_team_records(season: int) -> dict[int, dict]:
+    """Return {team_id: {"wins": int, "losses": int}} for all MLB teams."""
+    url = f"{MLB_API_BASE}/standings?leagueId=103,104&season={season}"
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+
+    records: dict[int, dict] = {}
+    for division in resp.json().get("records", []):
+        for tr in division.get("teamRecords", []):
+            team_id = tr["team"]["id"]
+            records[team_id] = {
+                "wins": int(tr.get("wins", 0)),
+                "losses": int(tr.get("losses", 0)),
+            }
+    return records
