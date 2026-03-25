@@ -69,7 +69,7 @@ def calculate_edge_for_game(
         # Normal distribution approximation for over/under probability.
         # A better approach once Monte Carlo stores full distributions is to
         # count what fraction of 1000 sims landed over the line directly.
-        model_over_prob = 1 - norm.cdf(book_total, loc=model_total, scale=TOTAL_STD_DEV)
+        model_over_prob = float(1 - norm.cdf(book_total, loc=model_total, scale=TOTAL_STD_DEV))
         model_under_prob = 1 - model_over_prob
 
         ev_over = calc_ev(model_over_prob, american_to_decimal(odds.over_odds))

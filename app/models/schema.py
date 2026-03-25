@@ -151,7 +151,7 @@ class EdgeResult(Base):
 
     model_total = Column(Numeric(4, 1))
     book_total = Column(Numeric(4, 1))
-    total_edge = Column(Numeric(5, 4))
+    total_edge = Column(Numeric(6, 2))
     ev_over = Column(Numeric(6, 4))
     ev_under = Column(Numeric(6, 4))
 

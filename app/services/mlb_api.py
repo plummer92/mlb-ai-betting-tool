@@ -20,68 +20,67 @@ def fetch_schedule_for_date(date_str: str) -> list[dict]:
             game_date = day.get("date")
             game_time = g.get("gameDate")
             local_time = None
-
             if game_time:
                 try:
-                    local_time = datetime.fromisoformat(
-                        game_time.replace("Z", "+00:00")
-                    ).isoformat()
+                    local_time = datetime.fromisoformat(game_time.replace("Z", "+00:00")).isoformat()
                 except ValueError:
                     local_time = game_time
-
-            games.append(
-                {
-                    "game_id": g["gamePk"],
-                    "game_date": game_date,
-                    "season": int(game_date[:4]),
-                    "away_team": g["teams"]["away"]["team"]["name"],
-                    "home_team": g["teams"]["home"]["team"]["name"],
-                    "away_team_id": g["teams"]["away"]["team"]["id"],
-                    "home_team_id": g["teams"]["home"]["team"]["id"],
-                    "venue": g.get("venue", {}).get("name"),
-                    "status": g.get("status", {}).get("abstractGameState"),
-                    "start_time": local_time,
-                    "away_probable_pitcher": g["teams"]["away"].get("probablePitcher", {}).get("fullName"),
-                    "home_probable_pitcher": g["teams"]["home"].get("probablePitcher", {}).get("fullName"),
-                    "final_away_score": g["teams"]["away"].get("score"),
-                    "final_home_score": g["teams"]["home"].get("score"),
-                }
-            )
-
+            games.append({
+                "game_id": g["gamePk"],
+                "game_date": game_date,
+                "season": int(game_date[:4]),
+                "away_team": g["teams"]["away"]["team"]["name"],
+                "home_team": g["teams"]["home"]["team"]["name"],
+                "away_team_id": g["teams"]["away"]["team"]["id"],
+                "home_team_id": g["teams"]["home"]["team"]["id"],
+                "venue": g.get("venue", {}).get("name"),
+                "status": g.get("status", {}).get("abstractGameState"),
+                "start_time": local_time,
+                "away_probable_pitcher": g["teams"]["away"].get("probablePitcher", {}).get("fullName"),
+                "home_probable_pitcher": g["teams"]["home"].get("probablePitcher", {}).get("fullName"),
+                "final_away_score": g["teams"]["away"].get("score"),
+                "final_home_score": g["teams"]["home"].get("score"),
+            })
     return games
 
 
-def fetch_team_stats(team_id: int, season: int) -> dict:
-    pitching_url = (
-        f"{MLB_API_BASE}/teams/{team_id}/stats"
-        f"?stats=season&group=pitching&season={season}"
+def _fetch_team_stats_for_season(team_id: int, season: int):
+    pitching_resp = requests.get(
+        f"{MLB_API_BASE}/teams/{team_id}/stats?stats=season&group=pitching&season={season}",
+        timeout=30
     )
-    hitting_url = (
-        f"{MLB_API_BASE}/teams/{team_id}/stats"
-        f"?stats=season&group=hitting&season={season}"
+    hitting_resp = requests.get(
+        f"{MLB_API_BASE}/teams/{team_id}/stats?stats=season&group=hitting&season={season}",
+        timeout=30
     )
-
-    pitching_resp = requests.get(pitching_url, timeout=30)
-    hitting_resp = requests.get(hitting_url, timeout=30)
-
+    if pitching_resp.status_code == 404 or hitting_resp.status_code == 404:
+        return None
     pitching_resp.raise_for_status()
     hitting_resp.raise_for_status()
-
-    pitching_json = pitching_resp.json()
-    hitting_json = hitting_resp.json()
-
-    pitching_split = (
-        pitching_json.get("stats", [{}])[0].get("splits", [{}])[0].get("stat", {})
-    )
-    hitting_split = (
-        hitting_json.get("stats", [{}])[0].get("splits", [{}])[0].get("stat", {})
-    )
-
+    pitching_stats = pitching_resp.json().get("stats") or [{}]
+    pitching_split = (pitching_stats[0].get("splits") or [{}])[0].get("stat", {})
+    hitting_stats = hitting_resp.json().get("stats") or [{}]
+    hitting_split = (hitting_stats[0].get("splits") or [{}])[0].get("stat", {})
+    if not pitching_split and not hitting_split:
+        return None
     return {
-        "era": float(pitching_split.get("era", 4.20) or 4.20),
-        "whip": float(pitching_split.get("whip", 1.30) or 1.30),
-        "avg": float(hitting_split.get("avg", 0.248) or 0.248),
-        "ops": float(hitting_split.get("ops", 0.720) or 0.720),
+        "era":       float(pitching_split.get("era", 4.20) or 4.20),
+        "whip":      float(pitching_split.get("whip", 1.30) or 1.30),
+        "avg":       float(hitting_split.get("avg", 0.248) or 0.248),
+        "ops":       float(hitting_split.get("ops", 0.720) or 0.720),
         "home_runs": int(hitting_split.get("homeRuns", 180) or 180),
-        "runs": int(hitting_split.get("runs", 700) or 700),
+        "runs":      int(hitting_split.get("runs", 700) or 700),
+    }
+
+
+def fetch_team_stats(team_id: int, season: int) -> dict:
+    stats = _fetch_team_stats_for_season(team_id, season)
+    if stats:
+        return stats
+    stats = _fetch_team_stats_for_season(team_id, season - 1)
+    if stats:
+        return stats
+    return {
+        "era": 4.20, "whip": 1.30, "avg": 0.248,
+        "ops": 0.720, "home_runs": 180, "runs": 700,
     }
