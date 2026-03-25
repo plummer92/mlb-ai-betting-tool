@@ -4,9 +4,13 @@ def build_team_features(
     losses: int | None = None,
     starter_stats: dict | None = None,
 ) -> dict:
-    wins = wins or 40
-    losses = losses or 40
-    games_played = max(wins + losses, 1)
+    # Prefer games_played from the stats API; fall back to wins+losses or season default
+    games_played = raw_stats.get("games_played") or 0
+    if games_played == 0:
+        wins = wins or 40
+        losses = losses or 40
+        games_played = wins + losses
+    games_played = max(games_played, 1)
 
     runs_per_game = raw_stats["runs"] / games_played
 

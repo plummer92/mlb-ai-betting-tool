@@ -13,11 +13,11 @@ MODEL_VERSION = "v0.2-backtest-weighted"
 
 
 def simulate_runs(offense: dict, opponent: dict) -> int:
-    # ERA factor: opponent ERA vs. 5.00 baseline (higher opp ERA = more runs)
-    era_factor = max(0.65, min(1.35, (5.00 - opponent["era"]) / 2.5 + 1.0))
+    # ERA factor: higher opponent ERA = more runs for offense
+    era_factor = max(0.65, min(1.35, (opponent["era"] - 5.00) / 2.5 + 1.0))
 
-    # WHIP factor: opponent WHIP vs. league average 1.30
-    whip_factor = max(0.65, min(1.35, (1.30 - opponent["whip"]) / 0.40 + 1.0))
+    # WHIP factor: higher opponent WHIP = more runs for offense
+    whip_factor = max(0.65, min(1.35, (opponent["whip"] - 1.30) / 0.40 + 1.0))
 
     # OPS factor: own OPS vs. league average 0.720
     ops_factor = max(0.65, min(1.35, offense["ops"] / 0.720))

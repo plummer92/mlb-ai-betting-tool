@@ -65,7 +65,11 @@ def _fetch_team_stats_for_season(team_id: int, season: int):
     pitching_split = (pitching_stats[0].get("splits") or [{}])[0].get("stat", {})
     hitting_stats = hitting_resp.json().get("stats") or [{}]
     hitting_split = (hitting_stats[0].get("splits") or [{}])[0].get("stat", {})
+    games_played = int(hitting_split.get("gamesPlayed", 0) or 0)
     if not pitching_split and not hitting_split:
+        return None
+    # Too few games to produce meaningful rates — caller will try prior season
+    if games_played < 10:
         return None
     return {
         "era":          float(pitching_split.get("era", 4.20) or 4.20),
@@ -75,6 +79,7 @@ def _fetch_team_stats_for_season(team_id: int, season: int):
         "ops":          float(hitting_split.get("ops", 0.720) or 0.720),
         "home_runs":    int(hitting_split.get("homeRuns", 180) or 180),
         "runs":         int(hitting_split.get("runs", 700) or 700),
+        "games_played": games_played,
     }
 
 
@@ -116,4 +121,5 @@ def fetch_team_stats(team_id: int, season: int) -> dict:
     return {
         "era": 4.20, "whip": 1.30, "runs_allowed": 700,
         "avg": 0.248, "ops": 0.720, "home_runs": 180, "runs": 700,
+        "games_played": 0,
     }
