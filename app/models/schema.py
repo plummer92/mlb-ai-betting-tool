@@ -208,3 +208,7 @@ class EdgeResult(Base):
     confidence_tier = Column(String(10))
     edge_pct = Column(Numeric(5, 4))
     movement_direction = Column(String(20), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("game_id", "prediction_id", name="uq_edge_game_prediction"),
+    )

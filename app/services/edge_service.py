@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from scipy.stats import norm
 from sqlalchemy import desc
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models.schema import EdgeResult, Game, GameOdds, LineMovement, Prediction
@@ -131,11 +132,12 @@ def calculate_edge_for_game(
             else:
                 movement_direction = "neutral"
 
-    result = EdgeResult(
+    row = dict(
         game_id=game_id,
         prediction_id=prediction.prediction_id,
         odds_id=odds.id,
         movement_id=movement_id,
+        calculated_at=datetime.now(timezone.utc),
         model_away_win_pct=round(model_away, 4),
         model_home_win_pct=round(model_home, 4),
         implied_away_pct=round(imp_away, 4),
@@ -156,10 +158,27 @@ def calculate_edge_for_game(
         movement_direction=movement_direction,
     )
 
-    db.add(result)
+    update_cols = {k: v for k, v in row.items() if k not in ("game_id", "prediction_id")}
+    stmt = (
+        pg_insert(EdgeResult)
+        .values(**row)
+        .on_conflict_do_update(
+            constraint="uq_edge_game_prediction",
+            set_=update_cols,
+        )
+    )
+    result = db.execute(stmt)
     db.commit()
-    db.refresh(result)
-    return result
+
+    # Return the refreshed row
+    return (
+        db.query(EdgeResult)
+        .filter(
+            EdgeResult.game_id == game_id,
+            EdgeResult.prediction_id == prediction.prediction_id,
+        )
+        .first()
+    )
 
 
 def calculate_all_edges_today(db: Session) -> list[EdgeResult]:
