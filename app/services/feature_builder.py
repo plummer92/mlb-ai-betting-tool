@@ -10,6 +10,14 @@ def build_team_features(
 
     runs_per_game = raw_stats["runs"] / games_played
 
+    # run_differential_per_game replaces win_pct (backtest: zero predictive power)
+    runs_allowed = raw_stats.get("runs_allowed")
+    run_differential_per_game = (
+        (raw_stats["runs"] - runs_allowed) / games_played
+        if runs_allowed is not None
+        else None
+    )
+
     # Use starter ERA/WHIP when available; fall back to team totals
     era  = starter_stats["era"]  if starter_stats else raw_stats["era"]
     whip = starter_stats["whip"] if starter_stats else raw_stats["whip"]
@@ -23,5 +31,5 @@ def build_team_features(
         "ops": raw_stats["ops"],
         "home_runs": raw_stats["home_runs"],
         "runs_per_game": runs_per_game,
-        "win_pct": wins / games_played,
+        "run_differential_per_game": run_differential_per_game,
     }

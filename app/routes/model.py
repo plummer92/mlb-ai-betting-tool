@@ -6,7 +6,7 @@ from app.models.schema import Game, Prediction
 from app.models.pydantic_models import PredictionOut
 from app.services.feature_builder import build_team_features
 from app.services.mlb_api import fetch_team_stats
-from app.services.simulator import run_monte_carlo
+from app.services.simulator import MODEL_VERSION, run_monte_carlo
 
 router = APIRouter(prefix="/api/model", tags=["model"])
 
@@ -31,7 +31,7 @@ def run_model(game_id: int, db: Session = Depends(get_db)):
 
     prediction = Prediction(
         game_id=game.game_id,
-        model_version="v0.1-neon",
+        model_version=MODEL_VERSION,
         sim_count=result["sim_count"],
         away_win_pct=result["away_win_pct"],
         home_win_pct=result["home_win_pct"],

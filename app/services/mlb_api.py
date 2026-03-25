@@ -68,12 +68,13 @@ def _fetch_team_stats_for_season(team_id: int, season: int):
     if not pitching_split and not hitting_split:
         return None
     return {
-        "era":       float(pitching_split.get("era", 4.20) or 4.20),
-        "whip":      float(pitching_split.get("whip", 1.30) or 1.30),
-        "avg":       float(hitting_split.get("avg", 0.248) or 0.248),
-        "ops":       float(hitting_split.get("ops", 0.720) or 0.720),
-        "home_runs": int(hitting_split.get("homeRuns", 180) or 180),
-        "runs":      int(hitting_split.get("runs", 700) or 700),
+        "era":          float(pitching_split.get("era", 4.20) or 4.20),
+        "whip":         float(pitching_split.get("whip", 1.30) or 1.30),
+        "runs_allowed": int(pitching_split.get("runsAllowed", 700) or 700),
+        "avg":          float(hitting_split.get("avg", 0.248) or 0.248),
+        "ops":          float(hitting_split.get("ops", 0.720) or 0.720),
+        "home_runs":    int(hitting_split.get("homeRuns", 180) or 180),
+        "runs":         int(hitting_split.get("runs", 700) or 700),
     }
 
 
@@ -113,6 +114,6 @@ def fetch_team_stats(team_id: int, season: int) -> dict:
     if stats:
         return stats
     return {
-        "era": 4.20, "whip": 1.30, "avg": 0.248,
-        "ops": 0.720, "home_runs": 180, "runs": 700,
+        "era": 4.20, "whip": 1.30, "runs_allowed": 700,
+        "avg": 0.248, "ops": 0.720, "home_runs": 180, "runs": 700,
     }

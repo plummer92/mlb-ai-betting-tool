@@ -7,7 +7,7 @@ from app.db import get_db
 from app.models.schema import Game, Prediction
 from app.services.mlb_api import fetch_schedule_for_date, fetch_team_stats, fetch_pitcher_stats
 from app.services.feature_builder import build_team_features
-from app.services.simulator import run_monte_carlo
+from app.services.simulator import MODEL_VERSION, run_monte_carlo
 from app.services.odds_service import fetch_and_store_odds, compute_line_movement, SnapshotType
 from app.services.edge_service import calculate_all_edges_today
 
@@ -75,7 +75,7 @@ async def daily_run(db: Session = Depends(get_db)):
             result = run_monte_carlo(away_team=away_features, home_team=home_features, sim_count=1000)
             prediction = Prediction(
                 game_id=game.game_id,
-                model_version="v0.1-neon",
+                model_version=MODEL_VERSION,
                 sim_count=result["sim_count"],
                 away_win_pct=result["away_win_pct"],
                 home_win_pct=result["home_win_pct"],

@@ -8,6 +8,7 @@ import logging
 from datetime import date
 
 import requests
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import log_loss as sk_log_loss
 from sklearn.model_selection import cross_val_score
@@ -96,8 +97,6 @@ def collect_season(db: Session, season: int) -> int:
     processed = 0
     for g in games:
         try:
-            existing = db.query(BacktestGame).filter(BacktestGame.game_id == g["game_id"]).first()
-
             away_stats = _team_stats(g["away_team_id"])
             home_stats = _team_stats(g["home_team_id"])
 
@@ -130,11 +129,12 @@ def collect_season(db: Session, season: int) -> int:
                 home_team_whip=home_stats["whip"],
             )
 
-            if existing:
-                for k, v in row_data.items():
-                    setattr(existing, k, v)
-            else:
-                db.add(BacktestGame(**row_data))
+            stmt = pg_insert(BacktestGame).values(**row_data)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["game_id"],
+                set_={k: v for k, v in row_data.items() if k != "game_id"},
+            )
+            db.execute(stmt)
 
             processed += 1
             if processed % 200 == 0:

@@ -1,11 +1,42 @@
 import random
 
+# Backtest-validated feature weights (logistic regression coefficients, sprint 3)
+_ERA_W  = 0.42
+_WHIP_W = 0.36
+_OPS_W  = 0.15
+_TOTAL_W = _ERA_W + _WHIP_W + _OPS_W  # 0.93
 
-def simulate_runs(offense_rpg: float, opponent_era: float, home_boost: float = 0.0) -> int:
-    era_factor = max(0.65, min(1.35, (5.00 - opponent_era) / 2.5 + 1.0))
-    mean_runs = offense_rpg * era_factor + home_boost
+# Explicit home field advantage in probability points (tunable)
+HOME_FIELD_ADVANTAGE = 0.04
+
+MODEL_VERSION = "v0.2-backtest-weighted"
+
+
+def simulate_runs(offense: dict, opponent: dict) -> int:
+    # ERA factor: opponent ERA vs. 5.00 baseline (higher opp ERA = more runs)
+    era_factor = max(0.65, min(1.35, (5.00 - opponent["era"]) / 2.5 + 1.0))
+
+    # WHIP factor: opponent WHIP vs. league average 1.30
+    whip_factor = max(0.65, min(1.35, (1.30 - opponent["whip"]) / 0.40 + 1.0))
+
+    # OPS factor: own OPS vs. league average 0.720
+    ops_factor = max(0.65, min(1.35, offense["ops"] / 0.720))
+
+    # Weighted composite using backtest coefficients
+    composite = (
+        _ERA_W  * era_factor  +
+        _WHIP_W * whip_factor +
+        _OPS_W  * ops_factor
+    ) / _TOTAL_W
+
+    # Base RPG adjusted by run differential signal when available
+    base_rpg = offense["runs_per_game"]
+    run_diff = offense.get("run_differential_per_game")
+    if run_diff is not None:
+        base_rpg += run_diff * 0.1
+
     noise = random.uniform(-2.0, 2.0)
-    return max(0, round(mean_runs + noise))
+    return max(0, round(base_rpg * composite + noise))
 
 
 def run_monte_carlo(
@@ -19,16 +50,8 @@ def run_monte_carlo(
     home_scores = []
 
     for _ in range(sim_count):
-        away_runs = simulate_runs(
-            offense_rpg=away_team["runs_per_game"],
-            opponent_era=home_team["era"],
-            home_boost=0.0,
-        )
-        home_runs = simulate_runs(
-            offense_rpg=home_team["runs_per_game"],
-            opponent_era=away_team["era"],
-            home_boost=0.25,
-        )
+        away_runs = simulate_runs(offense=away_team, opponent=home_team)
+        home_runs = simulate_runs(offense=home_team, opponent=away_team)
 
         away_scores.append(away_runs)
         home_scores.append(home_runs)
@@ -41,10 +64,15 @@ def run_monte_carlo(
             away_wins += 0.5
             home_wins += 0.5
 
-    away_win_pct = away_wins / sim_count
-    home_win_pct = home_wins / sim_count
-    projected_away_score = sum(away_scores) / len(away_scores)
-    projected_home_score = sum(home_scores) / len(home_scores)
+    away_win_pct_raw = away_wins / sim_count
+    home_win_pct_raw = home_wins / sim_count
+
+    # Apply home field advantage as an explicit probability-point adjustment
+    home_win_pct = min(1.0, home_win_pct_raw + HOME_FIELD_ADVANTAGE)
+    away_win_pct = max(0.0, 1.0 - home_win_pct)
+
+    projected_away_score = sum(away_scores) / sim_count
+    projected_home_score = sum(home_scores) / sim_count
     projected_total = projected_away_score + projected_home_score
     confidence_score = abs(home_win_pct - away_win_pct) * 100
 
