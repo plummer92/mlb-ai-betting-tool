@@ -112,6 +112,25 @@ def calculate_edge_for_game(
     max_ev = max(ev_away_final, ev_home_final, ev_over, ev_under)
     tier = confidence_tier(max_edge, max_ev)
 
+    # ── Movement direction relative to model recommendation ──
+    movement_direction: str | None = None
+    if movement:
+        model_prefers_away = model_away > model_home
+        if model_prefers_away:
+            if movement.sharp_away:
+                movement_direction = "toward_model"
+            elif movement.sharp_home:
+                movement_direction = "away_from_model"
+            else:
+                movement_direction = "neutral"
+        else:
+            if movement.sharp_home:
+                movement_direction = "toward_model"
+            elif movement.sharp_away:
+                movement_direction = "away_from_model"
+            else:
+                movement_direction = "neutral"
+
     result = EdgeResult(
         game_id=game_id,
         prediction_id=prediction.prediction_id,
@@ -134,6 +153,7 @@ def calculate_edge_for_game(
         recommended_play=play,
         confidence_tier=tier,
         edge_pct=round(max_edge, 4),
+        movement_direction=movement_direction,
     )
 
     db.add(result)
