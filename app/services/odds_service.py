@@ -134,21 +134,64 @@ def compute_line_movement(
     return movement
 
 
+# Static mapping from The Odds API team names → MLB Stats API team names.
+# Handles multi-word nicknames (Red Sox, Blue Jays, White Sox) that break
+# last-word matching, and tracks franchise relocations (Athletics → Sacramento).
+_ODDS_TO_MLB: dict[str, str] = {
+    "Arizona Diamondbacks":    "Arizona Diamondbacks",
+    "Atlanta Braves":          "Atlanta Braves",
+    "Baltimore Orioles":       "Baltimore Orioles",
+    "Boston Red Sox":          "Boston Red Sox",
+    "Chicago Cubs":            "Chicago Cubs",
+    "Chicago White Sox":       "Chicago White Sox",
+    "Cincinnati Reds":         "Cincinnati Reds",
+    "Cleveland Guardians":     "Cleveland Guardians",
+    "Colorado Rockies":        "Colorado Rockies",
+    "Detroit Tigers":          "Detroit Tigers",
+    "Houston Astros":          "Houston Astros",
+    "Kansas City Royals":      "Kansas City Royals",
+    "Los Angeles Angels":      "Los Angeles Angels",
+    "Los Angeles Dodgers":     "Los Angeles Dodgers",
+    "Miami Marlins":           "Miami Marlins",
+    "Milwaukee Brewers":       "Milwaukee Brewers",
+    "Minnesota Twins":         "Minnesota Twins",
+    "New York Mets":           "New York Mets",
+    "New York Yankees":        "New York Yankees",
+    "Oakland Athletics":       "Oakland Athletics",
+    "Philadelphia Phillies":   "Philadelphia Phillies",
+    "Pittsburgh Pirates":      "Pittsburgh Pirates",
+    "San Diego Padres":        "San Diego Padres",
+    "San Francisco Giants":    "San Francisco Giants",
+    "Seattle Mariners":        "Seattle Mariners",
+    "St. Louis Cardinals":     "St. Louis Cardinals",
+    "Tampa Bay Rays":          "Tampa Bay Rays",
+    "Texas Rangers":           "Texas Rangers",
+    "Toronto Blue Jays":       "Toronto Blue Jays",
+    "Washington Nationals":    "Washington Nationals",
+    # 2025 relocation variants that may appear in The Odds API
+    "Athletics":               "Oakland Athletics",
+    "Sacramento Athletics":    "Oakland Athletics",
+}
+
+
 def _match_game(db: Session, event: dict) -> Game | None:
     """
-    Match an odds API event to a game in our DB by team name.
-    Uses the last word of the team name (e.g. "Yankees", "Red Sox" → "Sox").
+    Match an odds API event to a game in our DB using the static team-name
+    lookup table. Falls back to a case-insensitive partial match if the name
+    isn't in the map (handles future expansions / API naming drift).
     """
-    away_name = event.get("away_team", "")
-    home_name = event.get("home_team", "")
+    raw_away = event.get("away_team", "")
+    raw_home = event.get("home_team", "")
+    away_name = _ODDS_TO_MLB.get(raw_away, raw_away)
+    home_name = _ODDS_TO_MLB.get(raw_home, raw_home)
     today = datetime.now(timezone.utc).date()
 
     return (
         db.query(Game)
         .filter(
             Game.game_date == today,
-            Game.away_team.ilike(f"%{away_name.split()[-1]}%"),
-            Game.home_team.ilike(f"%{home_name.split()[-1]}%"),
+            Game.away_team.ilike(away_name),
+            Game.home_team.ilike(home_name),
         )
         .first()
     )

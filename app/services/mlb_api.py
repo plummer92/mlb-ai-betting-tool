@@ -3,6 +3,28 @@ import requests
 
 from app.config import MLB_API_BASE
 
+_INVALID_STAT = {"-.--", "-", "---", ".---", ""}
+
+
+def _safe_float(value, default: float) -> float:
+    """Convert an MLB API stat value to float, returning default for missing/invalid values."""
+    if value is None or value in _INVALID_STAT:
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_int(value, default: int) -> int:
+    """Convert an MLB API stat value to int, returning default for missing/invalid values."""
+    if value is None or value in _INVALID_STAT:
+        return default
+    try:
+        return int(float(value))
+    except (ValueError, TypeError):
+        return default
+
 
 def fetch_schedule_for_date(date_str: str) -> list[dict]:
     url = (
@@ -72,13 +94,13 @@ def _fetch_team_stats_for_season(team_id: int, season: int):
     if games_played < 10:
         return None
     return {
-        "era":          float(pitching_split.get("era", 4.20) or 4.20),
-        "whip":         float(pitching_split.get("whip", 1.30) or 1.30),
-        "runs_allowed": int(pitching_split.get("runsAllowed", 700) or 700),
-        "avg":          float(hitting_split.get("avg", 0.248) or 0.248),
-        "ops":          float(hitting_split.get("ops", 0.720) or 0.720),
-        "home_runs":    int(hitting_split.get("homeRuns", 180) or 180),
-        "runs":         int(hitting_split.get("runs", 700) or 700),
+        "era":          _safe_float(pitching_split.get("era"),          4.20),
+        "whip":         _safe_float(pitching_split.get("whip"),         1.30),
+        "runs_allowed": _safe_int(pitching_split.get("runsAllowed"),    700),
+        "avg":          _safe_float(hitting_split.get("avg"),           0.248),
+        "ops":          _safe_float(hitting_split.get("ops"),           0.720),
+        "home_runs":    _safe_int(hitting_split.get("homeRuns"),        180),
+        "runs":         _safe_int(hitting_split.get("runs"),            700),
         "games_played": games_played,
     }
 
@@ -102,10 +124,10 @@ def fetch_pitcher_stats(pitcher_id: int, season: int) -> dict | None:
         if not split:
             return None
         return {
-            "era":  float(split.get("era",  4.20) or 4.20),
-            "whip": float(split.get("whip", 1.30) or 1.30),
-            "k9":   float(split.get("strikeoutsPer9Inn", 8.5) or 8.5),
-            "bb9":  float(split.get("walksPer9Inn",     3.2) or 3.2),
+            "era":  _safe_float(split.get("era"),                 4.20),
+            "whip": _safe_float(split.get("whip"),                1.30),
+            "k9":   _safe_float(split.get("strikeoutsPer9Inn"),   8.5),
+            "bb9":  _safe_float(split.get("walksPer9Inn"),        3.2),
         }
 
     return _fetch(pitcher_id, season) or _fetch(pitcher_id, season - 1)

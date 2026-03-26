@@ -250,13 +250,13 @@ class GameOutcomeReview(Base):
     id = Column(Integer, primary_key=True)
     game_id = Column(Integer, ForeignKey("games.game_id"), nullable=False, index=True)
     prediction_id = Column(Integer, ForeignKey("predictions.prediction_id"), nullable=False, index=True)
-    edge_result_id = Column(Integer, ForeignKey("edge_results.id"), nullable=False, index=True)
+    edge_result_id = Column(Integer, ForeignKey("edge_results.id"), nullable=True, index=True)
     bet_alert_id = Column(Integer, ForeignKey("bet_alerts.id"), nullable=True, index=True)
 
     game_date = Column(Date, nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
-    pre_game_synopsis = Column(Text, nullable=False)
+    pre_game_synopsis = Column(Text, nullable=True)
     actual_outcome_summary = Column(Text, nullable=False)
 
     recommended_play = Column(String(20), nullable=True)
@@ -264,6 +264,8 @@ class GameOutcomeReview(Base):
 
     model_away_win_pct = Column(Numeric(8, 4), nullable=True)
     model_home_win_pct = Column(Numeric(8, 4), nullable=True)
+    projected_away_score = Column(Numeric(6, 2), nullable=True)
+    projected_home_score = Column(Numeric(6, 2), nullable=True)
     model_total = Column(Numeric(8, 4), nullable=True)
     book_total = Column(Numeric(8, 4), nullable=True)
     edge_pct = Column(Numeric(8, 4), nullable=True)
@@ -275,10 +277,11 @@ class GameOutcomeReview(Base):
     winning_side = Column(String(10), nullable=False)
     bet_result = Column(String(10), nullable=False)
     was_model_correct = Column(Boolean, nullable=False, default=False)
+    total_correct = Column(Boolean, nullable=True)
 
     top_factors_predicted = Column(Text, nullable=True)
     top_factors_actual = Column(Text, nullable=True)
 
     __table_args__ = (
-        UniqueConstraint("game_id", "prediction_id", "edge_result_id", name="uq_outcome_review_triplet"),
+        UniqueConstraint("game_id", "prediction_id", name="uq_outcome_review_prediction"),
     )
