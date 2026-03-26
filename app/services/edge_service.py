@@ -62,18 +62,24 @@ def calculate_edge_for_game(
 
     # ── Totals math ─────────────────────────────────────
     ev_over = ev_under = total_edge = 0.0
+    edge_over = edge_under = 0.0
 
     if odds.total_line and odds.over_odds and odds.under_odds:
         model_total = float(prediction.projected_total)
         book_total = float(odds.total_line)
 
         # Normal distribution approximation for over/under probability.
-        # A better approach once Monte Carlo stores full distributions is to
-        # count what fraction of 1000 sims landed over the line directly.
         model_over_prob = float(1 - norm.cdf(book_total, loc=model_total, scale=TOTAL_STD_DEV))
         model_under_prob = 1 - model_over_prob
 
-        ev_over = calc_ev(model_over_prob, american_to_decimal(odds.over_odds))
+        raw_over = implied_prob_raw(odds.over_odds)
+        raw_under = implied_prob_raw(odds.under_odds)
+        imp_over, imp_under = remove_vig(raw_over, raw_under)
+
+        edge_over  = calc_edge(model_over_prob,  imp_over)
+        edge_under = calc_edge(model_under_prob, imp_under)
+
+        ev_over  = calc_ev(model_over_prob,  american_to_decimal(odds.over_odds))
         ev_under = calc_ev(model_under_prob, american_to_decimal(odds.under_odds))
         total_edge = model_total - book_total
 
@@ -100,16 +106,13 @@ def calculate_edge_for_game(
     net_boost = away_boost + home_boost
 
     # ── Best play + tier ────────────────────────────────
-    edge_over_signal = edge_away if total_edge > 0 else 0.0
-    edge_under_signal = edge_home if total_edge < 0 else 0.0
-
     play = recommended_play(
         edge_away, ev_away_final,
         edge_home, ev_home_final,
-        edge_over_signal, ev_over,
-        edge_under_signal, ev_under,
+        edge_over, ev_over,
+        edge_under, ev_under,
     )
-    max_edge = max(abs(edge_away), abs(edge_home), abs(total_edge / 10))
+    max_edge = max(abs(edge_away), abs(edge_home), abs(edge_over), abs(edge_under))
     max_ev = max(ev_away_final, ev_home_final, ev_over, ev_under)
     tier = confidence_tier(max_edge, max_ev)
 

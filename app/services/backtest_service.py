@@ -56,6 +56,12 @@ def _fetch_season_schedule(season: int) -> list[dict]:
             home = g["teams"]["home"]
             away_pitcher = away.get("probablePitcher") or {}
             home_pitcher = home.get("probablePitcher") or {}
+            away_record = away.get("leagueRecord", {})
+            home_record = home.get("leagueRecord", {})
+            away_w = away_record.get("wins", 0) or 0
+            away_l = away_record.get("losses", 0) or 0
+            home_w = home_record.get("wins", 0) or 0
+            home_l = home_record.get("losses", 0) or 0
             games.append({
                 "game_id":         g["gamePk"],
                 "game_date":       day["date"],
@@ -72,6 +78,8 @@ def _fetch_season_schedule(season: int) -> list[dict]:
                 "home_starter_id": home_pitcher.get("id"),
                 "away_starter_name": away_pitcher.get("fullName"),
                 "home_starter_name": home_pitcher.get("fullName"),
+                "away_win_pct": away_w / (away_w + away_l) if (away_w + away_l) > 0 else 0.5,
+                "home_win_pct": home_w / (home_w + home_l) if (home_w + home_l) > 0 else 0.5,
             })
     return games
 
@@ -103,6 +111,9 @@ def collect_season(db: Session, season: int) -> int:
             away_starter = fetch_pitcher_stats(g["away_starter_id"], season) if g["away_starter_id"] else None
             home_starter = fetch_pitcher_stats(g["home_starter_id"], season) if g["home_starter_id"] else None
 
+            away_run_diff = away_stats["runs"] - away_stats["runs_allowed"]
+            home_run_diff = home_stats["runs"] - home_stats["runs_allowed"]
+
             row_data = dict(
                 game_id=g["game_id"],
                 game_date=date.fromisoformat(g["game_date"]),
@@ -127,6 +138,10 @@ def collect_season(db: Session, season: int) -> int:
                 home_team_ops=home_stats["ops"],
                 away_team_whip=away_stats["whip"],
                 home_team_whip=home_stats["whip"],
+                away_win_pct=g["away_win_pct"],
+                home_win_pct=g["home_win_pct"],
+                away_run_diff=away_run_diff,
+                home_run_diff=home_run_diff,
             )
 
             stmt = pg_insert(BacktestGame).values(**row_data)
@@ -209,4 +224,28 @@ def run_logistic_regression(db: Session, seasons: list[int]) -> BacktestResult:
     db.add(result)
     db.commit()
     db.refresh(result)
+    apply_backtest_weights(result)
     return result
+
+
+def apply_backtest_weights(result: BacktestResult) -> None:
+    """
+    Extract ERA/WHIP/OPS coefficients from a backtest result and push them
+    into the simulator as updated feature weights.
+    """
+    from app.services.simulator import set_weights
+
+    coefs = json.loads(result.coefficients_json)
+    era_abs  = abs(coefs.get("home_era_adv", 0.42))
+    whip_abs = abs(coefs.get("home_whip_adv", 0.36))
+    ops_abs  = abs(coefs.get("home_ops_adv", 0.15))
+
+    # Guard against all-zero coefficients (degenerate regression)
+    if era_abs + whip_abs + ops_abs == 0:
+        return
+
+    set_weights(era_abs, whip_abs, ops_abs)
+    logger.info(
+        "Simulator weights updated from backtest — ERA: %.4f  WHIP: %.4f  OPS: %.4f",
+        era_abs, whip_abs, ops_abs,
+    )

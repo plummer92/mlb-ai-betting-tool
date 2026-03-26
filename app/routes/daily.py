@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from app.db import get_db
 from app.models.schema import Game, Prediction
+from app.services.alert_service import create_and_send_alerts_for_today
 from app.services.mlb_api import fetch_schedule_for_date, fetch_team_stats, fetch_pitcher_stats
 from app.services.feature_builder import build_team_features
 from app.services.simulator import MODEL_VERSION, run_monte_carlo
@@ -20,7 +21,6 @@ async def daily_run(db: Session = Depends(get_db)):
     today = datetime.now(et).date()
     results = {"date": str(today), "steps": {}}
 
-    # Step 1 - sync games
     try:
         games = fetch_schedule_for_date(str(today))
         synced = 0
@@ -60,7 +60,6 @@ async def daily_run(db: Session = Depends(get_db)):
     except Exception as e:
         results["steps"]["sync_games"] = {"status": "error", "detail": str(e)}
 
-    # Step 2 - run Monte Carlo for each game
     game_records = db.query(Game).filter(Game.game_date == today).all()
     mc_ok = []
     mc_err = []
@@ -93,46 +92,42 @@ async def daily_run(db: Session = Depends(get_db)):
     results["steps"]["monte_carlo"] = {
         "status": "ok" if not mc_err else "partial",
         "ran": len(mc_ok),
-        "errors": mc_err
+        "errors": mc_err,
     }
 
-    # Step 3 - sync opening odds
     try:
         stored = await fetch_and_store_odds(db, snapshot_type=SnapshotType.open)
         results["steps"]["sync_odds"] = {"status": "ok", "stored": len(stored)}
     except Exception as e:
         results["steps"]["sync_odds"] = {"status": "error", "detail": str(e)}
 
-    # Step 4 - calculate edges
     try:
         edges = calculate_all_edges_today(db)
         results["steps"]["edges"] = {"status": "ok", "calculated": len(edges)}
     except Exception as e:
         results["steps"]["edges"] = {"status": "error", "detail": str(e)}
 
+    try:
+        alert_result = create_and_send_alerts_for_today(db)
+        results["steps"]["alerts"] = {"status": "ok", **alert_result}
+    except Exception as e:
+        results["steps"]["alerts"] = {"status": "error", "detail": str(e)}
+
     return results
 
 
 @router.post("/pregame-run")
 async def pregame_run(db: Session = Depends(get_db)):
-    """
-    Run ~45 min before first pitch:
-    1. Fetch pregame odds snapshot.
-    2. Compute line movement (open vs pregame) for each game.
-    3. Recalculate edges with movement signal baked in.
-    """
     et = ZoneInfo("America/New_York")
     today = datetime.now(et).date()
     results = {"date": str(today), "steps": {}}
 
-    # Step 1 — pregame odds snapshot
     try:
         stored = await fetch_and_store_odds(db, snapshot_type=SnapshotType.pregame)
         results["steps"]["sync_pregame_odds"] = {"status": "ok", "stored": len(stored)}
     except Exception as e:
         results["steps"]["sync_pregame_odds"] = {"status": "error", "detail": str(e)}
 
-    # Step 2 — line movement
     game_records = db.query(Game).filter(Game.game_date == today).all()
     mv_ok, mv_err = [], []
     for game in game_records:
@@ -148,11 +143,16 @@ async def pregame_run(db: Session = Depends(get_db)):
         "errors": mv_err,
     }
 
-    # Step 3 — recalculate edges with movement signal
     try:
         edges = calculate_all_edges_today(db)
         results["steps"]["edges"] = {"status": "ok", "calculated": len(edges)}
     except Exception as e:
         results["steps"]["edges"] = {"status": "error", "detail": str(e)}
+
+    try:
+        alert_result = create_and_send_alerts_for_today(db)
+        results["steps"]["alerts"] = {"status": "ok", **alert_result}
+    except Exception as e:
+        results["steps"]["alerts"] = {"status": "error", "detail": str(e)}
 
     return results

@@ -1,10 +1,20 @@
 import random
 
 # Backtest-validated feature weights (logistic regression coefficients, sprint 3)
+# These can be updated at runtime via set_weights() when a new backtest runs.
 _ERA_W  = 0.42
 _WHIP_W = 0.36
 _OPS_W  = 0.15
 _TOTAL_W = _ERA_W + _WHIP_W + _OPS_W  # 0.93
+
+
+def set_weights(era_w: float, whip_w: float, ops_w: float) -> None:
+    """Update simulator feature weights from backtest regression coefficients."""
+    global _ERA_W, _WHIP_W, _OPS_W, _TOTAL_W
+    _ERA_W   = era_w
+    _WHIP_W  = whip_w
+    _OPS_W   = ops_w
+    _TOTAL_W = _ERA_W + _WHIP_W + _OPS_W
 
 # Explicit home field advantage in probability points (tunable)
 HOME_FIELD_ADVANTAGE = 0.04
