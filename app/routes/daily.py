@@ -11,6 +11,7 @@ from app.services.feature_builder import build_team_features
 from app.services.simulator import MODEL_VERSION, run_monte_carlo
 from app.services.odds_service import fetch_and_store_odds, compute_line_movement, SnapshotType
 from app.services.edge_service import calculate_all_edges_today
+from app.services.review_service import resolve_completed_games
 
 router = APIRouter(prefix="/api", tags=["daily"])
 
@@ -20,6 +21,12 @@ async def daily_run(db: Session = Depends(get_db)):
     et = ZoneInfo("America/New_York")
     today = datetime.now(et).date()
     results = {"date": str(today), "steps": {}}
+
+    try:
+        resolve_result = resolve_completed_games(db)
+        results["steps"]["resolve_yesterday"] = {"status": "ok", **resolve_result}
+    except Exception as e:
+        results["steps"]["resolve_yesterday"] = {"status": "error", "detail": str(e)}
 
     try:
         games = fetch_schedule_for_date(str(today))

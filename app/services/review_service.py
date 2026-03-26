@@ -5,25 +5,11 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
-from app.config import POSTGAME_LOOKBACK_HOURS
 from app.models.schema import BetAlert, EdgeResult, Game, GameOutcomeReview, Prediction
 from app.services.mlb_api import fetch_schedule_for_date
 from app.services.synopsis_service import build_postgame_summary
 
 ET = ZoneInfo("America/New_York")
-UTC = ZoneInfo("UTC")
-
-
-def _parse_start_time(start_time: str | None):
-    if not start_time:
-        return None
-    try:
-        dt = datetime.fromisoformat(start_time)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        return dt
-    except Exception:
-        return None
 
 
 def _refresh_game_results_for_dates(db: Session, dates: set):
@@ -68,43 +54,27 @@ def _bet_result(play: str | None, away_score: int, home_score: int, book_total: 
 
 
 def resolve_completed_games(db: Session) -> dict:
-    now_et = datetime.now(ET)
-    cutoff = now_et - timedelta(hours=POSTGAME_LOOKBACK_HOURS)
+    yesterday = datetime.now(ET).date() - timedelta(days=1)
 
-    rows = (
-        db.query(BetAlert, Game, EdgeResult, Prediction)
-        .join(Game, Game.game_id == BetAlert.game_id)
-        .join(EdgeResult, EdgeResult.id == BetAlert.edge_result_id)
-        .join(Prediction, Prediction.prediction_id == BetAlert.prediction_id)
-        .filter(BetAlert.bet_result.is_(None))
-        .all()
-    )
+    def _query_unresolved():
+        return (
+            db.query(BetAlert, Game, EdgeResult, Prediction)
+            .join(Game, Game.game_id == BetAlert.game_id)
+            .join(EdgeResult, EdgeResult.id == BetAlert.edge_result_id)
+            .join(Prediction, Prediction.prediction_id == BetAlert.prediction_id)
+            .filter(BetAlert.bet_result.is_(None), Game.game_date >= yesterday)
+            .all()
+        )
 
+    rows = _query_unresolved()
     if rows:
         _refresh_game_results_for_dates(db, {game.game_date for _, game, _, _ in rows})
+        rows = _query_unresolved()
 
     resolved = 0
     skipped = 0
 
-    rows = (
-        db.query(BetAlert, Game, EdgeResult, Prediction)
-        .join(Game, Game.game_id == BetAlert.game_id)
-        .join(EdgeResult, EdgeResult.id == BetAlert.edge_result_id)
-        .join(Prediction, Prediction.prediction_id == BetAlert.prediction_id)
-        .filter(BetAlert.bet_result.is_(None))
-        .all()
-    )
-
     for alert, game, edge, prediction in rows:
-        game_dt = _parse_start_time(game.start_time)
-        if game_dt is None:
-            skipped += 1
-            continue
-
-        if game_dt.astimezone(ET) > cutoff:
-            skipped += 1
-            continue
-
         away_score = game.final_away_score
         home_score = game.final_home_score
         if away_score is None or home_score is None:

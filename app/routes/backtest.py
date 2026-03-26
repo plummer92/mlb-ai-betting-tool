@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.models.schema import BacktestResult
 from app.services.backtest_service import collect_season, run_logistic_regression
 
@@ -16,7 +16,6 @@ DEFAULT_SEASONS = [2022, 2023, 2024]
 def collect_backtest_data(
     seasons: str = "2022,2023,2024",
     background_tasks: BackgroundTasks = BackgroundTasks(),
-    db: Session = Depends(get_db),
 ):
     """
     Fetch historical game results and team stats for the given seasons.
@@ -26,10 +25,12 @@ def collect_backtest_data(
     season_list = [int(s.strip()) for s in seasons.split(",")]
 
     def _run():
-        totals = {}
-        for s in season_list:
-            totals[s] = collect_season(db, s)
-        return totals
+        db = SessionLocal()
+        try:
+            for s in season_list:
+                collect_season(db, s)
+        finally:
+            db.close()
 
     background_tasks.add_task(_run)
     return {"message": "Collection started", "seasons": season_list}
