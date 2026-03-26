@@ -2,6 +2,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -15,9 +16,16 @@ router = APIRouter(prefix="/api/edges", tags=["edges"])
 def get_today_edges(db: Session = Depends(get_db)):
     et = ZoneInfo("America/New_York")
     today_start = datetime.now(et).replace(hour=0, minute=0, second=0, microsecond=0)
+    # Subquery: highest id per game_id among today's edges
+    latest_ids = (
+        db.query(func.max(EdgeResult.id).label("max_id"))
+        .filter(EdgeResult.calculated_at >= today_start)
+        .group_by(EdgeResult.game_id)
+        .subquery()
+    )
     results = (
         db.query(EdgeResult)
-        .filter(EdgeResult.calculated_at >= today_start)
+        .filter(EdgeResult.id.in_(db.query(latest_ids.c.max_id)))
         .order_by(EdgeResult.edge_pct.desc())
         .all()
     )

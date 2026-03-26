@@ -7,7 +7,9 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models.schema import BetAlert, GameOutcomeReview
+from app.models.schema import BetAlert, GameOutcomeReview, Prediction
+
+CURRENT_MODEL = "v0.2-backtest-weighted"
 from app.services.alert_service import create_and_send_alerts_for_today
 from app.services.review_service import resolve_completed_games
 
@@ -71,20 +73,38 @@ def recent_reviews(limit: int = 25, db: Session = Depends(get_db)):
 
 @router.get("/reviews/accuracy")
 def reviews_accuracy(db: Session = Depends(get_db)):
-    rows = db.query(GameOutcomeReview).all()
-    total = len(rows)
+    pairs = (
+        db.query(GameOutcomeReview, Prediction)
+        .join(Prediction, Prediction.prediction_id == GameOutcomeReview.prediction_id)
+        .all()
+    )
+    total = len(pairs)
     if total == 0:
         return {
             "total_graded": 0,
             "winner_accuracy_pct": None,
             "total_accuracy_pct": None,
+            "current_model": CURRENT_MODEL,
+            "current_model_graded": 0,
+            "current_model_winner_accuracy_pct": None,
+            "current_model_total_accuracy_pct": None,
             "last_10": [],
         }
 
-    winner_correct = sum(1 for r in rows if r.was_model_correct)
-    total_rows = [r for r in rows if r.total_correct is not None]
+    all_reviews = [r for r, _ in pairs]
+    current_reviews = [r for r, p in pairs if p.model_version == CURRENT_MODEL]
+
+    # ── All predictions ────────────────────────────────────────────────
+    winner_correct = sum(1 for r in all_reviews if r.was_model_correct)
+    total_rows = [r for r in all_reviews if r.total_correct is not None]
     total_correct_count = sum(1 for r in total_rows if r.total_correct)
 
+    # ── Current model only ─────────────────────────────────────────────
+    cur_winner_correct = sum(1 for r in current_reviews if r.was_model_correct)
+    cur_total_rows = [r for r in current_reviews if r.total_correct is not None]
+    cur_total_correct = sum(1 for r in cur_total_rows if r.total_correct)
+
+    rows = all_reviews  # alias for last_10 sort below
     last_10 = sorted(rows, key=lambda r: r.created_at or datetime.min, reverse=True)[:10]
 
     return {
@@ -92,6 +112,14 @@ def reviews_accuracy(db: Session = Depends(get_db)):
         "winner_accuracy_pct": round(winner_correct / total * 100, 1),
         "total_accuracy_pct": (
             round(total_correct_count / len(total_rows) * 100, 1) if total_rows else None
+        ),
+        "current_model": CURRENT_MODEL,
+        "current_model_graded": len(current_reviews),
+        "current_model_winner_accuracy_pct": (
+            round(cur_winner_correct / len(current_reviews) * 100, 1) if current_reviews else None
+        ),
+        "current_model_total_accuracy_pct": (
+            round(cur_total_correct / len(cur_total_rows) * 100, 1) if cur_total_rows else None
         ),
         "last_10": [
             {
