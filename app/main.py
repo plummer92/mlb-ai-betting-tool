@@ -12,6 +12,7 @@ from app.routes.backtest import router as backtest_router
 from app.routes.ranked import router as ranked_router
 from app.routes.debug import router as debug_router
 from app.routes.reviews import router as reviews_router
+from app.routes.dashboard import router as dashboard_router
 
 from app.scheduler import scheduler
 
@@ -41,6 +42,7 @@ app.include_router(backtest_router)
 app.include_router(ranked_router)
 app.include_router(debug_router)
 app.include_router(reviews_router)
+app.include_router(dashboard_router)
 
 
 @app.get("/")

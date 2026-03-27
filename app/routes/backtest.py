@@ -4,6 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal, get_db
+from app.models.schema import BacktestResult
 from app.services.backtest_service import collect_season, run_logistic_regression
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
@@ -62,4 +63,25 @@ def run_backtest_route(
         "log_loss": result.log_loss,
         "feature_ranks": json.loads(result.feature_ranks_json),
         "coefficients": json.loads(result.coefficients_json),
+    }
+
+
+@router.get("/latest")
+def get_latest_backtest(db: Session = Depends(get_db)):
+    """Return the most recent backtest result, or null if none exists."""
+    result = (
+        db.query(BacktestResult)
+        .order_by(BacktestResult.run_at.desc())
+        .first()
+    )
+    if not result:
+        return None
+    return {
+        "run_at": result.run_at.isoformat() if result.run_at else None,
+        "seasons": result.seasons,
+        "n_games": result.n_games,
+        "accuracy": result.accuracy,
+        "cv_accuracy": result.cv_accuracy,
+        "log_loss": result.log_loss,
+        "feature_ranks": json.loads(result.feature_ranks_json),
     }
