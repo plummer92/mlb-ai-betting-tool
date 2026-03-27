@@ -7,12 +7,13 @@ from apscheduler.triggers.date import DateTrigger
 
 from app.db import SessionLocal
 from app.models.schema import Game, Prediction, SnapshotType
-from app.services.alert_service import create_and_send_alerts_for_today
+from app.services.alert_service import create_and_send_alert_for_game, create_and_send_alerts_for_today
 from app.services.backtest_service import run_logistic_regression
 from app.services.edge_service import calculate_all_edges_today, calculate_edge_for_game
 from app.services.feature_builder import build_team_features
 from app.services.mlb_api import fetch_pitcher_stats, fetch_schedule_for_date, fetch_team_stats
 from app.services.odds_service import compute_line_movement, fetch_and_store_odds
+from app.services.ranked_alerts import send_ranked_bets_to_discord_job
 from app.services.review_service import resolve_completed_games
 from app.services.simulator import MODEL_VERSION, run_monte_carlo
 
@@ -28,6 +29,8 @@ def resolve_yesterday_job():
     try:
         result = resolve_completed_games(db)
         print(f"[scheduler] 9am resolve: {result}")
+    except Exception as e:
+        print(f"[scheduler] Resolve error: {e}")
     finally:
         db.close()
 
@@ -74,6 +77,7 @@ def sync_today_games_job():
         db.commit()
         print(f"[scheduler] Game sync: {len(games)} total, {synced} new")
     except Exception as e:
+        db.rollback()
         print(f"[scheduler] Game sync error: {e}")
     finally:
         db.close()
@@ -86,6 +90,8 @@ async def morning_odds_snapshot():
     try:
         stored = await fetch_and_store_odds(db, snapshot_type=SnapshotType.open)
         print(f"[scheduler] Morning snapshot: {len(stored)} odds rows stored")
+    except Exception as e:
+        print(f"[scheduler] Morning odds error: {e}")
     finally:
         db.close()
 
@@ -97,7 +103,6 @@ def run_monte_carlo_and_schedule_pregame():
     try:
         today = datetime.now(ET).date()
         games = db.query(Game).filter(Game.game_date == today).all()
-
         ok, err = [], []
         for game in games:
             try:
@@ -126,7 +131,6 @@ def run_monte_carlo_and_schedule_pregame():
             except Exception as e:
                 db.rollback()
                 err.append({"game_id": game.game_id, "error": str(e)})
-
         print(f"[scheduler] Monte Carlo: {len(ok)} ok, {len(err)} errors")
 
         # Schedule per-game pregame jobs (T-45 min before first pitch)
@@ -140,15 +144,12 @@ def run_monte_carlo_and_schedule_pregame():
             except ValueError:
                 print(f"[scheduler] Could not parse start_time for game {game.game_id}: {game.start_time}")
                 continue
-
             pregame_trigger_time = game_dt - timedelta(minutes=45)
             if pregame_trigger_time <= datetime.now(UTC):
                 continue
-
             job_id = f"pregame_{game.game_id}"
             if scheduler.get_job(job_id):
                 continue
-
             scheduler.add_job(
                 run_pregame_snapshot,
                 trigger=DateTrigger(run_date=pregame_trigger_time),
@@ -157,7 +158,8 @@ def run_monte_carlo_and_schedule_pregame():
                 replace_existing=True,
             )
             print(f"[scheduler] Pregame job scheduled for game {game.game_id} at {pregame_trigger_time}")
-
+    except Exception as e:
+        print(f"[scheduler] Monte Carlo job error: {e}")
     finally:
         db.close()
 
@@ -188,13 +190,12 @@ def send_morning_alerts_job():
         db.close()
 
 
-# ── Per-game pregame snapshot: odds + edges + alerts (T-45 min) ─────────────
+# ── Per-game pregame snapshot: odds + movement + edge + alert (T-45 min) ────
 async def run_pregame_snapshot(game_id: int):
     db = SessionLocal()
     try:
         stored = await fetch_and_store_odds(db, snapshot_type=SnapshotType.pregame)
         print(f"[scheduler] Pregame snapshot stored: {len(stored)} rows")
-
         movement = compute_line_movement(db, game_id)
         if movement:
             print(
@@ -204,12 +205,13 @@ async def run_pregame_snapshot(game_id: int):
                 f"sharp_away={movement.sharp_away}, "
                 f"sharp_home={movement.sharp_home}"
             )
-
         calculate_edge_for_game(db, game_id, movement=movement)
         print(f"[scheduler] Edge recalculated for game {game_id}")
-
-        alert_result = create_and_send_alerts_for_today(db)
-        print(f"[scheduler] Alerts: {alert_result}")
+        # Alert for this game only — deduped on (game_id, edge_result_id)
+        alert_result = create_and_send_alert_for_game(db, game_id)
+        print(f"[scheduler] Pregame alert for game {game_id}: {alert_result}")
+    except Exception as e:
+        print(f"[scheduler] Pregame snapshot error for game {game_id}: {e}")
     finally:
         db.close()
 
@@ -221,6 +223,8 @@ def resolve_completed_games_job():
     try:
         result = resolve_completed_games(db)
         print(f"[scheduler] Postgame resolver: {result}")
+    except Exception as e:
+        print(f"[scheduler] Postgame resolve error: {e}")
     finally:
         db.close()
 
@@ -240,3 +244,13 @@ def weekly_backtest_job():
         print(f"[scheduler] Weekly backtest failed: {e}")
     finally:
         db.close()
+
+
+# ── 11:00 AM ET daily: send ranked bets summary board to Discord ─────────────
+@scheduler.scheduled_job(CronTrigger(hour=11, minute=0, timezone="America/New_York"))
+def ranked_bets_discord_job():
+    try:
+        result = send_ranked_bets_to_discord_job(limit=10, active_only=True)
+        print(f"[scheduler] Discord summary: {result}")
+    except Exception as e:
+        print(f"[scheduler] Discord summary error: {e}")

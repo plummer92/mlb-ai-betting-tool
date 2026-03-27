@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import ALERT_CONFIDENCE_LEVELS, ALERT_DESTINATION, ALERT_MIN_EDGE, ALERT_MIN_EV
@@ -117,3 +118,77 @@ def create_and_send_alerts_for_today(db: Session) -> dict:
         "skipped": skipped,
         "failed": failed,
     }
+
+
+def create_and_send_alert_for_game(db: Session, game_id: int) -> dict:
+    """
+    Send an alert for a single game only.
+    Dedupes on (game_id, edge_result_id) so morning and pregame alerts can
+    both fire (different edge_result_id), but the exact same calculation
+    is never sent twice.
+    """
+    today = datetime.now(ET).date()
+
+    row = (
+        db.query(EdgeResult, Game, Prediction)
+        .join(Game, Game.game_id == EdgeResult.game_id)
+        .join(Prediction, Prediction.prediction_id == EdgeResult.prediction_id)
+        .filter(Game.game_id == game_id, Game.game_date == today)
+        .order_by(EdgeResult.calculated_at.desc())
+        .first()
+    )
+
+    if not row:
+        return {"created": 0, "sent": 0, "skipped": 1, "reason": "no edge found for game"}
+
+    edge, game, prediction = row
+
+    # Dedupe: skip if this exact edge_result was already alerted
+    already = (
+        db.query(BetAlert)
+        .filter(
+            BetAlert.game_id == game_id,
+            BetAlert.edge_result_id == edge.id,
+        )
+        .first()
+    )
+    if already:
+        return {"created": 0, "sent": 0, "skipped": 1, "reason": "already alerted for this edge_result"}
+
+    if not qualifies_for_alert(edge):
+        return {"created": 0, "sent": 0, "skipped": 1, "reason": "does not qualify (ev/edge/confidence)"}
+
+    synopsis, rationale = build_edge_synopsis(game, edge)
+    ev = _best_ev_for_play(edge)
+
+    alert = BetAlert(
+        game_id=game.game_id,
+        prediction_id=prediction.prediction_id,
+        edge_result_id=edge.id,
+        game_date=game.game_date,
+        play=edge.recommended_play,
+        edge_pct=edge.edge_pct,
+        ev=ev,
+        confidence=edge.confidence_tier,
+        synopsis=synopsis,
+        rationale_json=json.dumps(rationale),
+        sent_to=ALERT_DESTINATION,
+        status="pending",
+    )
+    db.add(alert)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        return {"created": 0, "sent": 0, "skipped": 1, "reason": "duplicate (race condition)"}
+
+    ok, error = send_alert_message(synopsis)
+    if ok:
+        alert.status = "sent"
+        db.commit()
+        return {"created": 1, "sent": 1, "skipped": 0}
+    else:
+        alert.status = "failed"
+        alert.error_message = error
+        db.commit()
+        return {"created": 1, "sent": 0, "skipped": 0, "failed": 1, "error": error}

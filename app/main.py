@@ -9,6 +9,9 @@ from app.routes.model import router as model_router
 from app.routes.edges import router as edges_router
 from app.routes.daily import router as daily_router
 from app.routes.backtest import router as backtest_router
+from app.routes.ranked import router as ranked_router
+from app.routes.debug import router as debug_router
+from app.routes.reviews import router as reviews_router
 
 from app.scheduler import scheduler
 
@@ -35,6 +38,9 @@ app.include_router(model_router)
 app.include_router(edges_router)
 app.include_router(daily_router)
 app.include_router(backtest_router)
+app.include_router(ranked_router)
+app.include_router(debug_router)
+app.include_router(reviews_router)
 
 
 @app.get("/")
