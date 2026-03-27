@@ -1,48 +1,40 @@
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.schema import EdgeResult
-from app.models.pydantic_models import EdgeResultOut
 
 router = APIRouter(prefix="/api/edges", tags=["edges"])
 
 
-@router.get("/today", response_model=list[EdgeResultOut])
-def get_today_edges(db: Session = Depends(get_db)):
-    et = ZoneInfo("America/New_York")
-    today_start = datetime.now(et).replace(hour=0, minute=0, second=0, microsecond=0)
-    # Subquery: highest id per game_id among today's edges
-    latest_ids = (
-        db.query(func.max(EdgeResult.id).label("max_id"))
-        .filter(EdgeResult.calculated_at >= today_start)
+@router.get("/top")
+def get_top_edges(
+    limit: int = Query(default=10, le=100),
+    db: Session = Depends(get_db),
+):
+    # Latest edge row per game only
+    subq = (
+        db.query(
+            EdgeResult.game_id,
+            func.max(EdgeResult.calculated_at).label("latest_time"),
+        )
         .group_by(EdgeResult.game_id)
         .subquery()
     )
-    results = (
+
+    rows = (
         db.query(EdgeResult)
-        .filter(EdgeResult.id.in_(db.query(latest_ids.c.max_id)))
+        .join(
+            subq,
+            (EdgeResult.game_id == subq.c.game_id)
+            & (EdgeResult.calculated_at == subq.c.latest_time),
+        )
         .order_by(EdgeResult.edge_pct.desc())
+        .limit(limit)
         .all()
     )
-    return results
 
-
-@router.get("/top")
-def get_top_edges(db: Session = Depends(get_db)):
-    et = ZoneInfo("America/New_York")
-    today_start = datetime.now(et).replace(hour=0, minute=0, second=0, microsecond=0)
-    results = (
-        db.query(EdgeResult)
-        .filter(EdgeResult.calculated_at >= today_start)
-        .order_by(EdgeResult.edge_pct.desc())
-        .limit(10)
-        .all()
-    )
     return [
         {
             "game_id": r.game_id,
@@ -51,7 +43,8 @@ def get_top_edges(db: Session = Depends(get_db)):
             "ev_away": float(r.ev_away) if r.ev_away is not None else None,
             "ev_home": float(r.ev_home) if r.ev_home is not None else None,
             "confidence": r.confidence_tier,
+            "pitching_edge_score": float(r.pitching_edge_score) if getattr(r, "pitching_edge_score", None) is not None else None,
             "calculated_at": r.calculated_at.isoformat() if r.calculated_at else None,
         }
-        for r in results
+        for r in rows
     ]
