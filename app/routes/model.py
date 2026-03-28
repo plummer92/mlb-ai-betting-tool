@@ -1,8 +1,14 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.schema import Game, Prediction
+
+ET = ZoneInfo("America/New_York")
 from app.models.pydantic_models import PredictionOut
 from app.services.feature_builder import build_team_features
 from app.services.mlb_api import fetch_team_stats
@@ -47,3 +53,40 @@ def run_model(game_id: int, db: Session = Depends(get_db)):
     db.refresh(prediction)
 
     return prediction
+
+
+@router.get("/predictions/today")
+def get_today_predictions(db: Session = Depends(get_db)):
+    today = datetime.now(ET).date()
+
+    subq = (
+        db.query(
+            Prediction.game_id,
+            func.max(Prediction.prediction_id).label("max_id"),
+        )
+        .join(Game, Prediction.game_id == Game.game_id)
+        .filter(Game.game_date == today)
+        .group_by(Prediction.game_id)
+        .subquery()
+    )
+
+    rows = (
+        db.query(Prediction)
+        .join(subq, Prediction.prediction_id == subq.c.max_id)
+        .all()
+    )
+
+    return [
+        {
+            "game_id": r.game_id,
+            "model_version": r.model_version,
+            "away_win_pct": r.away_win_pct,
+            "home_win_pct": r.home_win_pct,
+            "projected_away_score": r.projected_away_score,
+            "projected_home_score": r.projected_home_score,
+            "projected_total": r.projected_total,
+            "confidence_score": r.confidence_score,
+            "recommended_side": r.recommended_side,
+        }
+        for r in rows
+    ]

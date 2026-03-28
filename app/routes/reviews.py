@@ -42,6 +42,8 @@ def get_recent_reviews(
         {
             "date": str(r.game_date),
             "matchup": f"{g.away_team} @ {g.home_team}",
+            "away_team": g.away_team,
+            "home_team": g.home_team,
             "predicted_side": r.recommended_play,
             "edge_pct": float(r.edge_pct) if r.edge_pct is not None else None,
             "ev": float(r.ev) if r.ev is not None else None,
@@ -49,6 +51,12 @@ def get_recent_reviews(
             "actual_winner": r.winning_side,
             "bet_result": r.bet_result,
             "model_correct": r.was_model_correct,
+            "actual_outcome_summary": r.actual_outcome_summary,
+            "projected_away_score": float(r.projected_away_score) if r.projected_away_score is not None else None,
+            "projected_home_score": float(r.projected_home_score) if r.projected_home_score is not None else None,
+            "model_total": float(r.model_total) if r.model_total is not None else None,
+            "actual_total": (r.final_away_score or 0) + (r.final_home_score or 0),
+            "confidence_tier": r.confidence_tier,
         }
         for r, g in rows
     ]
