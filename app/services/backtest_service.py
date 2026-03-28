@@ -35,7 +35,9 @@ FEATURE_NAMES = [
     "home_starter_era_adv", # away_starter_era - home_starter_era (may be 0 if no data)
     "win_pct_adv",          # home_win_pct - away_win_pct (replaces two separate features)
     "park_factor_adv",      # venue-based park factor from PARK_FACTORS lookup
-    "bullpen_era_adv",      # away_bullpen_era - home_bullpen_era (positive = home bullpen better)
+    # bullpen_era_adv excluded: pitchingType=R split returns team ERA, not reliever-only;
+    #   coefficient was identical to home_era_adv (-0.071). Re-add once API returns
+    #   distinct reliever ERA. Columns (home_bullpen_era, away_bullpen_era) kept in DB.
     # run_diff_adv excluded: multicollinear with win_pct_adv — coefficient inverts sign
 ]
 
@@ -266,12 +268,8 @@ def run_logistic_regression(db: Session, seasons: list[int]) -> BacktestResult:
         )
         win_pct_adv     = (r.home_win_pct or 0.5) - (r.away_win_pct or 0.5)
         park_factor_adv = PARK_FACTORS.get(r.venue or "", 0.0)
-        # Bullpen ERA adv: fall back to team ERA when bullpen split not collected
-        away_bp = r.away_bullpen_era if r.away_bullpen_era is not None else (r.away_team_era or 4.2)
-        home_bp = r.home_bullpen_era if r.home_bullpen_era is not None else (r.home_team_era or 4.2)
-        bullpen_era_adv = away_bp - home_bp
         X.append([home_era_adv, home_whip_adv, home_ops_adv, home_starter_era_adv,
-                   win_pct_adv, park_factor_adv, bullpen_era_adv])
+                   win_pct_adv, park_factor_adv])
         y.append(int(r.home_win))
 
     scaler = StandardScaler()
