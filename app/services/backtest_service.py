@@ -34,8 +34,8 @@ FEATURE_NAMES = [
     "home_ops_adv",         # home_ops  - away_ops
     "home_starter_era_adv", # away_starter_era - home_starter_era (may be 0 if no data)
     "win_pct_adv",          # home_win_pct - away_win_pct (replaces two separate features)
-    "run_diff_adv",         # home_run_diff - away_run_diff
     "park_factor_adv",      # venue-based park factor from PARK_FACTORS lookup
+    # run_diff_adv excluded: multicollinear with win_pct_adv — coefficient inverts sign
 ]
 
 
@@ -251,11 +251,10 @@ def run_logistic_regression(db: Session, seasons: list[int]) -> BacktestResult:
             (r.away_starter_era or r.away_team_era or 4.2)
             - (r.home_starter_era or r.home_team_era or 4.2)
         )
-        win_pct_adv   = (r.home_win_pct or 0.5) - (r.away_win_pct or 0.5)
-        run_diff_adv  = (r.home_run_diff or 0) - (r.away_run_diff or 0)
+        win_pct_adv     = (r.home_win_pct or 0.5) - (r.away_win_pct or 0.5)
         park_factor_adv = PARK_FACTORS.get(r.venue or "", 0.0)
         X.append([home_era_adv, home_whip_adv, home_ops_adv, home_starter_era_adv,
-                   win_pct_adv, run_diff_adv, park_factor_adv])
+                   win_pct_adv, park_factor_adv])
         y.append(int(r.home_win))
 
     scaler = StandardScaler()
