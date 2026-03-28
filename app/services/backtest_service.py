@@ -5,6 +5,7 @@ then fits a logistic regression to find which features actually predict outcomes
 """
 import json
 import logging
+import time
 from datetime import date
 
 import requests
@@ -21,6 +22,9 @@ from app.services.mlb_api import fetch_pitcher_stats, fetch_team_stats
 
 logger = logging.getLogger(__name__)
 
+# How often to commit within a season loop (keeps the Neon connection alive)
+_COMMIT_INTERVAL = 50
+
 # Features used for logistic regression (all expressed as home-minus-away advantages)
 FEATURE_NAMES = [
     "home_era_adv",    # away_era  - home_era  (positive = home pitches better)
@@ -34,6 +38,37 @@ FEATURE_NAMES = [
 
 # ── Season collection ─────────────────────────────────────────────────────────
 
+def _get_with_retry(url: str, max_attempts: int = 3, base_backoff: float = 3.0) -> requests.Response:
+    """
+    GET with simple retry/backoff for transient errors (429, 5xx, timeouts).
+    Raises on the final attempt.
+    """
+    for attempt in range(max_attempts):
+        try:
+            resp = requests.get(url, timeout=30)
+            if resp.status_code == 429:
+                wait = base_backoff * (2 ** attempt)
+                logger.warning("Rate limited (%s) — sleeping %.1fs before retry %d/%d",
+                               url.split("?")[0], wait, attempt + 1, max_attempts)
+                time.sleep(wait)
+                continue
+            if resp.status_code >= 500 and attempt < max_attempts - 1:
+                wait = base_backoff * (2 ** attempt)
+                logger.warning("Server error %d (%s) — sleeping %.1fs",
+                               resp.status_code, url.split("?")[0], wait)
+                time.sleep(wait)
+                continue
+            return resp
+        except requests.exceptions.Timeout:
+            if attempt == max_attempts - 1:
+                raise
+            wait = base_backoff * (2 ** attempt)
+            logger.warning("Timeout on %s (attempt %d/%d) — retrying in %.1fs",
+                           url.split("?")[0], attempt + 1, max_attempts, wait)
+            time.sleep(wait)
+    raise RuntimeError(f"All {max_attempts} attempts failed: {url}")
+
+
 def _fetch_season_schedule(season: int) -> list[dict]:
     """Return all completed regular-season games for a given season."""
     url = (
@@ -42,7 +77,7 @@ def _fetch_season_schedule(season: int) -> list[dict]:
         f"&startDate={season}-03-01&endDate={season}-11-30"
         f"&hydrate=team,linescore,probablePitcher"
     )
-    resp = requests.get(url, timeout=60)
+    resp = _get_with_retry(url)
     resp.raise_for_status()
     payload = resp.json()
 
@@ -88,28 +123,48 @@ def collect_season(db: Session, season: int) -> int:
     """
     Fetch all completed games for a season, enrich with team + starter stats,
     and upsert into backtest_games. Returns number of games processed.
+
+    Key optimisations vs naive approach:
+    - Team stats are cached per season (30 teams × ~2 API calls, reused across all games)
+    - Pitcher stats are cached per (pitcher_id, season) — a starter pitches ~30 games,
+      so without a cache this would be ~4,800 redundant API calls per season.
+    - Commits every _COMMIT_INTERVAL games to keep the Neon Postgres connection alive.
+    - 80ms sleep between pitcher API lookups to avoid triggering MLB API rate limits.
     """
-    logger.info("Collecting backtest data for season %s", season)
+    logger.info("[backtest] Starting collection for season %s", season)
     games = _fetch_season_schedule(season)
+    logger.info("[backtest] Season %s: %d completed games found in schedule", season, len(games))
     if not games:
         return 0
 
-    # Cache team stats to avoid redundant API calls (30 teams × 2 groups per season)
-    team_stats_cache: dict[int, dict] = {}
+    # ── Caches — populated lazily, survive across the whole season loop ──────
+    team_stats_cache:    dict[int, dict]       = {}
+    pitcher_stats_cache: dict[tuple, dict | None] = {}  # key: (pitcher_id, season)
 
     def _team_stats(team_id: int) -> dict:
         if team_id not in team_stats_cache:
             team_stats_cache[team_id] = fetch_team_stats(team_id, season)
         return team_stats_cache[team_id]
 
+    def _pitcher_stats(pitcher_id: int | None) -> dict | None:
+        if pitcher_id is None:
+            return None
+        key = (pitcher_id, season)
+        if key not in pitcher_stats_cache:
+            time.sleep(0.08)  # 80 ms — polite to MLB API, avoids 429s
+            pitcher_stats_cache[key] = fetch_pitcher_stats(pitcher_id, season)
+        return pitcher_stats_cache[key]
+
     processed = 0
-    for g in games:
+    errors    = 0
+
+    for idx, g in enumerate(games, start=1):
         try:
             away_stats = _team_stats(g["away_team_id"])
             home_stats = _team_stats(g["home_team_id"])
 
-            away_starter = fetch_pitcher_stats(g["away_starter_id"], season) if g["away_starter_id"] else None
-            home_starter = fetch_pitcher_stats(g["home_starter_id"], season) if g["home_starter_id"] else None
+            away_starter = _pitcher_stats(g["away_starter_id"])
+            home_starter = _pitcher_stats(g["home_starter_id"])
 
             away_run_diff = away_stats["runs"] - away_stats["runs_allowed"]
             home_run_diff = home_stats["runs"] - home_stats["runs_allowed"]
@@ -150,18 +205,31 @@ def collect_season(db: Session, season: int) -> int:
                 set_={k: v for k, v in row_data.items() if k != "game_id"},
             )
             db.execute(stmt)
-
             processed += 1
-            if processed % 200 == 0:
+
+            # Commit frequently — keeps the Neon connection alive and checkpoints
+            # progress so a later crash doesn't lose everything.
+            if processed % _COMMIT_INTERVAL == 0:
                 db.commit()
-                logger.info("  ...%d games committed", processed)
+                logger.info(
+                    "[backtest] Season %s: %d/%d games committed (%d errors so far)",
+                    season, processed, len(games), errors,
+                )
 
         except Exception as exc:
-            logger.warning("Skipping game %s: %s", g["game_id"], exc)
+            errors += 1
+            logger.error(
+                "[backtest] Season %s — error on game %s (%d/%d): %s: %s",
+                season, g["game_id"], idx, len(games),
+                type(exc).__name__, exc,
+            )
             db.rollback()
 
     db.commit()
-    logger.info("Season %s: %d games stored", season, processed)
+    logger.info(
+        "[backtest] Season %s COMPLETE: %d/%d games stored, %d errors",
+        season, processed, len(games), errors,
+    )
     return processed
 
 

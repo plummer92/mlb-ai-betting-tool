@@ -1,4 +1,5 @@
 import json
+import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.orm import Session
@@ -8,6 +9,7 @@ from app.models.schema import BacktestResult
 from app.services.backtest_service import collect_season, run_logistic_regression
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("/collect")
@@ -17,29 +19,36 @@ def collect_backtest_data(
 ):
     """
     Fetch historical game data from the MLB Stats API and store in backtest_games.
-    Runs as a background task — can take 10-30 min per season. Watch server logs.
+    Runs as a background task — can take several minutes per season. Watch server logs:
+      sudo journalctl -u mlb-betting -f
     """
     season_list = [int(x.strip()) for x in seasons.split(",") if x.strip()]
 
     def _collect():
-        _db = SessionLocal()
-        try:
-            total = 0
-            for s in season_list:
+        # Open a fresh session per season so a long-running collection doesn't
+        # exhaust Neon's idle connection timeout across multiple seasons.
+        total = 0
+        for s in season_list:
+            _db = SessionLocal()
+            try:
+                logger.info("[backtest] Starting season %s collection", s)
                 n = collect_season(_db, s)
                 total += n
-                print(f"[backtest] Season {s}: {n} games stored")
-            print(f"[backtest] Collection complete: {total} total games for {season_list}")
-        except Exception as e:
-            print(f"[backtest] Collection error: {e}")
-        finally:
-            _db.close()
+                logger.info("[backtest] Season %s done: %d games stored", s, n)
+            except Exception as exc:
+                logger.error("[backtest] Season %s failed: %s: %s",
+                             s, type(exc).__name__, exc)
+            finally:
+                _db.close()
+
+        logger.info("[backtest] All seasons complete: %d total games for %s",
+                    total, season_list)
 
     background_tasks.add_task(_collect)
     return {
         "status": "collecting",
         "seasons": season_list,
-        "message": "Background collection started. Check server logs for progress.",
+        "message": "Background collection started. Follow progress with: sudo journalctl -u mlb-betting -f",
     }
 
 
