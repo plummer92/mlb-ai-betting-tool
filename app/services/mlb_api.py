@@ -133,6 +133,33 @@ def fetch_pitcher_stats(pitcher_id: int, season: int) -> dict | None:
     return _fetch(pitcher_id, season) or _fetch(pitcher_id, season - 1)
 
 
+def fetch_bullpen_stats(team_id: int, season: int) -> dict | None:
+    """
+    Fetch reliever (bullpen) ERA for a team/season via the MLB Stats API
+    pitchingType=R split.  Returns {"era": float} or None if unavailable.
+    Falls back to prior season if the current season has no data.
+    """
+    def _fetch(tid: int, s: int) -> dict | None:
+        resp = requests.get(
+            f"{MLB_API_BASE}/teams/{tid}/stats"
+            f"?stats=season&group=pitching&season={s}&pitchingType=R",
+            timeout=30,
+        )
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        stats_list = resp.json().get("stats") or [{}]
+        split = (stats_list[0].get("splits") or [{}])[0].get("stat", {})
+        if not split:
+            return None
+        era = _safe_float(split.get("era"), 0.0)
+        if era == 0.0:
+            return None
+        return {"era": era}
+
+    return _fetch(team_id, season) or _fetch(team_id, season - 1)
+
+
 def fetch_team_stats(team_id: int, season: int) -> dict:
     stats = _fetch_team_stats_for_season(team_id, season)
     if stats:

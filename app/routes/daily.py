@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from app.db import get_db
 from app.models.schema import Game, Prediction
 from app.services.alert_service import create_and_send_alerts_for_today
-from app.services.mlb_api import fetch_schedule_for_date, fetch_team_stats, fetch_pitcher_stats
+from app.services.mlb_api import fetch_bullpen_stats, fetch_schedule_for_date, fetch_team_stats, fetch_pitcher_stats
 from app.services.feature_builder import build_team_features
 from app.services.simulator import MODEL_VERSION, run_monte_carlo
 from app.services.odds_service import fetch_and_store_odds, compute_line_movement, SnapshotType
@@ -76,8 +76,10 @@ async def daily_run(db: Session = Depends(get_db)):
             home_raw = fetch_team_stats(team_id=game.home_team_id, season=game.season)
             away_starter = fetch_pitcher_stats(game.away_pitcher_id, game.season) if game.away_pitcher_id else None
             home_starter = fetch_pitcher_stats(game.home_pitcher_id, game.season) if game.home_pitcher_id else None
-            away_features = build_team_features(away_raw, starter_stats=away_starter)
-            home_features = build_team_features(home_raw, starter_stats=home_starter, venue=game.venue)
+            away_bullpen = fetch_bullpen_stats(game.away_team_id, game.season)
+            home_bullpen = fetch_bullpen_stats(game.home_team_id, game.season)
+            away_features = build_team_features(away_raw, starter_stats=away_starter, bullpen_stats=away_bullpen)
+            home_features = build_team_features(home_raw, starter_stats=home_starter, venue=game.venue, bullpen_stats=home_bullpen)
             result = run_monte_carlo(away_team=away_features, home_team=home_features, sim_count=1000)
             prediction = Prediction(
                 game_id=game.game_id,

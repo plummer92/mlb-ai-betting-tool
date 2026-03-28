@@ -155,6 +155,8 @@ class BacktestGame(Base):
     away_win_pct = Column(Float, nullable=True)
     home_run_diff = Column(Integer, nullable=True)
     away_run_diff = Column(Integer, nullable=True)
+    home_bullpen_era = Column(Float, nullable=True)
+    away_bullpen_era = Column(Float, nullable=True)
     collected_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

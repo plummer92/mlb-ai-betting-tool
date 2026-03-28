@@ -21,6 +21,7 @@ def build_team_features(
     losses: int | None = None,
     starter_stats: dict | None = None,
     venue: str | None = None,
+    bullpen_stats: dict | None = None,
 ) -> dict:
     # Prefer games_played from the stats API; fall back to wins+losses or season default
     games_played = raw_stats.get("games_played") or 0
@@ -57,4 +58,6 @@ def build_team_features(
         # Park factor: only meaningful when this dict is built for the home team.
         # Passed to run_monte_carlo where it adjusts the home-field advantage.
         "park_factor": PARK_FACTORS.get(venue, 0.0) if venue else 0.0,
+        # Bullpen ERA: from reliever split when available; falls back to team ERA.
+        "bullpen_era": bullpen_stats["era"] if bullpen_stats else raw_stats["era"],
     }

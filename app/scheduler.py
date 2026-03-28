@@ -11,7 +11,7 @@ from app.services.alert_service import create_and_send_alert_for_game, create_an
 from app.services.backtest_service import run_logistic_regression
 from app.services.edge_service import calculate_all_edges_today, calculate_edge_for_game
 from app.services.feature_builder import build_team_features
-from app.services.mlb_api import fetch_pitcher_stats, fetch_schedule_for_date, fetch_team_stats
+from app.services.mlb_api import fetch_bullpen_stats, fetch_pitcher_stats, fetch_schedule_for_date, fetch_team_stats
 from app.services.odds_service import compute_line_movement, fetch_and_store_odds
 from app.services.ranked_alerts import send_ranked_bets_to_discord_job
 from app.services.review_service import resolve_completed_games
@@ -110,8 +110,10 @@ def run_monte_carlo_and_schedule_pregame():
                 home_raw = fetch_team_stats(game.home_team_id, game.season)
                 away_starter = fetch_pitcher_stats(game.away_pitcher_id, game.season) if game.away_pitcher_id else None
                 home_starter = fetch_pitcher_stats(game.home_pitcher_id, game.season) if game.home_pitcher_id else None
-                away_features = build_team_features(away_raw, starter_stats=away_starter)
-                home_features = build_team_features(home_raw, starter_stats=home_starter, venue=game.venue)
+                away_bullpen = fetch_bullpen_stats(game.away_team_id, game.season)
+                home_bullpen = fetch_bullpen_stats(game.home_team_id, game.season)
+                away_features = build_team_features(away_raw, starter_stats=away_starter, bullpen_stats=away_bullpen)
+                home_features = build_team_features(home_raw, starter_stats=home_starter, venue=game.venue, bullpen_stats=home_bullpen)
                 result = run_monte_carlo(away_team=away_features, home_team=home_features, sim_count=1000)
                 prediction = Prediction(
                     game_id=game.game_id,

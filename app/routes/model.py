@@ -11,7 +11,7 @@ from app.models.schema import Game, Prediction
 ET = ZoneInfo("America/New_York")
 from app.models.pydantic_models import PredictionOut
 from app.services.feature_builder import build_team_features
-from app.services.mlb_api import fetch_team_stats
+from app.services.mlb_api import fetch_bullpen_stats, fetch_team_stats
 from app.services.simulator import MODEL_VERSION, run_monte_carlo
 
 router = APIRouter(prefix="/api/model", tags=["model"])
@@ -26,8 +26,10 @@ def run_model(game_id: int, db: Session = Depends(get_db)):
     away_raw = fetch_team_stats(team_id=game.away_team_id, season=game.season)
     home_raw = fetch_team_stats(team_id=game.home_team_id, season=game.season)
 
-    away_features = build_team_features(away_raw)
-    home_features = build_team_features(home_raw, venue=game.venue)
+    away_bullpen = fetch_bullpen_stats(game.away_team_id, game.season)
+    home_bullpen = fetch_bullpen_stats(game.home_team_id, game.season)
+    away_features = build_team_features(away_raw, bullpen_stats=away_bullpen)
+    home_features = build_team_features(home_raw, venue=game.venue, bullpen_stats=home_bullpen)
 
     result = run_monte_carlo(
         away_team=away_features,

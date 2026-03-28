@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.config import MLB_API_BASE
 from app.models.schema import BacktestGame, BacktestResult
 from app.services.feature_builder import PARK_FACTORS
-from app.services.mlb_api import fetch_pitcher_stats, fetch_team_stats
+from app.services.mlb_api import fetch_bullpen_stats, fetch_pitcher_stats, fetch_team_stats
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,7 @@ FEATURE_NAMES = [
     "home_starter_era_adv", # away_starter_era - home_starter_era (may be 0 if no data)
     "win_pct_adv",          # home_win_pct - away_win_pct (replaces two separate features)
     "park_factor_adv",      # venue-based park factor from PARK_FACTORS lookup
+    "bullpen_era_adv",      # away_bullpen_era - home_bullpen_era (positive = home bullpen better)
     # run_diff_adv excluded: multicollinear with win_pct_adv — coefficient inverts sign
 ]
 
@@ -140,12 +141,19 @@ def collect_season(db: Session, season: int) -> int:
 
     # ── Caches — populated lazily, survive across the whole season loop ──────
     team_stats_cache:    dict[int, dict]          = {}
+    bullpen_stats_cache: dict[int, dict | None]   = {}
     pitcher_stats_cache: dict[tuple, dict | None] = {}  # key: (pitcher_id, season)
 
     def _team_stats(team_id: int) -> dict:
         if team_id not in team_stats_cache:
             team_stats_cache[team_id] = fetch_team_stats(team_id, season)
         return team_stats_cache[team_id]
+
+    def _bullpen_stats(team_id: int) -> dict | None:
+        if team_id not in bullpen_stats_cache:
+            time.sleep(0.08)
+            bullpen_stats_cache[team_id] = fetch_bullpen_stats(team_id, season)
+        return bullpen_stats_cache[team_id]
 
     def _pitcher_stats(pitcher_id: int | None) -> dict | None:
         if pitcher_id is None:
@@ -168,6 +176,9 @@ def collect_season(db: Session, season: int) -> int:
 
             away_starter = _pitcher_stats(g["away_starter_id"])
             home_starter = _pitcher_stats(g["home_starter_id"])
+
+            away_bullpen = _bullpen_stats(g["away_team_id"])
+            home_bullpen = _bullpen_stats(g["home_team_id"])
 
             away_run_diff = away_stats["runs"] - away_stats["runs_allowed"]
             home_run_diff = home_stats["runs"] - home_stats["runs_allowed"]
@@ -200,6 +211,8 @@ def collect_season(db: Session, season: int) -> int:
                 home_win_pct=g["home_win_pct"],
                 away_run_diff=away_run_diff,
                 home_run_diff=home_run_diff,
+                away_bullpen_era=away_bullpen["era"] if away_bullpen else None,
+                home_bullpen_era=home_bullpen["era"] if home_bullpen else None,
             )
 
             stmt = pg_insert(BacktestGame).values(**row_data)
@@ -253,8 +266,12 @@ def run_logistic_regression(db: Session, seasons: list[int]) -> BacktestResult:
         )
         win_pct_adv     = (r.home_win_pct or 0.5) - (r.away_win_pct or 0.5)
         park_factor_adv = PARK_FACTORS.get(r.venue or "", 0.0)
+        # Bullpen ERA adv: fall back to team ERA when bullpen split not collected
+        away_bp = r.away_bullpen_era if r.away_bullpen_era is not None else (r.away_team_era or 4.2)
+        home_bp = r.home_bullpen_era if r.home_bullpen_era is not None else (r.home_team_era or 4.2)
+        bullpen_era_adv = away_bp - home_bp
         X.append([home_era_adv, home_whip_adv, home_ops_adv, home_starter_era_adv,
-                   win_pct_adv, park_factor_adv])
+                   win_pct_adv, park_factor_adv, bullpen_era_adv])
         y.append(int(r.home_win))
 
     scaler = StandardScaler()
@@ -323,6 +340,9 @@ def run_analysis(db: Session, seasons: list[int]) -> dict:
         h_rd     = r.home_run_diff  or 0
         a_rd     = r.away_run_diff  or 0
 
+        h_bp = r.home_bullpen_era if r.home_bullpen_era is not None else h_era
+        a_bp = r.away_bullpen_era if r.away_bullpen_era is not None else a_era
+
         records.append({
             "home_win":            int(r.home_win),
             "season":              r.season,
@@ -343,6 +363,7 @@ def run_analysis(db: Session, seasons: list[int]) -> dict:
             "home_run_diff":       h_rd,
             "away_run_diff":       a_rd,
             "run_diff_adv":        h_rd   - a_rd,   # home minus away
+            "bullpen_era_adv":     a_bp   - h_bp,
         })
 
     df = pd.DataFrame(records)
@@ -359,6 +380,7 @@ def run_analysis(db: Session, seasons: list[int]) -> dict:
         "home_run_diff",
         "away_run_diff",
         "run_diff_adv",
+        "bullpen_era_adv",
     ]
     correlations = []
     for col in FEATURE_COLS:
