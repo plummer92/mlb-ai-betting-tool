@@ -57,6 +57,8 @@ def _safe_float(val) -> float | None:
 
 def _parse_csv(text: str) -> list[dict]:
     """Parse a comma-separated text into a list of row dicts."""
+    # Strip UTF-8 BOM (\ufeff) that Baseball Savant prepends to CSV responses.
+    text = text.lstrip("\ufeff")
     lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
     if len(lines) < 2:
         return []
@@ -166,6 +168,12 @@ def _load_pitcher_season(season: int) -> dict:
             f"[statcast] Fetched xERA for {len(data)} pitchers in {season}",
             flush=True,
         )
+        if len(data) == 0:
+            print(
+                f"[statcast] 0 pitchers parsed for {season} — season may be too early; "
+                "individual lookups will fall back to prior season automatically.",
+                flush=True,
+            )
         _save_to_disk("pitcher_xera", season, data)
 
     except Exception as e:
