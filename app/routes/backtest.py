@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal, get_db
 from app.models.schema import BacktestResult
-from app.services.backtest_service import collect_season, run_logistic_regression
+from app.services.backtest_service import collect_season, run_analysis, run_logistic_regression
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
@@ -76,6 +76,24 @@ def run_backtest_route(
         "feature_ranks": json.loads(result.feature_ranks_json),
         "coefficients": json.loads(result.coefficients_json),
     }
+
+
+@router.get("/analysis")
+def backtest_analysis_report(
+    seasons: str = Query("2022,2023,2024"),
+    db: Session = Depends(get_db),
+):
+    """
+    Correlation analysis on historical backtest_games data.
+    Returns:
+    - Pearson correlations for all features vs home_win
+    - Run-differential quintile lifts
+    - Venue / park-factor breakdown
+    - Season-by-season home win rates
+    - Prioritised recommendations for model improvements
+    """
+    season_list = [int(x.strip()) for x in seasons.split(",") if x.strip()]
+    return run_analysis(db, season_list)
 
 
 @router.get("/latest")
