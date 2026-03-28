@@ -831,13 +831,18 @@ async function loadDebrief() {
       if (r.model_total != null)                                    proj = fmt(r.model_total,1);
       else if (r.projected_away_score != null && r.projected_home_score != null)
         proj = fmt(r.projected_away_score + r.projected_home_score, 1);
-      const act = r.actual_total != null ? r.actual_total : '—';
+      const act = (r.actual_total != null && r.actual_total > 0) ? r.actual_total : '—';
       const totStr = proj === '—' ? '—' : `${proj} → ${act}`;
 
       const epStr   = r.edge_pct != null ? (r.edge_pct*100).toFixed(1)+'%' : '—';
       const epCls   = r.edge_pct != null && r.edge_pct > 0 ? 'green' : 'muted';
       const noteRaw = (r.actual_outcome_summary || '').slice(0, 120);
       const note    = noteRaw ? `<div class="outcome-note" title="${esc(r.actual_outcome_summary)}">${esc(noteRaw)}</div>` : '';
+
+      // A 0-0 score in MLB is essentially impossible — display "—" when
+      // both scores are 0, since it just means the score wasn't fetched yet.
+      const hasRealScore = r.actual_total != null && r.actual_total > 0;
+      const scoreDisplay = hasRealScore ? (r.final_score || '—') : '—';
 
       return `<tr>
         <td style="font-weight:600;white-space:nowrap">${esc(r.matchup||'—')}</td>
@@ -846,7 +851,7 @@ async function loadDebrief() {
         <td style="text-align:center">${ci}</td>
         <td class="mono" style="font-size:12px">${totStr}</td>
         <td class="mono ${epCls}" style="font-size:12px">${epStr}</td>
-        <td class="mono" style="font-size:12px">${r.final_score||'—'}</td>
+        <td class="mono" style="font-size:12px">${scoreDisplay}</td>
         <td>${betChip(r.bet_result)}</td>
         <td>${note}</td>
       </tr>`;

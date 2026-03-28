@@ -42,13 +42,65 @@ def _bet_result(play: str | None, away_score: int, home_score: int, book_total: 
     return "no_bet"
 
 
+FINAL_STATUSES = {"Final", "Game Over", "Completed Early"}
+
+
+def _purge_scoreless_reviews(db: Session) -> int:
+    """
+    Delete any GameOutcomeReview rows where both final scores are 0 —
+    these were created before scores were available and contain bad data.
+    Also resets the corresponding BetAlert stamps so they can be re-graded.
+    """
+    bad_reviews = (
+        db.query(GameOutcomeReview)
+        .filter(
+            GameOutcomeReview.final_away_score == 0,
+            GameOutcomeReview.final_home_score == 0,
+        )
+        .all()
+    )
+    if not bad_reviews:
+        return 0
+
+    # Reset any BetAlert rows that were wrongly stamped from these reviews
+    bad_alert_ids = {r.bet_alert_id for r in bad_reviews if r.bet_alert_id is not None}
+    if bad_alert_ids:
+        (
+            db.query(BetAlert)
+            .filter(BetAlert.id.in_(bad_alert_ids))
+            .update(
+                {
+                    BetAlert.bet_result: None,
+                    BetAlert.final_away_score: None,
+                    BetAlert.final_home_score: None,
+                    BetAlert.resolved_at: None,
+                },
+                synchronize_session=False,
+            )
+        )
+
+    count = len(bad_reviews)
+    for r in bad_reviews:
+        db.delete(r)
+    db.commit()
+    return count
+
+
 def resolve_completed_games(db: Session) -> dict:
     """
     Grade every prediction from yesterday and today against final scores.
     Creates a GameOutcomeReview for each prediction once final scores exist,
     regardless of whether an edge or alert was generated for that game.
     Also stamps BetAlert.bet_result for any matching alert rows.
+
+    Skips games where the total runs scored == 0 and the status is not
+    clearly final — a 0-0 score almost always means the API hasn't
+    returned the real score yet (true 0-0 MLB finals are essentially
+    non-existent).
     """
+    # Remove any previously-created reviews that had no real scores yet
+    purged = _purge_scoreless_reviews(db)
+
     yesterday = datetime.now(ET).date() - timedelta(days=1)
 
     # Pull all predictions for games from yesterday / today
@@ -74,6 +126,14 @@ def resolve_completed_games(db: Session) -> dict:
         home_score = game.final_home_score
 
         if away_score is None or home_score is None:
+            skipped += 1
+            continue
+
+        # Guard against grading a game before scores are actually available.
+        # A combined score of 0 almost certainly means the final score hasn't
+        # been fetched yet — only allow it through if the status is unambiguous.
+        game_is_final = (game.status or "").strip() in FINAL_STATUSES
+        if (away_score + home_score) == 0 and not game_is_final:
             skipped += 1
             continue
 
@@ -178,4 +238,4 @@ def resolve_completed_games(db: Session) -> dict:
         resolved += 1
 
     db.commit()
-    return {"resolved": resolved, "skipped": skipped}
+    return {"resolved": resolved, "skipped": skipped, "purged_scoreless": purged}
