@@ -6,6 +6,7 @@ then fits a logistic regression to find which features actually predict outcomes
 import json
 import logging
 import time
+import traceback
 from datetime import date
 
 import requests
@@ -48,14 +49,12 @@ def _get_with_retry(url: str, max_attempts: int = 3, base_backoff: float = 3.0) 
             resp = requests.get(url, timeout=30)
             if resp.status_code == 429:
                 wait = base_backoff * (2 ** attempt)
-                logger.warning("Rate limited (%s) — sleeping %.1fs before retry %d/%d",
-                               url.split("?")[0], wait, attempt + 1, max_attempts)
+                print(f"[backtest] Rate limited ({url.split('?')[0]}) — sleeping {wait:.1f}s before retry {attempt+1}/{max_attempts}", flush=True)
                 time.sleep(wait)
                 continue
             if resp.status_code >= 500 and attempt < max_attempts - 1:
                 wait = base_backoff * (2 ** attempt)
-                logger.warning("Server error %d (%s) — sleeping %.1fs",
-                               resp.status_code, url.split("?")[0], wait)
+                print(f"[backtest] Server error {resp.status_code} ({url.split('?')[0]}) — sleeping {wait:.1f}s", flush=True)
                 time.sleep(wait)
                 continue
             return resp
@@ -63,8 +62,7 @@ def _get_with_retry(url: str, max_attempts: int = 3, base_backoff: float = 3.0) 
             if attempt == max_attempts - 1:
                 raise
             wait = base_backoff * (2 ** attempt)
-            logger.warning("Timeout on %s (attempt %d/%d) — retrying in %.1fs",
-                           url.split("?")[0], attempt + 1, max_attempts, wait)
+            print(f"[backtest] Timeout on {url.split('?')[0]} (attempt {attempt+1}/{max_attempts}) — retrying in {wait:.1f}s", flush=True)
             time.sleep(wait)
     raise RuntimeError(f"All {max_attempts} attempts failed: {url}")
 
@@ -131,14 +129,15 @@ def collect_season(db: Session, season: int) -> int:
     - Commits every _COMMIT_INTERVAL games to keep the Neon Postgres connection alive.
     - 80ms sleep between pitcher API lookups to avoid triggering MLB API rate limits.
     """
-    logger.info("[backtest] Starting collection for season %s", season)
+    print(f"[backtest] Starting collection for season {season}", flush=True)
     games = _fetch_season_schedule(season)
-    logger.info("[backtest] Season %s: %d completed games found in schedule", season, len(games))
+    print(f"[backtest] Season {season}: {len(games)} completed games found in schedule", flush=True)
     if not games:
+        print(f"[backtest] Season {season}: no games returned — aborting", flush=True)
         return 0
 
     # ── Caches — populated lazily, survive across the whole season loop ──────
-    team_stats_cache:    dict[int, dict]       = {}
+    team_stats_cache:    dict[int, dict]          = {}
     pitcher_stats_cache: dict[tuple, dict | None] = {}  # key: (pitcher_id, season)
 
     def _team_stats(team_id: int) -> dict:
@@ -152,7 +151,9 @@ def collect_season(db: Session, season: int) -> int:
         key = (pitcher_id, season)
         if key not in pitcher_stats_cache:
             time.sleep(0.08)  # 80 ms — polite to MLB API, avoids 429s
+            print(f"[backtest]   fetching pitcher {pitcher_id} season {season} (cache miss)", flush=True)
             pitcher_stats_cache[key] = fetch_pitcher_stats(pitcher_id, season)
+            print(f"[backtest]   pitcher {pitcher_id} done", flush=True)
         return pitcher_stats_cache[key]
 
     processed = 0
@@ -211,25 +212,16 @@ def collect_season(db: Session, season: int) -> int:
             # progress so a later crash doesn't lose everything.
             if processed % _COMMIT_INTERVAL == 0:
                 db.commit()
-                logger.info(
-                    "[backtest] Season %s: %d/%d games committed (%d errors so far)",
-                    season, processed, len(games), errors,
-                )
+                print(f"[backtest] Season {season}: {processed}/{len(games)} games committed ({errors} errors so far)", flush=True)
 
-        except Exception as exc:
+        except Exception:
             errors += 1
-            logger.error(
-                "[backtest] Season %s — error on game %s (%d/%d): %s: %s",
-                season, g["game_id"], idx, len(games),
-                type(exc).__name__, exc,
-            )
+            print(f"[backtest] Season {season} — ERROR on game {g['game_id']} ({idx}/{len(games)}):", flush=True)
+            traceback.print_exc()
             db.rollback()
 
     db.commit()
-    logger.info(
-        "[backtest] Season %s COMPLETE: %d/%d games stored, %d errors",
-        season, processed, len(games), errors,
-    )
+    print(f"[backtest] Season {season} COMPLETE: {processed}/{len(games)} games stored, {errors} errors", flush=True)
     return processed
 
 

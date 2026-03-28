@@ -1,5 +1,5 @@
 import json
-import logging
+import traceback
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.orm import Session
@@ -9,7 +9,6 @@ from app.models.schema import BacktestResult
 from app.services.backtest_service import collect_season, run_logistic_regression
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
-logger = logging.getLogger(__name__)
 
 
 @router.post("/collect")
@@ -25,24 +24,28 @@ def collect_backtest_data(
     season_list = [int(x.strip()) for x in seasons.split(",") if x.strip()]
 
     def _collect():
-        # Open a fresh session per season so a long-running collection doesn't
-        # exhaust Neon's idle connection timeout across multiple seasons.
-        total = 0
-        for s in season_list:
-            _db = SessionLocal()
-            try:
-                logger.info("[backtest] Starting season %s collection", s)
-                n = collect_season(_db, s)
-                total += n
-                logger.info("[backtest] Season %s done: %d games stored", s, n)
-            except Exception as exc:
-                logger.error("[backtest] Season %s failed: %s: %s",
-                             s, type(exc).__name__, exc)
-            finally:
-                _db.close()
+        try:
+            # Open a fresh session per season so a long-running collection doesn't
+            # exhaust Neon's idle connection timeout across multiple seasons.
+            total = 0
+            for s in season_list:
+                print(f"[backtest] Opening DB session for season {s}", flush=True)
+                _db = SessionLocal()
+                try:
+                    n = collect_season(_db, s)
+                    total += n
+                    print(f"[backtest] Season {s} done: {n} games stored", flush=True)
+                except Exception:
+                    print(f"[backtest] Season {s} FAILED:", flush=True)
+                    traceback.print_exc()
+                finally:
+                    _db.close()
+                    print(f"[backtest] DB session for season {s} closed", flush=True)
 
-        logger.info("[backtest] All seasons complete: %d total games for %s",
-                    total, season_list)
+            print(f"[backtest] All seasons complete: {total} total games for {season_list}", flush=True)
+        except Exception:
+            print("[backtest] Unexpected error in background _collect():", flush=True)
+            traceback.print_exc()
 
     background_tasks.add_task(_collect)
     return {
