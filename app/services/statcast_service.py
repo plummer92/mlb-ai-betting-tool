@@ -113,14 +113,15 @@ def _load_pitcher_season(season: int) -> dict:
     data: dict = {}
     try:
         time.sleep(_REQUEST_DELAY)
+        # Use min=10 so early-season (2026) and partial seasons still return rows.
+        # "qualified" (min=q) requires ~162 IP which many starters never reach.
         url = (
             "https://baseballsavant.mlb.com/leaderboard/custom"
-            f"?year={season}&type=pitcher&filter=&sort=1&sortDir=desc"
-            "&min=1"
-            "&selections=p_era%2Cp_xera%2Cp_k_percent%2Cp_bb_percent%2Cbarrel_batted_rate"
-            "&csv=true"
+            f"?year={season}&type=pitcher&filter=&min=10"
+            "&selections=xera%2Cp_k_percent%2Cp_bb_percent%2Cbarrel_batted_rate"
+            "&chart=false&x=xera&y=xera&r=no&chartType=beeswarm&csv=true"
         )
-        print(f"[statcast] Fetching pitcher xERA leaderboard for {season}…", flush=True)
+        print(f"[statcast] Fetching pitcher xERA leaderboard: {url}", flush=True)
         resp = requests.get(url, timeout=_TIMEOUT, headers=_SAVANT_HEADERS)
 
         if resp.status_code != 200:
@@ -131,7 +132,18 @@ def _load_pitcher_season(season: int) -> dict:
             _pitcher_cache[season] = data
             return data
 
-        for row in _parse_csv(resp.text):
+        # Debug: show first 500 chars and header row so we can see the shape
+        body_preview = resp.text[:500].replace("\n", "\\n")
+        print(f"[statcast] Response preview ({season}): {body_preview}", flush=True)
+
+        rows = _parse_csv(resp.text)
+        print(
+            f"[statcast] CSV rows parsed: {len(rows)} "
+            f"| columns: {list(rows[0].keys()) if rows else 'none'}",
+            flush=True,
+        )
+
+        for row in rows:
             pid = (
                 row.get("player_id")
                 or row.get("pitcher_id")
@@ -139,9 +151,8 @@ def _load_pitcher_season(season: int) -> dict:
             )
             if not pid:
                 continue
-            xera = _safe_float(
-                row.get("p_xera") or row.get("xera") or row.get("est_era")
-            )
+            # The confirmed column name is "xera" (not "p_xera")
+            xera = _safe_float(row.get("xera") or row.get("p_xera") or row.get("est_era"))
             if xera is None:
                 continue
             data[str(pid)] = {
