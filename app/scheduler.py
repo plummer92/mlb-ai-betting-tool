@@ -108,8 +108,8 @@ def run_monte_carlo_and_schedule_pregame():
             try:
                 away_raw = fetch_team_stats(game.away_team_id, game.season)
                 home_raw = fetch_team_stats(game.home_team_id, game.season)
-                away_starter = fetch_pitcher_stats(game.away_pitcher_id, game.season) if game.away_pitcher_id else None
-                home_starter = fetch_pitcher_stats(game.home_pitcher_id, game.season) if game.home_pitcher_id else None
+                away_starter = fetch_pitcher_stats(game.away_pitcher_id, game.season, include_xera=True) if game.away_pitcher_id else None
+                home_starter = fetch_pitcher_stats(game.home_pitcher_id, game.season, include_xera=True) if game.home_pitcher_id else None
                 away_bullpen = fetch_bullpen_stats(game.away_team_id, game.season)
                 home_bullpen = fetch_bullpen_stats(game.home_team_id, game.season)
                 away_features = build_team_features(away_raw, starter_stats=away_starter, bullpen_stats=away_bullpen)

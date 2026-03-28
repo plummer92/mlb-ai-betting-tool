@@ -1,0 +1,282 @@
+"""
+Statcast service — fetches advanced metrics from Baseball Savant.
+
+Caching strategy:
+  - One HTTP request per season fetches the full league leaderboard and
+    stores it in .statcast_cache/{kind}_{season}.json.
+  - Subsequent calls within the same process use the in-memory dict;
+    after a restart, the disk cache is read instead of re-fetching.
+  - All public functions return None on any failure so the main prediction
+    pipeline can fall back to MLB Stats API values without interruption.
+
+Rate limiting:
+  - _REQUEST_DELAY (1 s) is applied before every live HTTP request.
+  - Baseball Savant is fetched at most once per (kind, season) pair.
+"""
+import json
+import time
+from pathlib import Path
+
+import requests
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
+_CACHE_DIR = Path(".statcast_cache")
+_REQUEST_DELAY = 1.0      # seconds between live HTTP requests
+_TIMEOUT = 20             # seconds per request
+
+_SAVANT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    ),
+    "Accept": "text/csv,text/plain,*/*",
+}
+
+# In-process season caches — {season: {str(player_id): data}}
+_pitcher_cache: dict[int, dict] = {}
+_team_batting_cache: dict[int, dict] = {}
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _cache_path(kind: str, season: int) -> Path:
+    _CACHE_DIR.mkdir(exist_ok=True)
+    return _CACHE_DIR / f"{kind}_{season}.json"
+
+
+def _safe_float(val) -> float | None:
+    if val is None or str(val).strip() in ("", "null", "None", "-.--", "-"):
+        return None
+    try:
+        f = float(val)
+        return f if f > 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_csv(text: str) -> list[dict]:
+    """Parse a comma-separated text into a list of row dicts."""
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return []
+    headers = [h.strip('"').strip() for h in lines[0].split(",")]
+    rows = []
+    for line in lines[1:]:
+        # Naive split — adequate for the numeric Baseball Savant CSVs
+        values = [v.strip('"').strip() for v in line.split(",")]
+        if len(values) >= len(headers):
+            rows.append(dict(zip(headers, values)))
+    return rows
+
+
+def _load_from_disk(kind: str, season: int) -> dict | None:
+    path = _cache_path(kind, season)
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[statcast] Disk cache read error ({kind} {season}): {e}", flush=True)
+        return None
+
+
+def _save_to_disk(kind: str, season: int, data: dict) -> None:
+    try:
+        with open(_cache_path(kind, season), "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"[statcast] Disk cache write error ({kind} {season}): {e}", flush=True)
+
+
+# ── Pitcher xERA ──────────────────────────────────────────────────────────────
+
+def _load_pitcher_season(season: int) -> dict:
+    """
+    Return {str(pitcher_id): {xera, k_percent, bb_percent, barrel_rate}} for
+    all qualified pitchers in a given season.  Fetches once, then caches.
+    """
+    if season in _pitcher_cache:
+        return _pitcher_cache[season]
+
+    disk_data = _load_from_disk("pitcher_xera", season)
+    if disk_data is not None:
+        _pitcher_cache[season] = disk_data
+        print(
+            f"[statcast] Pitcher xERA {season}: loaded {len(disk_data)} entries from disk",
+            flush=True,
+        )
+        return disk_data
+
+    # ── Live fetch ────────────────────────────────────────────────────────────
+    data: dict = {}
+    try:
+        time.sleep(_REQUEST_DELAY)
+        url = (
+            "https://baseballsavant.mlb.com/leaderboard/custom"
+            f"?year={season}&type=pitcher&filter=&sort=1&sortDir=desc"
+            "&min=1"
+            "&selections=p_era%2Cp_xera%2Cp_k_percent%2Cp_bb_percent%2Cbarrel_batted_rate"
+            "&csv=true"
+        )
+        print(f"[statcast] Fetching pitcher xERA leaderboard for {season}…", flush=True)
+        resp = requests.get(url, timeout=_TIMEOUT, headers=_SAVANT_HEADERS)
+
+        if resp.status_code != 200:
+            print(
+                f"[statcast] Pitcher leaderboard HTTP {resp.status_code} for {season}",
+                flush=True,
+            )
+            _pitcher_cache[season] = data
+            return data
+
+        for row in _parse_csv(resp.text):
+            pid = (
+                row.get("player_id")
+                or row.get("pitcher_id")
+                or row.get("mlb_id")
+            )
+            if not pid:
+                continue
+            xera = _safe_float(
+                row.get("p_xera") or row.get("xera") or row.get("est_era")
+            )
+            if xera is None:
+                continue
+            data[str(pid)] = {
+                "xera":        xera,
+                "k_percent":   _safe_float(row.get("p_k_percent")  or row.get("k_percent")),
+                "bb_percent":  _safe_float(row.get("p_bb_percent") or row.get("bb_percent")),
+                "barrel_rate": _safe_float(row.get("barrel_batted_rate") or row.get("barrel_rate")),
+            }
+
+        print(
+            f"[statcast] Fetched xERA for {len(data)} pitchers in {season}",
+            flush=True,
+        )
+        _save_to_disk("pitcher_xera", season, data)
+
+    except Exception as e:
+        print(
+            f"[statcast] Pitcher leaderboard fetch failed ({season}): {e}",
+            flush=True,
+        )
+
+    _pitcher_cache[season] = data
+    return data
+
+
+def fetch_pitcher_xera(pitcher_id: int, season: int) -> dict | None:
+    """
+    Return {xera, k_percent, bb_percent, barrel_rate} for a pitcher.
+    Falls back to prior season if current season has no data (early-season).
+    Returns None if unavailable.
+    """
+    try:
+        for s in (season, season - 1):
+            result = _load_pitcher_season(s).get(str(pitcher_id))
+            if result:
+                return result
+        return None
+    except Exception as e:
+        print(f"[statcast] fetch_pitcher_xera({pitcher_id}, {season}): {e}", flush=True)
+        return None
+
+
+# ── Team Statcast batting ─────────────────────────────────────────────────────
+
+def _load_team_batting_season(season: int) -> dict:
+    """
+    Return {str(team_id): {exit_velocity_avg, barrel_rate, hard_hit_rate}}
+    for all teams in a season. Fetches once, then caches.
+
+    Note: sprint_speed_avg and outs_above_average require separate endpoints
+    (Phase 3). Only batting contact-quality metrics are collected here.
+    """
+    if season in _team_batting_cache:
+        return _team_batting_cache[season]
+
+    disk_data = _load_from_disk("team_batting", season)
+    if disk_data is not None:
+        _team_batting_cache[season] = disk_data
+        print(
+            f"[statcast] Team batting {season}: loaded {len(disk_data)} teams from disk",
+            flush=True,
+        )
+        return disk_data
+
+    data: dict = {}
+    try:
+        time.sleep(_REQUEST_DELAY)
+        # group_by=team_id returns one row per team (aggregated across all batters)
+        url = (
+            "https://baseballsavant.mlb.com/leaderboard/custom"
+            f"?year={season}&type=batter&filter=&sort=4&sortDir=desc"
+            "&min=q"
+            "&selections=exit_velocity_avg%2Cbarrel_batted_rate%2Chard_hit_percent"
+            "&group_by=team_id&csv=true"
+        )
+        print(f"[statcast] Fetching team batting Statcast for {season}…", flush=True)
+        resp = requests.get(url, timeout=_TIMEOUT, headers=_SAVANT_HEADERS)
+
+        if resp.status_code != 200:
+            print(
+                f"[statcast] Team batting HTTP {resp.status_code} for {season}",
+                flush=True,
+            )
+            _team_batting_cache[season] = data
+            return data
+
+        for row in _parse_csv(resp.text):
+            tid = row.get("team_id") or row.get("teamid") or row.get("team")
+            if not tid:
+                continue
+            exit_velo = _safe_float(
+                row.get("exit_velocity_avg") or row.get("avg_hit_speed") or row.get("launch_speed")
+            )
+            if exit_velo is None:
+                continue
+            data[str(tid)] = {
+                "exit_velocity_avg": exit_velo,
+                "barrel_rate":   _safe_float(
+                    row.get("barrel_batted_rate") or row.get("barrel_rate")
+                ),
+                "hard_hit_rate": _safe_float(
+                    row.get("hard_hit_percent") or row.get("hard_hit_rate")
+                ),
+                # sprint_speed_avg / outs_above_average: Phase 3
+                "sprint_speed_avg":    None,
+                "outs_above_average":  None,
+            }
+
+        print(
+            f"[statcast] Fetched batting Statcast for {len(data)} teams in {season}",
+            flush=True,
+        )
+        _save_to_disk("team_batting", season, data)
+
+    except Exception as e:
+        print(
+            f"[statcast] Team batting fetch failed ({season}): {e}",
+            flush=True,
+        )
+
+    _team_batting_cache[season] = data
+    return data
+
+
+def fetch_team_statcast(team_id: int, season: int) -> dict | None:
+    """
+    Return team-level Statcast batting metrics for a team/season.
+    Returns None if unavailable. Falls back to prior season.
+    """
+    try:
+        for s in (season, season - 1):
+            result = _load_team_batting_season(s).get(str(team_id))
+            if result:
+                return result
+        return None
+    except Exception as e:
+        print(f"[statcast] fetch_team_statcast({team_id}, {season}): {e}", flush=True)
+        return None

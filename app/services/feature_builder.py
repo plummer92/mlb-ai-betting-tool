@@ -41,13 +41,22 @@ def build_team_features(
         else None
     )
 
-    # Use starter ERA/WHIP when available; fall back to team totals
-    era  = starter_stats["era"]  if starter_stats else raw_stats["era"]
-    whip = starter_stats["whip"] if starter_stats else raw_stats["whip"]
+    # Use starter ERA/WHIP when available; fall back to team totals.
+    # Prefer xERA over ERA when the Statcast fetch succeeded (include_xera=True
+    # path in fetch_pitcher_stats); xERA strips out luck/BABIP noise.
+    if starter_stats:
+        era  = starter_stats.get("xera") or starter_stats["era"]
+        whip = starter_stats["whip"]
+        using_xera = bool(starter_stats.get("xera"))
+    else:
+        era        = raw_stats["era"]
+        whip       = raw_stats["whip"]
+        using_xera = False
 
     return {
         "era": era,
         "whip": whip,
+        "using_xera": using_xera,
         "starter_k9":  starter_stats["k9"]  if starter_stats else None,
         "starter_bb9": starter_stats["bb9"] if starter_stats else None,
         "avg": raw_stats["avg"],

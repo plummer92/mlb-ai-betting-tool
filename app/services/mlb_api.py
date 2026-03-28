@@ -105,11 +105,20 @@ def _fetch_team_stats_for_season(team_id: int, season: int):
     }
 
 
-def fetch_pitcher_stats(pitcher_id: int, season: int) -> dict | None:
+def fetch_pitcher_stats(
+    pitcher_id: int,
+    season: int,
+    include_xera: bool = False,
+) -> dict | None:
     """
     Fetch season pitching stats for a specific pitcher.
     Returns ERA, WHIP, K/9, BB/9 or None if unavailable.
     Retries with season-1 if current season has no data yet.
+
+    When include_xera=True, also attempts to fetch xERA / K% / BB% /
+    barrel_rate from Baseball Savant and merges them into the result.
+    Failures in the Statcast fetch are silently swallowed so the pipeline
+    always gets at least the MLB Stats API values.
     """
     def _fetch(pid: int, s: int) -> dict | None:
         resp = requests.get(
@@ -130,7 +139,20 @@ def fetch_pitcher_stats(pitcher_id: int, season: int) -> dict | None:
             "bb9":  _safe_float(split.get("walksPer9Inn"),        3.2),
         }
 
-    return _fetch(pitcher_id, season) or _fetch(pitcher_id, season - 1)
+    result = _fetch(pitcher_id, season) or _fetch(pitcher_id, season - 1)
+    if result is None:
+        return None
+
+    if include_xera:
+        try:
+            from app.services.statcast_service import fetch_pitcher_xera
+            xera_data = fetch_pitcher_xera(pitcher_id, season)
+            if xera_data:
+                result = {**result, **xera_data}
+        except Exception as e:
+            pass  # Statcast unavailable — caller gets plain MLB Stats API data
+
+    return result
 
 
 def fetch_bullpen_stats(team_id: int, season: int) -> dict | None:
