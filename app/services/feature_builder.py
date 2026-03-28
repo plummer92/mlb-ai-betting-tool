@@ -1,8 +1,26 @@
+# Park factors derived from backtest correlation analysis (vs_baseline home win rate).
+# Positive = venue boosts home win probability; negative = suppresses it.
+# All unlisted venues default to 0.0 (league-average neutral).
+PARK_FACTORS: dict[str, float] = {
+    "Dodger Stadium":        +0.144,
+    "Truist Park":           +0.105,
+    "Citizens Bank Park":    +0.095,
+    "Tropicana Field":       +0.076,
+    "Yankee Stadium":        +0.063,
+    "Minute Maid Park":      +0.051,
+    "T-Mobile Park":         +0.051,
+    "Nationals Park":        -0.124,
+    "Oakland Coliseum":      -0.141,
+    "Guaranteed Rate Field": -0.151,
+}
+
+
 def build_team_features(
     raw_stats: dict,
     wins: int | None = None,
     losses: int | None = None,
     starter_stats: dict | None = None,
+    venue: str | None = None,
 ) -> dict:
     # Prefer games_played from the stats API; fall back to wins+losses or season default
     games_played = raw_stats.get("games_played") or 0
@@ -36,4 +54,7 @@ def build_team_features(
         "home_runs": raw_stats["home_runs"],
         "runs_per_game": runs_per_game,
         "run_differential_per_game": run_differential_per_game,
+        # Park factor: only meaningful when this dict is built for the home team.
+        # Passed to run_monte_carlo where it adjusts the home-field advantage.
+        "park_factor": PARK_FACTORS.get(venue, 0.0) if venue else 0.0,
     }

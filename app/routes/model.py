@@ -27,7 +27,7 @@ def run_model(game_id: int, db: Session = Depends(get_db)):
     home_raw = fetch_team_stats(team_id=game.home_team_id, season=game.season)
 
     away_features = build_team_features(away_raw)
-    home_features = build_team_features(home_raw)
+    home_features = build_team_features(home_raw, venue=game.venue)
 
     result = run_monte_carlo(
         away_team=away_features,

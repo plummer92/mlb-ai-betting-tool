@@ -77,8 +77,13 @@ def run_monte_carlo(
     away_win_pct_raw = away_wins / sim_count
     home_win_pct_raw = home_wins / sim_count
 
-    # Apply home field advantage, then clamp both sides to [0.05, 0.95]
-    home_win_pct = min(0.95, max(0.05, home_win_pct_raw + HOME_FIELD_ADVANTAGE))
+    # Combine base home-field edge with venue-specific park factor.
+    # Park factor is set by build_team_features(venue=...) on the home team;
+    # positive values (e.g. Dodger Stadium +0.144) boost home win probability,
+    # negative values (e.g. Guaranteed Rate Field -0.151) suppress it.
+    park_factor = home_team.get("park_factor", 0.0)
+    effective_hfa = HOME_FIELD_ADVANTAGE + park_factor
+    home_win_pct = min(0.95, max(0.05, home_win_pct_raw + effective_hfa))
     away_win_pct = min(0.95, max(0.05, 1.0 - home_win_pct))
 
     projected_away_score = sum(away_scores) / sim_count

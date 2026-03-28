@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.config import MLB_API_BASE
 from app.models.schema import BacktestGame, BacktestResult
+from app.services.feature_builder import PARK_FACTORS
 from app.services.mlb_api import fetch_pitcher_stats, fetch_team_stats
 
 logger = logging.getLogger(__name__)
@@ -28,12 +29,13 @@ _COMMIT_INTERVAL = 50
 
 # Features used for logistic regression (all expressed as home-minus-away advantages)
 FEATURE_NAMES = [
-    "home_era_adv",    # away_era  - home_era  (positive = home pitches better)
-    "home_whip_adv",   # away_whip - home_whip
-    "home_ops_adv",    # home_ops  - away_ops
-    "home_win_pct",
-    "away_win_pct",
-    "home_starter_era_adv",  # away_starter_era - home_starter_era (may be 0 if no data)
+    "home_era_adv",         # away_era  - home_era  (positive = home pitches better)
+    "home_whip_adv",        # away_whip - home_whip
+    "home_ops_adv",         # home_ops  - away_ops
+    "home_starter_era_adv", # away_starter_era - home_starter_era (may be 0 if no data)
+    "win_pct_adv",          # home_win_pct - away_win_pct (replaces two separate features)
+    "run_diff_adv",         # home_run_diff - away_run_diff
+    "park_factor_adv",      # venue-based park factor from PARK_FACTORS lookup
 ]
 
 
@@ -245,14 +247,15 @@ def run_logistic_regression(db: Session, seasons: list[int]) -> BacktestResult:
         home_era_adv  = (r.away_team_era or 4.2)  - (r.home_team_era or 4.2)
         home_whip_adv = (r.away_team_whip or 1.3)  - (r.home_team_whip or 1.3)
         home_ops_adv  = (r.home_team_ops or 0.72) - (r.away_team_ops or 0.72)
-        home_win_pct  = r.home_win_pct or 0.5
-        away_win_pct  = r.away_win_pct or 0.5
         home_starter_era_adv = (
             (r.away_starter_era or r.away_team_era or 4.2)
             - (r.home_starter_era or r.home_team_era or 4.2)
         )
-        X.append([home_era_adv, home_whip_adv, home_ops_adv,
-                   home_win_pct, away_win_pct, home_starter_era_adv])
+        win_pct_adv   = (r.home_win_pct or 0.5) - (r.away_win_pct or 0.5)
+        run_diff_adv  = (r.home_run_diff or 0) - (r.away_run_diff or 0)
+        park_factor_adv = PARK_FACTORS.get(r.venue or "", 0.0)
+        X.append([home_era_adv, home_whip_adv, home_ops_adv, home_starter_era_adv,
+                   win_pct_adv, run_diff_adv, park_factor_adv])
         y.append(int(r.home_win))
 
     scaler = StandardScaler()
@@ -365,10 +368,7 @@ def run_analysis(db: Session, seasons: list[int]) -> dict:
             "feature":   col,
             "pearson_r": round(r_val, 4),
             "abs_r":     round(abs(r_val), 4),
-            "in_current_model": col in {
-                "home_era_adv", "home_whip_adv", "home_ops_adv",
-                "home_starter_era_adv", "home_win_pct", "away_win_pct",
-            },
+            "in_current_model": col in set(FEATURE_NAMES),
         })
     correlations.sort(key=lambda x: x["abs_r"], reverse=True)
 
@@ -568,7 +568,4 @@ def apply_backtest_weights(result: BacktestResult) -> None:
         return
 
     set_weights(era_abs, whip_abs, ops_abs)
-    logger.info(
-        "Simulator weights updated from backtest — ERA: %.4f  WHIP: %.4f  OPS: %.4f",
-        era_abs, whip_abs, ops_abs,
-    )
+    print(f"[backtest] Simulator weights updated — ERA: {era_abs:.4f}  WHIP: {whip_abs:.4f}  OPS: {ops_abs:.4f}", flush=True)

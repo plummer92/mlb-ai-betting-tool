@@ -111,7 +111,7 @@ def run_monte_carlo_and_schedule_pregame():
                 away_starter = fetch_pitcher_stats(game.away_pitcher_id, game.season) if game.away_pitcher_id else None
                 home_starter = fetch_pitcher_stats(game.home_pitcher_id, game.season) if game.home_pitcher_id else None
                 away_features = build_team_features(away_raw, starter_stats=away_starter)
-                home_features = build_team_features(home_raw, starter_stats=home_starter)
+                home_features = build_team_features(home_raw, starter_stats=home_starter, venue=game.venue)
                 result = run_monte_carlo(away_team=away_features, home_team=home_features, sim_count=1000)
                 prediction = Prediction(
                     game_id=game.game_id,
