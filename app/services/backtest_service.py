@@ -421,7 +421,14 @@ def run_analysis(db: Session, seasons: list[int]) -> dict:
     ]
     correlations = []
     for col in FEATURE_COLS:
-        r_val = float(df[col].corr(df["home_win"]))
+        # Zero-variance columns (e.g. Statcast fields all NULL → all defaulted to
+        # the same value) produce NaN from .corr(). Treat them as r=0.
+        if df[col].std() == 0:
+            r_val = 0.0
+        else:
+            r_val = float(df[col].corr(df["home_win"]))
+            if r_val != r_val:  # NaN check
+                r_val = 0.0
         correlations.append({
             "feature":   col,
             "pearson_r": round(r_val, 4),
@@ -578,7 +585,17 @@ def run_analysis(db: Session, seasons: list[int]) -> dict:
         ),
     })
 
-    return {
+    def _json_safe(obj):
+        """Recursively replace NaN/Inf floats with None so FastAPI can serialise."""
+        if isinstance(obj, float):
+            return None if (obj != obj or obj == float("inf") or obj == float("-inf")) else obj
+        if isinstance(obj, dict):
+            return {k: _json_safe(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_json_safe(v) for v in obj]
+        return obj
+
+    return _json_safe({
         "generated_at":        __import__("datetime").datetime.utcnow().isoformat() + "Z",
         "seasons":             ",".join(str(s) for s in sorted(seasons)),
         "n_games":             len(df),
@@ -606,7 +623,7 @@ def run_analysis(db: Session, seasons: list[int]) -> dict:
             recommendations,
             key=lambda x: {"HIGH": 0, "MEDIUM": 1, "LOW": 2}[x["priority"]],
         ),
-    }
+    })
 
 
 def apply_backtest_weights(result: BacktestResult) -> None:
