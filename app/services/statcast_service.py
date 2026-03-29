@@ -227,14 +227,23 @@ def _load_team_batting_season(season: int) -> dict:
     data: dict = {}
     try:
         time.sleep(_REQUEST_DELAY)
+        # group_by=team_id asks Baseball Savant to aggregate server-side (one row
+        # per team). If that returns no team_id column we fall back to per-batter
+        # aggregation below using whatever team column is present.
         url = (
             "https://baseballsavant.mlb.com/leaderboard/custom"
             f"?year={season}&type=batter&filter=&min=q"
             "&selections=exit_velocity_avg%2Cbarrel_batted_rate%2Chard_hit_percent"
-            "&chart=false&csv=true"
+            "&chart=false&group_by=team_id&csv=true"
         )
         print(f"[statcast] Fetching team batting Statcast: {url}", flush=True)
         resp = requests.get(url, timeout=_TIMEOUT, headers=_SAVANT_HEADERS)
+
+        print(
+            f"[statcast] Team batting response preview ({season}): "
+            f"{resp.text[:200].replace(chr(10), '\\n')}",
+            flush=True,
+        )
 
         if resp.status_code != 200:
             print(
@@ -245,22 +254,26 @@ def _load_team_batting_season(season: int) -> dict:
             return data
 
         rows = _parse_csv(resp.text)
+        cols = list(rows[0].keys()) if rows else []
         print(
-            f"[statcast] Team batting CSV rows: {len(rows)}"
-            f" | cols: {list(rows[0].keys()) if rows else 'none'}",
+            f"[statcast] Team batting CSV: {len(rows)} rows | cols: {cols}",
             flush=True,
         )
+        if rows:
+            print(f"[statcast] Team batting sample row: {rows[0]}", flush=True)
 
-        # Aggregate per-batter rows to team level
+        # Try every plausible team-id column name Baseball Savant might use
+        _TID_KEYS = ("team_id", "teamid", "player_team_id", "team", "org_id", "org")
+
         from collections import defaultdict
         buckets: dict = defaultdict(lambda: {"ev": [], "br": [], "hh": []})
         for row in rows:
-            tid = row.get("team_id") or row.get("teamid")
+            tid = next((row[k] for k in _TID_KEYS if row.get(k)), None)
             if not tid:
                 continue
             ev = _safe_float(row.get("exit_velocity_avg") or row.get("avg_hit_speed"))
             br = _safe_float(row.get("barrel_batted_rate") or row.get("barrel_rate"))
-            hh = _safe_float(row.get("hard_hit_percent") or row.get("hard_hit_rate"))
+            hh = _safe_float(row.get("hard_hit_percent")  or row.get("hard_hit_rate"))
             b = buckets[str(tid)]
             if ev is not None: b["ev"].append(ev)
             if br is not None: b["br"].append(br)
@@ -274,9 +287,16 @@ def _load_team_batting_season(season: int) -> dict:
             }
 
         print(
-            f"[statcast] Team batting: {len(data)} teams aggregated for {season}",
+            f"[statcast] Team batting: {len(data)} teams aggregated for {season}"
+            f" (tid keys tried: {_TID_KEYS})",
             flush=True,
         )
+        if len(data) == 0 and rows:
+            print(
+                "[statcast] WARNING: 0 teams aggregated but rows exist — "
+                f"none of {_TID_KEYS} found in columns {cols}",
+                flush=True,
+            )
         _save_to_disk("team_batting", season, data)
 
     except Exception as e:
