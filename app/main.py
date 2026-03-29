@@ -11,6 +11,7 @@ from app.routes.daily import router as daily_router
 from app.routes.backtest import router as backtest_router
 from app.routes.ranked import router as ranked_router
 from app.routes.debug import router as debug_router
+from app.routes.alerts import router as alerts_router
 from app.routes.reviews import router as reviews_router
 from app.routes.status import router as status_router
 from app.routes.dashboard import router as dashboard_router
@@ -35,6 +36,7 @@ app = FastAPI(
 )
 
 
+app.include_router(alerts_router)
 app.include_router(games_router)
 app.include_router(model_router)
 app.include_router(edges_router)

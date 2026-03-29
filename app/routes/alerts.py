@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from app.config import DISCORD_WEBHOOK_URL
 from app.db import get_db
 from app.models.schema import BetAlert, GameOutcomeReview, Prediction
 
@@ -20,6 +21,18 @@ ET = ZoneInfo("America/New_York")
 @router.post("/alerts/run")
 def run_alerts(db: Session = Depends(get_db)):
     return create_and_send_alerts_for_today(db)
+
+
+@router.post("/alerts/send")
+def send_alerts(db: Session = Depends(get_db)):
+    result = create_and_send_alerts_for_today(db)
+    url = DISCORD_WEBHOOK_URL or ""
+    return {
+        "sent": result.get("sent", 0),
+        "skipped": result.get("skipped", 0),
+        "failed": result.get("failed", 0),
+        "webhook_url_prefix": url[:30] if url else "(not set)",
+    }
 
 
 @router.get("/alerts/today")

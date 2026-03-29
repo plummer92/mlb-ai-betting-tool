@@ -59,11 +59,13 @@ def create_and_send_alerts_for_today(db: Session) -> dict:
             latest_by_game[game.game_id] = (edge, game, prediction)
 
     edges = list(latest_by_game.values())
+    print(f"[alerts] Evaluating {len(edges)} edges for {today}", flush=True)
 
     created = 0
     sent = 0
     skipped = 0
     failed = 0
+    qualified = 0
 
     for edge, game, prediction in edges:
 
@@ -77,9 +79,16 @@ def create_and_send_alerts_for_today(db: Session) -> dict:
             continue
 
         if not qualifies_for_alert(edge):
+            print(
+                f"[alerts] Game {game.game_id}: skipped (play={edge.recommended_play}, "
+                f"confidence={edge.confidence_tier}, edge={edge.edge_pct}, "
+                f"ev={_best_ev_for_play(edge):.4f})",
+                flush=True,
+            )
             skipped += 1
             continue
 
+        qualified += 1
         synopsis, rationale = build_edge_synopsis(game, edge)
         ev = _best_ev_for_play(edge)
 
@@ -111,6 +120,11 @@ def create_and_send_alerts_for_today(db: Session) -> dict:
             failed += 1
 
     db.commit()
+    print(
+        f"[alerts] Done: {len(edges)} evaluated, {qualified} qualified, "
+        f"{sent} sent, {skipped} skipped, {failed} failed",
+        flush=True,
+    )
 
     return {
         "created": created,
