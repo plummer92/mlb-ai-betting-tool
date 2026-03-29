@@ -37,6 +37,9 @@ class PredictionOut(BaseModel):
     confidence_score: float
     recommended_side: Optional[str] = None
     created_at: Optional[datetime] = None
+    home_starter_xera: Optional[float] = None
+    away_starter_xera: Optional[float] = None
+    using_xera: bool = False
 
     class Config:
         from_attributes = True

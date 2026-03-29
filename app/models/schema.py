@@ -66,6 +66,10 @@ class Prediction(Base):
     confidence_score = Column(Float, nullable=False)
     recommended_side = Column(String, nullable=True)
 
+    home_starter_xera = Column(Float, nullable=True)
+    away_starter_xera = Column(Float, nullable=True)
+    using_xera = Column(Boolean, nullable=False, default=False)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

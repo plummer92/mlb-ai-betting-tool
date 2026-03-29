@@ -92,6 +92,11 @@ async def daily_run(db: Session = Depends(get_db)):
                 projected_total=result["projected_total"],
                 confidence_score=result["confidence_score"],
                 recommended_side=result["recommended_side"],
+                home_starter_xera=home_features.get("starter_xera"),
+                away_starter_xera=away_features.get("starter_xera"),
+                using_xera=bool(
+                    home_features.get("using_xera") or away_features.get("using_xera")
+                ),
             )
             db.add(prediction)
             db.commit()

@@ -57,6 +57,9 @@ def build_team_features(
         "era": era,
         "whip": whip,
         "using_xera": using_xera,
+        # starter_xera is the raw Statcast xERA value (separate from era, which may
+        # already equal xera). Surfaced on the Prediction row for transparency.
+        "starter_xera": starter_stats.get("xera") if starter_stats else None,
         "starter_k9":  starter_stats["k9"]  if starter_stats else None,
         "starter_bb9": starter_stats["bb9"] if starter_stats else None,
         "avg": raw_stats["avg"],
