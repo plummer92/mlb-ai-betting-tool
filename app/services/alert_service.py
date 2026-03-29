@@ -30,12 +30,36 @@ def _best_ev_for_play(edge: EdgeResult) -> float:
 
 def qualifies_for_alert(edge: EdgeResult) -> bool:
     if not edge.recommended_play:
+        print(f"[alerts]   FAIL no_play: game={edge.game_id}", flush=True)
         return False
-    if (edge.confidence_tier or "").lower() not in ALERT_CONFIDENCE_LEVELS:
+
+    confidence = (edge.confidence_tier or "").lower()
+    edge_val = float(edge.edge_pct or 0)
+    ev_val = _best_ev_for_play(edge)
+
+    # Strong plays with meaningful edge always qualify regardless of EV threshold
+    if confidence == "strong" and edge_val > 0.10:
+        return True
+
+    if confidence not in ALERT_CONFIDENCE_LEVELS:
+        print(
+            f"[alerts]   FAIL confidence: game={edge.game_id} confidence={confidence!r} "
+            f"not in {ALERT_CONFIDENCE_LEVELS}",
+            flush=True,
+        )
         return False
-    if float(edge.edge_pct or 0) < ALERT_MIN_EDGE:
+    if edge_val < ALERT_MIN_EDGE:
+        print(
+            f"[alerts]   FAIL edge: game={edge.game_id} edge_pct={edge_val:.4f} < {ALERT_MIN_EDGE}",
+            flush=True,
+        )
         return False
-    if _best_ev_for_play(edge) < ALERT_MIN_EV:
+    if ev_val < ALERT_MIN_EV:
+        print(
+            f"[alerts]   FAIL ev: game={edge.game_id} ev={ev_val:.4f} < {ALERT_MIN_EV} "
+            f"(play={edge.recommended_play})",
+            flush=True,
+        )
         return False
     return True
 
