@@ -239,9 +239,9 @@ def _load_team_batting_season(season: int) -> dict:
         print(f"[statcast] Fetching team batting Statcast: {url}", flush=True)
         resp = requests.get(url, timeout=_TIMEOUT, headers=_SAVANT_HEADERS)
 
+        preview = resp.text[:200].replace("\n", "\\n")
         print(
-            f"[statcast] Team batting response preview ({season}): "
-            f"{resp.text[:200].replace(chr(10), '\\n')}",
+            f"[statcast] Team batting response preview ({season}): {preview}",
             flush=True,
         )
 
