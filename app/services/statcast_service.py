@@ -208,102 +208,24 @@ def fetch_pitcher_xera(pitcher_id: int, season: int) -> dict | None:
 
 def _load_team_batting_season(season: int) -> dict:
     """
-    Download per-batter Statcast data for a season, aggregate to team level.
-    Returns {str(team_id): {exit_velocity_avg, barrel_rate, hard_hit_rate}}.
-    One HTTP request per season; all 30 teams populated at once.
+    Team batting Statcast (exit velo, barrel rate, hard hit rate) — stubbed out.
+
+    Baseball Savant's CSV leaderboard returns per-player rows with no team_id
+    column; group_by=team_id is silently ignored in the CSV export.  Aggregating
+    player→team would require a full roster lookup via the MLB Stats API for each
+    season, which is expensive and fragile.
+
+    The schema columns (home/away_exit_velo, barrel_rate, hard_hit_rate) are kept
+    in backtest_games for future use.  Sprint speed (separate endpoint, already
+    working) is the only team-level Statcast metric collected right now.
     """
-    if season in _team_batting_cache:
-        return _team_batting_cache[season]
-
-    disk_data = _load_from_disk("team_batting", season)
-    if disk_data is not None:
-        _team_batting_cache[season] = disk_data
+    if season not in _team_batting_cache:
         print(
-            f"[statcast] Team batting {season}: loaded {len(disk_data)} teams from disk",
+            f"[statcast] Team batting not available via CSV endpoint — skipping ({season})",
             flush=True,
         )
-        return disk_data
-
-    data: dict = {}
-    try:
-        time.sleep(_REQUEST_DELAY)
-        # group_by=team_id asks Baseball Savant to aggregate server-side (one row
-        # per team). If that returns no team_id column we fall back to per-batter
-        # aggregation below using whatever team column is present.
-        url = (
-            "https://baseballsavant.mlb.com/leaderboard/custom"
-            f"?year={season}&type=batter&filter=&min=q"
-            "&selections=exit_velocity_avg%2Cbarrel_batted_rate%2Chard_hit_percent"
-            "&chart=false&group_by=team_id&csv=true"
-        )
-        print(f"[statcast] Fetching team batting Statcast: {url}", flush=True)
-        resp = requests.get(url, timeout=_TIMEOUT, headers=_SAVANT_HEADERS)
-
-        preview = resp.text[:200].replace("\n", "\\n")
-        print(
-            f"[statcast] Team batting response preview ({season}): {preview}",
-            flush=True,
-        )
-
-        if resp.status_code != 200:
-            print(
-                f"[statcast] Team batting HTTP {resp.status_code} for {season}",
-                flush=True,
-            )
-            _team_batting_cache[season] = data
-            return data
-
-        rows = _parse_csv(resp.text)
-        cols = list(rows[0].keys()) if rows else []
-        print(
-            f"[statcast] Team batting CSV: {len(rows)} rows | cols: {cols}",
-            flush=True,
-        )
-        if rows:
-            print(f"[statcast] Team batting sample row: {rows[0]}", flush=True)
-
-        # Try every plausible team-id column name Baseball Savant might use
-        _TID_KEYS = ("team_id", "teamid", "player_team_id", "team", "org_id", "org")
-
-        from collections import defaultdict
-        buckets: dict = defaultdict(lambda: {"ev": [], "br": [], "hh": []})
-        for row in rows:
-            tid = next((row[k] for k in _TID_KEYS if row.get(k)), None)
-            if not tid:
-                continue
-            ev = _safe_float(row.get("exit_velocity_avg") or row.get("avg_hit_speed"))
-            br = _safe_float(row.get("barrel_batted_rate") or row.get("barrel_rate"))
-            hh = _safe_float(row.get("hard_hit_percent")  or row.get("hard_hit_rate"))
-            b = buckets[str(tid)]
-            if ev is not None: b["ev"].append(ev)
-            if br is not None: b["br"].append(br)
-            if hh is not None: b["hh"].append(hh)
-
-        for tid, vals in buckets.items():
-            data[tid] = {
-                "exit_velocity_avg": sum(vals["ev"]) / len(vals["ev"]) if vals["ev"] else None,
-                "barrel_rate":       sum(vals["br"]) / len(vals["br"]) if vals["br"] else None,
-                "hard_hit_rate":     sum(vals["hh"]) / len(vals["hh"]) if vals["hh"] else None,
-            }
-
-        print(
-            f"[statcast] Team batting: {len(data)} teams aggregated for {season}"
-            f" (tid keys tried: {_TID_KEYS})",
-            flush=True,
-        )
-        if len(data) == 0 and rows:
-            print(
-                "[statcast] WARNING: 0 teams aggregated but rows exist — "
-                f"none of {_TID_KEYS} found in columns {cols}",
-                flush=True,
-            )
-        _save_to_disk("team_batting", season, data)
-
-    except Exception as e:
-        print(f"[statcast] Team batting fetch failed ({season}): {e}", flush=True)
-
-    _team_batting_cache[season] = data
-    return data
+        _team_batting_cache[season] = {}
+    return _team_batting_cache[season]
 
 
 # ── Sprint speed ──────────────────────────────────────────────────────────────
