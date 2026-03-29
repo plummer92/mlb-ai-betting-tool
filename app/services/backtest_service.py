@@ -21,6 +21,7 @@ from app.config import MLB_API_BASE
 from app.models.schema import BacktestGame, BacktestResult
 from app.services.feature_builder import PARK_FACTORS
 from app.services.mlb_api import fetch_bullpen_stats, fetch_pitcher_stats, fetch_team_stats
+from app.services.statcast_service import fetch_team_statcast
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +134,12 @@ def collect_season(db: Session, season: int) -> int:
       so without a cache this would be ~4,800 redundant API calls per season.
     - Commits every _COMMIT_INTERVAL games to keep the Neon Postgres connection alive.
     - 80ms sleep between pitcher API lookups to avoid triggering MLB API rate limits.
+
+    Bullpen stats note: home_bullpen_era / away_bullpen_era are populated via
+    fetch_bullpen_stats() which uses the MLB Stats API pitchingType=R split.
+    If that split returns no data (common), the columns will equal team ERA as a
+    fallback — they are still populated (never NULL) but carry no additional signal
+    beyond home_team_era until the API returns distinct reliever ERA.
     """
     print(f"[backtest] Starting collection for season {season}", flush=True)
     games = _fetch_season_schedule(season)
@@ -182,6 +189,10 @@ def collect_season(db: Session, season: int) -> int:
             away_bullpen = _bullpen_stats(g["away_team_id"])
             home_bullpen = _bullpen_stats(g["home_team_id"])
 
+            # Statcast team metrics — fetched once per (team, season), cached
+            away_sc = fetch_team_statcast(g["away_team_id"], season)
+            home_sc = fetch_team_statcast(g["home_team_id"], season)
+
             away_run_diff = away_stats["runs"] - away_stats["runs_allowed"]
             home_run_diff = home_stats["runs"] - home_stats["runs_allowed"]
 
@@ -215,6 +226,14 @@ def collect_season(db: Session, season: int) -> int:
                 home_run_diff=home_run_diff,
                 away_bullpen_era=away_bullpen["era"] if away_bullpen else None,
                 home_bullpen_era=home_bullpen["era"] if home_bullpen else None,
+                away_exit_velo=away_sc["exit_velocity_avg"] if away_sc else None,
+                home_exit_velo=home_sc["exit_velocity_avg"] if home_sc else None,
+                away_barrel_rate=away_sc["barrel_rate"]     if away_sc else None,
+                home_barrel_rate=home_sc["barrel_rate"]     if home_sc else None,
+                away_hard_hit_rate=away_sc["hard_hit_rate"] if away_sc else None,
+                home_hard_hit_rate=home_sc["hard_hit_rate"] if home_sc else None,
+                away_sprint_speed=away_sc["sprint_speed_avg"] if away_sc else None,
+                home_sprint_speed=home_sc["sprint_speed_avg"] if home_sc else None,
             )
 
             stmt = pg_insert(BacktestGame).values(**row_data)
@@ -341,6 +360,16 @@ def run_analysis(db: Session, seasons: list[int]) -> dict:
         h_bp = r.home_bullpen_era if r.home_bullpen_era is not None else h_era
         a_bp = r.away_bullpen_era if r.away_bullpen_era is not None else a_era
 
+        # Statcast team metrics — default to league averages when NULL
+        h_ev  = r.home_exit_velo     or 88.5
+        a_ev  = r.away_exit_velo     or 88.5
+        h_br  = r.home_barrel_rate   or 8.0
+        a_br  = r.away_barrel_rate   or 8.0
+        h_hh  = r.home_hard_hit_rate or 38.0
+        a_hh  = r.away_hard_hit_rate or 38.0
+        h_ss  = r.home_sprint_speed  or 27.0
+        a_ss  = r.away_sprint_speed  or 27.0
+
         records.append({
             "home_win":            int(r.home_win),
             "season":              r.season,
@@ -360,8 +389,13 @@ def run_analysis(db: Session, seasons: list[int]) -> dict:
             "win_pct_adv":         h_wp   - a_wp,
             "home_run_diff":       h_rd,
             "away_run_diff":       a_rd,
-            "run_diff_adv":        h_rd   - a_rd,   # home minus away
+            "run_diff_adv":        h_rd   - a_rd,
             "bullpen_era_adv":     a_bp   - h_bp,
+            # Statcast team batting/speed advantages (home minus away)
+            "exit_velo_adv":       h_ev   - a_ev,
+            "barrel_rate_adv":     h_br   - a_br,
+            "hard_hit_rate_adv":   h_hh   - a_hh,
+            "sprint_speed_adv":    h_ss   - a_ss,
         })
 
     df = pd.DataFrame(records)
@@ -379,6 +413,11 @@ def run_analysis(db: Session, seasons: list[int]) -> dict:
         "away_run_diff",
         "run_diff_adv",
         "bullpen_era_adv",
+        # Statcast team metrics — candidate features pending data collection
+        "exit_velo_adv",
+        "barrel_rate_adv",
+        "hard_hit_rate_adv",
+        "sprint_speed_adv",
     ]
     correlations = []
     for col in FEATURE_COLS:

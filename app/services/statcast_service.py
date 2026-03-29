@@ -33,9 +33,10 @@ _SAVANT_HEADERS = {
     "Accept": "text/csv,text/plain,*/*",
 }
 
-# In-process season caches — {season: {str(player_id): data}}
+# In-process season caches — {season: {str(player_id or team_id): data}}
 _pitcher_cache: dict[int, dict] = {}
 _team_batting_cache: dict[int, dict] = {}
+_team_sprint_cache: dict[int, dict] = {}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -207,11 +208,9 @@ def fetch_pitcher_xera(pitcher_id: int, season: int) -> dict | None:
 
 def _load_team_batting_season(season: int) -> dict:
     """
-    Return {str(team_id): {exit_velocity_avg, barrel_rate, hard_hit_rate}}
-    for all teams in a season. Fetches once, then caches.
-
-    Note: sprint_speed_avg and outs_above_average require separate endpoints
-    (Phase 3). Only batting contact-quality metrics are collected here.
+    Download per-batter Statcast data for a season, aggregate to team level.
+    Returns {str(team_id): {exit_velocity_avg, barrel_rate, hard_hit_rate}}.
+    One HTTP request per season; all 30 teams populated at once.
     """
     if season in _team_batting_cache:
         return _team_batting_cache[season]
@@ -228,15 +227,13 @@ def _load_team_batting_season(season: int) -> dict:
     data: dict = {}
     try:
         time.sleep(_REQUEST_DELAY)
-        # group_by=team_id returns one row per team (aggregated across all batters)
         url = (
             "https://baseballsavant.mlb.com/leaderboard/custom"
-            f"?year={season}&type=batter&filter=&sort=4&sortDir=desc"
-            "&min=q"
+            f"?year={season}&type=batter&filter=&min=q"
             "&selections=exit_velocity_avg%2Cbarrel_batted_rate%2Chard_hit_percent"
-            "&group_by=team_id&csv=true"
+            "&chart=false&csv=true"
         )
-        print(f"[statcast] Fetching team batting Statcast for {season}…", flush=True)
+        print(f"[statcast] Fetching team batting Statcast: {url}", flush=True)
         resp = requests.get(url, timeout=_TIMEOUT, headers=_SAVANT_HEADERS)
 
         if resp.status_code != 200:
@@ -247,54 +244,136 @@ def _load_team_batting_season(season: int) -> dict:
             _team_batting_cache[season] = data
             return data
 
-        for row in _parse_csv(resp.text):
-            tid = row.get("team_id") or row.get("teamid") or row.get("team")
+        rows = _parse_csv(resp.text)
+        print(
+            f"[statcast] Team batting CSV rows: {len(rows)}"
+            f" | cols: {list(rows[0].keys()) if rows else 'none'}",
+            flush=True,
+        )
+
+        # Aggregate per-batter rows to team level
+        from collections import defaultdict
+        buckets: dict = defaultdict(lambda: {"ev": [], "br": [], "hh": []})
+        for row in rows:
+            tid = row.get("team_id") or row.get("teamid")
             if not tid:
                 continue
-            exit_velo = _safe_float(
-                row.get("exit_velocity_avg") or row.get("avg_hit_speed") or row.get("launch_speed")
-            )
-            if exit_velo is None:
-                continue
-            data[str(tid)] = {
-                "exit_velocity_avg": exit_velo,
-                "barrel_rate":   _safe_float(
-                    row.get("barrel_batted_rate") or row.get("barrel_rate")
-                ),
-                "hard_hit_rate": _safe_float(
-                    row.get("hard_hit_percent") or row.get("hard_hit_rate")
-                ),
-                # sprint_speed_avg / outs_above_average: Phase 3
-                "sprint_speed_avg":    None,
-                "outs_above_average":  None,
+            ev = _safe_float(row.get("exit_velocity_avg") or row.get("avg_hit_speed"))
+            br = _safe_float(row.get("barrel_batted_rate") or row.get("barrel_rate"))
+            hh = _safe_float(row.get("hard_hit_percent") or row.get("hard_hit_rate"))
+            b = buckets[str(tid)]
+            if ev is not None: b["ev"].append(ev)
+            if br is not None: b["br"].append(br)
+            if hh is not None: b["hh"].append(hh)
+
+        for tid, vals in buckets.items():
+            data[tid] = {
+                "exit_velocity_avg": sum(vals["ev"]) / len(vals["ev"]) if vals["ev"] else None,
+                "barrel_rate":       sum(vals["br"]) / len(vals["br"]) if vals["br"] else None,
+                "hard_hit_rate":     sum(vals["hh"]) / len(vals["hh"]) if vals["hh"] else None,
             }
 
         print(
-            f"[statcast] Fetched batting Statcast for {len(data)} teams in {season}",
+            f"[statcast] Team batting: {len(data)} teams aggregated for {season}",
             flush=True,
         )
         _save_to_disk("team_batting", season, data)
 
     except Exception as e:
-        print(
-            f"[statcast] Team batting fetch failed ({season}): {e}",
-            flush=True,
-        )
+        print(f"[statcast] Team batting fetch failed ({season}): {e}", flush=True)
 
     _team_batting_cache[season] = data
     return data
 
 
+# ── Sprint speed ──────────────────────────────────────────────────────────────
+
+def _load_sprint_speed_season(season: int) -> dict:
+    """
+    Download sprint speed leaderboard for a full season, aggregate to team level.
+    Returns {str(team_id): {"sprint_speed_avg": float}}.
+    One HTTP request per season; all teams populated at once.
+    """
+    if season in _team_sprint_cache:
+        return _team_sprint_cache[season]
+
+    disk_data = _load_from_disk("sprint_speed", season)
+    if disk_data is not None:
+        _team_sprint_cache[season] = disk_data
+        print(
+            f"[statcast] Sprint speed {season}: loaded {len(disk_data)} teams from disk",
+            flush=True,
+        )
+        return disk_data
+
+    data: dict = {}
+    try:
+        time.sleep(_REQUEST_DELAY)
+        # No team filter — fetch all players, aggregate per team_id
+        url = (
+            "https://baseballsavant.mlb.com/leaderboard/sprint_speed"
+            f"?min_opp=0&position=&team=&year={season}&csv=true"
+        )
+        print(f"[statcast] Fetching sprint speed leaderboard: {url}", flush=True)
+        resp = requests.get(url, timeout=_TIMEOUT, headers=_SAVANT_HEADERS)
+
+        if resp.status_code != 200:
+            print(
+                f"[statcast] Sprint speed HTTP {resp.status_code} for {season}",
+                flush=True,
+            )
+            _team_sprint_cache[season] = data
+            return data
+
+        rows = _parse_csv(resp.text)
+        print(
+            f"[statcast] Sprint speed CSV rows: {len(rows)}"
+            f" | cols: {list(rows[0].keys()) if rows else 'none'}",
+            flush=True,
+        )
+
+        from collections import defaultdict
+        buckets: dict = defaultdict(list)
+        for row in rows:
+            tid = row.get("team_id") or row.get("teamid")
+            speed = _safe_float(row.get("sprint_speed") or row.get("hp_to_1b"))
+            if tid and speed is not None:
+                buckets[str(tid)].append(speed)
+
+        for tid, speeds in buckets.items():
+            if speeds:
+                data[tid] = {"sprint_speed_avg": sum(speeds) / len(speeds)}
+
+        print(
+            f"[statcast] Sprint speed: {len(data)} teams aggregated for {season}",
+            flush=True,
+        )
+        _save_to_disk("sprint_speed", season, data)
+
+    except Exception as e:
+        print(f"[statcast] Sprint speed fetch failed ({season}): {e}", flush=True)
+
+    _team_sprint_cache[season] = data
+    return data
+
+
 def fetch_team_statcast(team_id: int, season: int) -> dict | None:
     """
-    Return team-level Statcast batting metrics for a team/season.
-    Returns None if unavailable. Falls back to prior season.
+    Return team-level Statcast metrics: exit_velocity_avg, barrel_rate,
+    hard_hit_rate, sprint_speed_avg. Falls back to prior season. Returns None
+    if all sources are unavailable.
     """
     try:
         for s in (season, season - 1):
-            result = _load_team_batting_season(s).get(str(team_id))
-            if result:
-                return result
+            batting = _load_team_batting_season(s).get(str(team_id))
+            sprint  = _load_sprint_speed_season(s).get(str(team_id))
+            if batting or sprint:
+                return {
+                    "exit_velocity_avg": batting.get("exit_velocity_avg") if batting else None,
+                    "barrel_rate":       batting.get("barrel_rate")       if batting else None,
+                    "hard_hit_rate":     batting.get("hard_hit_rate")     if batting else None,
+                    "sprint_speed_avg":  sprint.get("sprint_speed_avg")   if sprint  else None,
+                }
         return None
     except Exception as e:
         print(f"[statcast] fetch_team_statcast({team_id}, {season}): {e}", flush=True)

@@ -161,6 +161,15 @@ class BacktestGame(Base):
     away_run_diff = Column(Integer, nullable=True)
     home_bullpen_era = Column(Float, nullable=True)
     away_bullpen_era = Column(Float, nullable=True)
+    # Statcast team batting / speed metrics (Phase 3 — collected separately)
+    home_exit_velo    = Column(Float, nullable=True)
+    away_exit_velo    = Column(Float, nullable=True)
+    home_barrel_rate  = Column(Float, nullable=True)
+    away_barrel_rate  = Column(Float, nullable=True)
+    home_hard_hit_rate = Column(Float, nullable=True)
+    away_hard_hit_rate = Column(Float, nullable=True)
+    home_sprint_speed  = Column(Float, nullable=True)
+    away_sprint_speed  = Column(Float, nullable=True)
     collected_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

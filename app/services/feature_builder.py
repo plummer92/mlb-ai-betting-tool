@@ -22,6 +22,7 @@ def build_team_features(
     starter_stats: dict | None = None,
     venue: str | None = None,
     bullpen_stats: dict | None = None,
+    statcast_team: dict | None = None,
 ) -> dict:
     # Prefer games_played from the stats API; fall back to wins+losses or season default
     games_played = raw_stats.get("games_played") or 0
@@ -72,4 +73,9 @@ def build_team_features(
         "park_factor": PARK_FACTORS.get(venue, 0.0) if venue else 0.0,
         # Bullpen ERA: from reliever split when available; falls back to team ERA.
         "bullpen_era": bullpen_stats["era"] if bullpen_stats else raw_stats["era"],
+        # Statcast team batting/speed — None when not yet fetched (Phase 3)
+        "exit_velocity_avg": statcast_team.get("exit_velocity_avg") if statcast_team else None,
+        "barrel_rate":       statcast_team.get("barrel_rate")       if statcast_team else None,
+        "hard_hit_rate":     statcast_team.get("hard_hit_rate")     if statcast_team else None,
+        "sprint_speed_avg":  statcast_team.get("sprint_speed_avg")  if statcast_team else None,
     }
