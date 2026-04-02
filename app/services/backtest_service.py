@@ -9,10 +9,13 @@ import time
 import traceback
 from datetime import date
 
+import math
+
+import numpy as np
 import requests
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import log_loss as sk_log_loss
+from sklearn.metrics import brier_score_loss, log_loss as sk_log_loss
 from sklearn.model_selection import cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sqlalchemy.orm import Session
@@ -36,11 +39,15 @@ FEATURE_NAMES = [
     "home_starter_era_adv", # away_starter_era - home_starter_era (may be 0 if no data)
     "win_pct_adv",          # home_win_pct - away_win_pct (replaces two separate features)
     "park_factor_adv",      # venue-based park factor from PARK_FACTORS lookup
+    "kbb_adv",              # home_starter_kbb - away_starter_kbb (K/9 − BB/9 differential)
     # bullpen_era_adv excluded: pitchingType=R split returns team ERA, not reliever-only;
     #   coefficient was identical to home_era_adv (-0.071). Re-add once API returns
     #   distinct reliever ERA. Columns (home_bullpen_era, away_bullpen_era) kept in DB.
     # run_diff_adv excluded: multicollinear with win_pct_adv — coefficient inverts sign
 ]
+
+# Default K-BB differential (league-average k9 8.5 minus league-average bb9 3.2)
+_DEFAULT_KBB = 5.3
 
 
 # ── Season collection ─────────────────────────────────────────────────────────
@@ -214,6 +221,8 @@ def collect_season(db: Session, season: int) -> int:
                 home_starter_name=g["home_starter_name"],
                 away_starter_era=away_starter["era"] if away_starter else None,
                 home_starter_era=home_starter["era"] if home_starter else None,
+                away_starter_kbb=away_starter.get("kbb") if away_starter else None,
+                home_starter_kbb=home_starter.get("kbb") if home_starter else None,
                 away_team_era=away_stats["era"],
                 home_team_era=home_stats["era"],
                 away_team_ops=away_stats["ops"],
@@ -266,7 +275,8 @@ def collect_season(db: Session, season: int) -> int:
 def run_logistic_regression(db: Session, seasons: list[int]) -> BacktestResult:
     """
     Pull backtest_games for the given seasons, build feature matrix,
-    fit logistic regression, and store results.
+    fit logistic regression, then fit a Platt scaling calibrator on the
+    2023 season out-of-fold predictions and store results.
     """
     rows = (
         db.query(BacktestGame)
@@ -287,8 +297,12 @@ def run_logistic_regression(db: Session, seasons: list[int]) -> BacktestResult:
         )
         win_pct_adv     = (r.home_win_pct or 0.5) - (r.away_win_pct or 0.5)
         park_factor_adv = PARK_FACTORS.get(r.venue or "", 0.0)
+        kbb_adv = (
+            (r.home_starter_kbb if r.home_starter_kbb is not None else _DEFAULT_KBB)
+            - (r.away_starter_kbb if r.away_starter_kbb is not None else _DEFAULT_KBB)
+        )
         X.append([home_era_adv, home_whip_adv, home_ops_adv, home_starter_era_adv,
-                   win_pct_adv, park_factor_adv])
+                   win_pct_adv, park_factor_adv, kbb_adv])
         y.append(int(r.home_win))
 
     scaler = StandardScaler()
@@ -302,11 +316,48 @@ def run_logistic_regression(db: Session, seasons: list[int]) -> BacktestResult:
 
     accuracy    = float(sum(a == b for a, b in zip(y_pred, y)) / len(y))
     loss        = float(sk_log_loss(y, y_pred_proba))
+    brier       = float(brier_score_loss(y, y_pred_proba))
     cv_scores   = cross_val_score(model, X_scaled, y, cv=5, scoring="accuracy")
     cv_accuracy = float(cv_scores.mean())
 
     coefs = dict(zip(FEATURE_NAMES, [round(float(c), 6) for c in model.coef_[0]]))
     ranked = sorted(coefs.items(), key=lambda x: abs(x[1]), reverse=True)
+
+    # ── Platt scaling calibration on 2023 season ──────────────────────────────
+    # Fit a sigmoid calibrator using the base model's probability outputs on
+    # 2023 games as a held-out calibration set.  Parameters (a, b) are stored
+    # in the DB and applied at prediction time in the live pipeline.
+    calibration_params = None
+    X_arr = np.array(X_scaled)
+    y_arr = np.array(y)
+    idx_2023 = [i for i, r in enumerate(rows) if r.season == 2023]
+    if len(idx_2023) >= 30:
+        X_2023 = X_arr[idx_2023]
+        y_2023 = y_arr[idx_2023]
+        # CalibratedClassifierCV(cv="prefit") was removed in sklearn 1.2.
+        # Equivalent: fit a logistic regression on the base model's raw probs
+        # (standard Platt scaling: sigmoid(a * raw_prob + b) ≈ calibrated prob).
+        from scipy.special import expit
+        raw_probs_2023 = model.predict_proba(X_2023)[:, 1]
+        platt = LogisticRegression(max_iter=1000, random_state=42)
+        platt.fit(raw_probs_2023.reshape(-1, 1), y_2023)
+        a = round(float(platt.coef_[0][0]), 6)
+        b = round(float(platt.intercept_[0]), 6)
+        calibration_params = {"a": a, "b": b}
+        y_cal_proba_2023 = expit(a * raw_probs_2023 + b)
+        cal_brier_2023 = float(brier_score_loss(y_2023, y_cal_proba_2023))
+        print(
+            f"[backtest] Platt calibration fit on {len(idx_2023)} 2023 games: "
+            f"a={calibration_params['a']:.4f}  b={calibration_params['b']:.4f}  "
+            f"raw_brier={brier:.4f}  cal_brier_2023={cal_brier_2023:.4f}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[backtest] Skipping Platt calibration — only {len(idx_2023)} 2023 rows "
+            f"(need ≥30). Include season 2023 in the training set to enable calibration.",
+            flush=True,
+        )
 
     result = BacktestResult(
         seasons=",".join(str(s) for s in sorted(seasons)),
@@ -314,6 +365,8 @@ def run_logistic_regression(db: Session, seasons: list[int]) -> BacktestResult:
         accuracy=round(accuracy, 4),
         cv_accuracy=round(cv_accuracy, 4),
         log_loss=round(loss, 4),
+        brier_score=round(brier, 4),
+        calibration_params_json=json.dumps(calibration_params) if calibration_params else None,
         coefficients_json=json.dumps(coefs),
         feature_ranks_json=json.dumps([{"feature": f, "coef": c} for f, c in ranked]),
     )
@@ -624,6 +677,37 @@ def run_analysis(db: Session, seasons: list[int]) -> dict:
             key=lambda x: {"HIGH": 0, "MEDIUM": 1, "LOW": 2}[x["priority"]],
         ),
     })
+
+
+def get_latest_calibration_params(db: Session) -> dict | None:
+    """
+    Return the Platt calibration parameters {"a": float, "b": float} from the
+    most recent BacktestResult that has a calibration, or None if unavailable.
+    """
+    result = (
+        db.query(BacktestResult)
+        .filter(BacktestResult.calibration_params_json.isnot(None))
+        .order_by(BacktestResult.run_at.desc())
+        .first()
+    )
+    if result and result.calibration_params_json:
+        return json.loads(result.calibration_params_json)
+    return None
+
+
+def apply_calibration(raw_home: float, raw_away: float, params: dict) -> tuple[float, float]:
+    """
+    Apply Platt sigmoid calibration to a (home, away) win probability pair.
+    Formula: calibrated = 1 / (1 + exp(a * raw + b))
+    Returns (calibrated_home, calibrated_away) renormalized to sum to 1.
+    """
+    a, b = params["a"], params["b"]
+    cal_home = 1.0 / (1.0 + math.exp(a * raw_home + b))
+    cal_away = 1.0 / (1.0 + math.exp(a * raw_away + b))
+    total = cal_home + cal_away
+    if total == 0:
+        return raw_home, raw_away
+    return round(cal_home / total, 4), round(cal_away / total, 4)
 
 
 def apply_backtest_weights(result: BacktestResult) -> None:
