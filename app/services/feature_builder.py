@@ -1,6 +1,5 @@
 # Park factors derived from backtest correlation analysis (vs_baseline home win rate).
-# Positive = venue boosts home win probability; negative = suppresses it.
-# All unlisted venues default to 0.0 (league-average neutral).
+# They are intentionally shrunk and used only as a modest run-environment input.
 PARK_FACTORS: dict[str, float] = {
     "Dodger Stadium":        +0.144,
     "Truist Park":           +0.105,
@@ -13,6 +12,13 @@ PARK_FACTORS: dict[str, float] = {
     "Oakland Coliseum":      -0.141,
     "Guaranteed Rate Field": -0.151,
 }
+
+PYTHAG_EXPONENT = 1.83
+LEAGUE_AVG_RUNS_PER_GAME = 4.4
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
 
 
 def build_team_features(
@@ -34,46 +40,54 @@ def build_team_features(
 
     runs_per_game = raw_stats["runs"] / games_played
 
-    # run_differential_per_game replaces win_pct (backtest: zero predictive power)
     runs_allowed = raw_stats.get("runs_allowed")
     run_differential_per_game = (
         (raw_stats["runs"] - runs_allowed) / games_played
         if runs_allowed is not None
         else None
     )
+    pythagorean_win_pct = None
+    if runs_allowed is not None:
+        scored = max(float(raw_stats["runs"]), 1.0)
+        allowed = max(float(runs_allowed), 1.0)
+        pythagorean_win_pct = round(
+            (scored ** PYTHAG_EXPONENT) / ((scored ** PYTHAG_EXPONENT) + (allowed ** PYTHAG_EXPONENT)),
+            4,
+        )
 
-    # Use starter ERA/WHIP when available; fall back to team totals.
-    # Prefer xERA over ERA when the Statcast fetch succeeded (include_xera=True
-    # path in fetch_pitcher_stats); xERA strips out luck/BABIP noise.
+    starter_run_prevention = None
+    starter_whip = raw_stats["whip"]
+    starter_kbb = None
+    starter_kbb_percent = None
+    using_xera = False
     if starter_stats:
-        era  = starter_stats.get("xera") or starter_stats["era"]
-        whip = starter_stats["whip"]
+        starter_run_prevention = starter_stats.get("xera")
+        starter_whip = starter_stats.get("whip", raw_stats["whip"])
+        starter_kbb = starter_stats.get("kbb")
+        starter_kbb_percent = starter_stats.get("kbb_percent")
+        if starter_kbb_percent is None and starter_kbb is not None:
+            starter_kbb_percent = round(_clamp(float(starter_kbb) / 45.0, 0.05, 0.25), 4)
         using_xera = bool(starter_stats.get("xera"))
-    else:
-        era        = raw_stats["era"]
-        whip       = raw_stats["whip"]
-        using_xera = False
+
+    park_delta = PARK_FACTORS.get(venue, 0.0) if venue else 0.0
+    park_run_factor = round(_clamp(1.0 + (park_delta * 0.12), 0.96, 1.04), 4)
 
     return {
-        "era": era,
-        "whip": whip,
         "using_xera": using_xera,
-        # starter_xera is the raw Statcast xERA value (separate from era, which may
-        # already equal xera). Surfaced on the Prediction row for transparency.
         "starter_xera": starter_stats.get("xera") if starter_stats else None,
-        "starter_k9":  starter_stats["k9"]  if starter_stats else None,
-        "starter_bb9": starter_stats["bb9"] if starter_stats else None,
+        "starter_run_prevention": starter_run_prevention,
+        "starter_whip": starter_whip,
+        "starter_kbb": starter_kbb,
+        "starter_kbb_percent": starter_kbb_percent,
+        "team_whip": raw_stats["whip"],
         "avg": raw_stats["avg"],
         "ops": raw_stats["ops"],
         "home_runs": raw_stats["home_runs"],
         "runs_per_game": runs_per_game,
         "run_differential_per_game": run_differential_per_game,
-        # Park factor: only meaningful when this dict is built for the home team.
-        # Passed to run_monte_carlo where it adjusts the home-field advantage.
-        "park_factor": PARK_FACTORS.get(venue, 0.0) if venue else 0.0,
-        # Bullpen ERA: from reliever split when available; falls back to team ERA.
-        "bullpen_era": bullpen_stats["era"] if bullpen_stats else raw_stats["era"],
-        # Statcast team batting/speed — None when not yet fetched (Phase 3)
+        "pythagorean_win_pct": pythagorean_win_pct,
+        "park_run_factor": park_run_factor,
+        "bullpen_run_prevention": bullpen_stats["era"] if bullpen_stats else None,
         "exit_velocity_avg": statcast_team.get("exit_velocity_avg") if statcast_team else None,
         "barrel_rate":       statcast_team.get("barrel_rate")       if statcast_team else None,
         "hard_hit_rate":     statcast_team.get("hard_hit_rate")     if statcast_team else None,

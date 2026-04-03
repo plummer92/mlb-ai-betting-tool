@@ -1,96 +1,135 @@
-import random
+import math
 
-# Backtest-validated feature weights (logistic regression coefficients, sprint 3)
-# These can be updated at runtime via set_weights() when a new backtest runs.
-_ERA_W  = 0.42
-_WHIP_W = 0.36
-_OPS_W  = 0.15
-_TOTAL_W = _ERA_W + _WHIP_W + _OPS_W  # 0.93
+import numpy as np
 
+LEAGUE_AVG_RPG = 4.4
+_OPS_W = 0.32
+_RUN_DIFF_W = 0.26
+_PYTHAG_W = 0.22
+_WHIP_W = 0.12
+_KBB_W = 0.08
+_TOTAL_W = _OPS_W + _RUN_DIFF_W + _PYTHAG_W + _WHIP_W + _KBB_W
 
-def set_weights(era_w: float, whip_w: float, ops_w: float) -> None:
-    """Update simulator feature weights from backtest regression coefficients."""
-    global _ERA_W, _WHIP_W, _OPS_W, _TOTAL_W
-    _ERA_W   = era_w
-    _WHIP_W  = whip_w
-    _OPS_W   = ops_w
-    _TOTAL_W = _ERA_W + _WHIP_W + _OPS_W
+HOME_FIELD_RUNS = 0.12
+PROBABILITY_SHRINK = 0.68
+FINAL_PROBABILITY_FLOOR = 0.05
+FINAL_PROBABILITY_CEILING = 0.95
 
-# Explicit home field advantage in probability points (tunable)
-HOME_FIELD_ADVANTAGE = 0.04
-
-MODEL_VERSION = "v0.2-backtest-weighted"
+MODEL_VERSION = "v0.3-market-anchored"
 
 
-def simulate_runs(offense: dict, opponent: dict) -> int:
-    # ERA factor: higher opponent ERA = more runs for offense
-    era_factor = max(0.65, min(1.35, (opponent["era"] - 5.00) / 2.5 + 1.0))
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
 
-    # WHIP factor: higher opponent WHIP = more runs for offense
-    whip_factor = max(0.65, min(1.35, (opponent["whip"] - 1.30) / 0.40 + 1.0))
 
-    # OPS factor: own OPS vs. league average 0.720
-    ops_factor = max(0.65, min(1.35, offense["ops"] / 0.720))
+def set_weights(ops_w: float, run_diff_w: float, pythag_w: float) -> None:
+    """Update simulator macro weights from the latest backtest regression."""
+    global _OPS_W, _RUN_DIFF_W, _PYTHAG_W, _TOTAL_W
+    _OPS_W = ops_w
+    _RUN_DIFF_W = run_diff_w
+    _PYTHAG_W = pythag_w
+    _TOTAL_W = _OPS_W + _RUN_DIFF_W + _PYTHAG_W + _WHIP_W + _KBB_W
 
-    # Weighted composite using backtest coefficients
-    composite = (
-        _ERA_W  * era_factor  +
-        _WHIP_W * whip_factor +
-        _OPS_W  * ops_factor
+
+def _offense_strength(team: dict) -> float:
+    ops_factor = _clamp(float(team.get("ops", 0.720)) / 0.720, 0.92, 1.08)
+    run_diff = float(team.get("run_differential_per_game") or 0.0)
+    run_diff_factor = _clamp(1.0 + (run_diff * 0.06), 0.90, 1.10)
+    pythag = float(team.get("pythagorean_win_pct") or 0.5)
+    pythag_factor = _clamp(1.0 + ((pythag - 0.5) * 0.80), 0.92, 1.08)
+    whip_factor = _clamp(1.0 + ((1.30 - float(team.get("team_whip", 1.30))) * 0.18), 0.95, 1.05)
+    kbb_factor = _clamp(1.0 + ((float(team.get("starter_kbb_percent") or 0.12) - 0.12) * 0.80), 0.95, 1.05)
+    return (
+        (_OPS_W * ops_factor)
+        + (_RUN_DIFF_W * run_diff_factor)
+        + (_PYTHAG_W * pythag_factor)
+        + (_WHIP_W * whip_factor)
+        + (_KBB_W * kbb_factor)
     ) / _TOTAL_W
 
-    # Base RPG adjusted by run differential signal when available
-    base_rpg = offense["runs_per_game"]
-    run_diff = offense.get("run_differential_per_game")
-    if run_diff is not None:
-        base_rpg += run_diff * 0.1
 
-    noise = random.uniform(-2.0, 2.0)
-    return max(0, round(base_rpg * composite + noise))
+def _opponent_run_suppression(opponent: dict) -> float:
+    starter_run_prevention = opponent.get("starter_run_prevention")
+    starter_factor = 1.0
+    if starter_run_prevention is not None:
+        starter_factor = _clamp(1.0 + ((float(starter_run_prevention) - 4.10) * 0.06), 0.90, 1.10)
+
+    whip_factor = _clamp(1.0 + ((float(opponent.get("starter_whip", 1.28)) - 1.28) * 0.20), 0.92, 1.08)
+    kbb_pct = float(opponent.get("starter_kbb_percent") or 0.12)
+    kbb_factor = _clamp(1.0 - ((kbb_pct - 0.12) * 0.90), 0.92, 1.08)
+    bullpen_metric = opponent.get("bullpen_run_prevention")
+    bullpen_factor = 1.0
+    if bullpen_metric is not None:
+        bullpen_factor = _clamp(1.0 + ((float(bullpen_metric) - 4.05) * 0.04), 0.94, 1.06)
+
+    return (starter_factor * 0.40) + (whip_factor * 0.20) + (kbb_factor * 0.20) + (bullpen_factor * 0.20)
+
+
+def _expected_runs(offense: dict, opponent: dict, *, park_run_factor: float, is_home: bool) -> float:
+    base_runs = LEAGUE_AVG_RPG * _offense_strength(offense) * _opponent_run_suppression(opponent)
+    projected = base_runs * park_run_factor
+    if is_home:
+        projected += HOME_FIELD_RUNS
+    return _clamp(projected, 2.8, 6.6)
+
+
+def _shrink_probability(probability: float) -> float:
+    return 0.5 + ((probability - 0.5) * PROBABILITY_SHRINK)
+
+
+def _blend(probability: float, anchor: float, weight: float) -> float:
+    return (probability * (1.0 - weight)) + (anchor * weight)
+
+
+def _apply_market_anchor(probability: float, market_probability: float | None) -> tuple[float, float | None]:
+    if market_probability is None:
+        return probability, None
+    market_probability = _clamp(float(market_probability), 0.05, 0.95)
+    deviation = abs(probability - market_probability)
+    weight = _clamp(0.18 + (deviation * 1.6), 0.18, 0.45)
+    return _blend(probability, market_probability, weight), round(probability - market_probability, 4)
 
 
 def run_monte_carlo(
     away_team: dict,
     home_team: dict,
     sim_count: int = 1000,
+    *,
+    market_home_prob: float | None = None,
+    logistic_home_prob: float | None = None,
 ) -> dict:
-    away_wins = 0
-    home_wins = 0
     away_scores = []
     home_scores = []
 
-    for _ in range(sim_count):
-        away_runs = simulate_runs(offense=away_team, opponent=home_team)
-        home_runs = simulate_runs(offense=home_team, opponent=away_team)
+    park_run_factor = float(home_team.get("park_run_factor", 1.0) or 1.0)
+    away_lambda = _expected_runs(away_team, home_team, park_run_factor=park_run_factor, is_home=False)
+    home_lambda = _expected_runs(home_team, away_team, park_run_factor=park_run_factor, is_home=True)
 
-        away_scores.append(away_runs)
-        home_scores.append(home_runs)
+    away_runs = np.random.poisson(away_lambda, size=sim_count)
+    home_runs = np.random.poisson(home_lambda, size=sim_count)
+    away_scores.extend(int(x) for x in away_runs.tolist())
+    home_scores.extend(int(x) for x in home_runs.tolist())
 
-        if away_runs > home_runs:
-            away_wins += 1
-        elif home_runs > away_runs:
-            home_wins += 1
-        else:
-            away_wins += 0.5
-            home_wins += 0.5
+    away_wins = float(np.sum(away_runs > home_runs) + (0.5 * np.sum(away_runs == home_runs)))
+    home_wins = float(np.sum(home_runs > away_runs) + (0.5 * np.sum(home_runs == away_runs)))
 
-    away_win_pct_raw = away_wins / sim_count
     home_win_pct_raw = home_wins / sim_count
+    home_win_pct = _shrink_probability(home_win_pct_raw)
 
-    # Combine base home-field edge with venue-specific park factor.
-    # Park factor is set by build_team_features(venue=...) on the home team;
-    # positive values (e.g. Dodger Stadium +0.144) boost home win probability,
-    # negative values (e.g. Guaranteed Rate Field -0.151) suppress it.
-    park_factor = home_team.get("park_factor", 0.0)
-    effective_hfa = HOME_FIELD_ADVANTAGE + park_factor
-    home_win_pct = min(0.95, max(0.05, home_win_pct_raw + effective_hfa))
-    away_win_pct = min(0.95, max(0.05, 1.0 - home_win_pct))
+    logistic_delta = None
+    if logistic_home_prob is not None:
+        logistic_home_prob = _clamp(float(logistic_home_prob), 0.05, 0.95)
+        logistic_delta = round(home_win_pct - logistic_home_prob, 4)
+        home_win_pct = _blend(home_win_pct, logistic_home_prob, 0.22)
+
+    home_win_pct, market_delta = _apply_market_anchor(home_win_pct, market_home_prob)
+    home_win_pct = _clamp(home_win_pct, FINAL_PROBABILITY_FLOOR, FINAL_PROBABILITY_CEILING)
+    away_win_pct = _clamp(1.0 - home_win_pct, FINAL_PROBABILITY_FLOOR, FINAL_PROBABILITY_CEILING)
 
     projected_away_score = sum(away_scores) / sim_count
     projected_home_score = sum(home_scores) / sim_count
     projected_total = projected_away_score + projected_home_score
     confidence_score = abs(home_win_pct - away_win_pct) * 100
-
     recommended_side = "AWAY" if away_win_pct > home_win_pct else "HOME"
 
     return {
@@ -102,4 +141,10 @@ def run_monte_carlo(
         "confidence_score": round(confidence_score, 2),
         "recommended_side": recommended_side,
         "sim_count": sim_count,
+        "market_home_prob": round(market_home_prob, 4) if market_home_prob is not None else None,
+        "market_delta": market_delta,
+        "logistic_home_prob": round(logistic_home_prob, 4) if logistic_home_prob is not None else None,
+        "logistic_delta": logistic_delta,
+        "away_lambda": round(away_lambda, 3),
+        "home_lambda": round(home_lambda, 3),
     }

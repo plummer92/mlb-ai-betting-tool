@@ -3,13 +3,7 @@ from fastapi.responses import HTMLResponse
 
 router = APIRouter(tags=["dashboard"])
 
-DASHBOARD_HTML = r"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MLB AI WAR ROOM</title>
-<style>
+SHARED_STYLE = r"""
 /* ── Reset ── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -87,7 +81,7 @@ body::after {
 .header-brand {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 20px;
 }
 
 .war-room-title {
@@ -99,6 +93,25 @@ body::after {
   color: var(--cyan);
   text-shadow: 0 0 18px rgba(6,182,212,0.45);
 }
+
+.header-nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  font-weight: 700;
+}
+.nav-link {
+  color: var(--muted);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+.nav-link:hover, .nav-link.active {
+  color: var(--cyan);
+  text-shadow: 0 0 8px rgba(6,182,212,0.4);
+}
+.nav-sep { color: var(--border); }
 
 .live-badge {
   display: flex;
@@ -298,9 +311,15 @@ tr:hover td { background: rgba(6,182,212,0.025); }
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 15px 16px;
-  transition: border-color 0.2s;
+  transition: all 0.2s;
+  cursor: pointer;
+  position: relative;
 }
-.game-card:hover { border-color: var(--border-glow); }
+.game-card:hover { 
+  border-color: var(--cyan); 
+  box-shadow: 0 0 20px rgba(6,182,212,0.1);
+  transform: translateY(-2px);
+}
 .game-card.is-live {
   border-color: rgba(16,185,129,0.45);
   box-shadow: 0 0 14px rgba(16,185,129,0.07);
@@ -571,6 +590,73 @@ tr:hover td { background: rgba(6,182,212,0.025); }
   white-space: nowrap;
 }
 
+/* ── Modal ── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.85);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(4px);
+}
+.modal-content {
+  background: var(--surface);
+  border: 1px solid var(--border-glow);
+  border-radius: 12px;
+  width: 90%;
+  max-width: 650px;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 32px;
+  position: relative;
+  box-shadow: 0 0 40px rgba(6,182,212,0.15);
+}
+.modal-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 24px;
+  cursor: pointer;
+}
+.modal-close:hover { color: var(--text); }
+
+.modal-title {
+  font-family: 'Courier New', monospace;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--cyan);
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+}
+
+.dive-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+.dive-section {
+  margin-bottom: 20px;
+}
+.dive-label {
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+}
+.dive-val {
+  font-family: monospace;
+  font-size: 18px;
+  font-weight: 700;
+}
+.dive-val.large { font-size: 24px; }
+
 /* ── Loading / Empty ── */
 .loading {
   color: var(--muted);
@@ -602,16 +688,56 @@ tr:hover td { background: rgba(6,182,212,0.025); }
   .header { padding: 0 16px; }
   .war-room-title { font-size: 13px; letter-spacing: 2px; }
   .header-date { display: none; }
+  .dive-grid { grid-template-columns: 1fr; }
 }
-</style>
-</head>
-<body>
+"""
 
-<!-- ── HEADER ── -->
+SHARED_JS_HELPERS = r"""
+const $  = id => document.getElementById(id);
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const fmt = (n, d=1) => n == null ? '—' : (+n).toFixed(d);
+const pct0_1 = (n, d=1) => n == null ? '—' : (+n * 100).toFixed(d) + '%';
+const pct100 = (n, d=1) => n == null ? '—' : (+n).toFixed(d) + '%';
+
+function todayStr() {
+  const d = new Date();
+  return [d.getFullYear(), String(d.getMonth()+1).padStart(2,'0'), String(d.getDate()).padStart(2,'0')].join('-');
+}
+function yesterdayStr() {
+  const d = new Date(); d.setDate(d.getDate()-1);
+  return [d.getFullYear(), String(d.getMonth()+1).padStart(2,'0'), String(d.getDate()).padStart(2,'0')].join('-');
+}
+function friendlyDate(yyyymmdd) {
+  if (!yyyymmdd) return '';
+  const p = yyyymmdd.split('-');
+  return new Date(+p[0], +p[1]-1, +p[2]).toLocaleDateString('en-US', {weekday:'short',month:'short',day:'numeric',year:'numeric'});
+}
+function gameTime(iso) {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    if (isNaN(d)) return iso;
+    return d.toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit',timeZoneName:'short'});
+  } catch { return iso; }
+}
+function colorClass(val, good, warn) {
+  if (val == null) return 'muted';
+  return val >= good ? 'green' : val >= warn ? 'yellow' : 'red';
+}
+"""
+
+def get_header(active_page: str):
+    war_room_active = "active" if active_page == "dashboard" else ""
+    system_active = "active" if active_page == "system" else ""
+    return f"""
 <header class="header">
   <div class="header-brand">
     <div class="war-room-title">MLB AI WAR ROOM</div>
-    <div class="live-badge"><span class="pulse-dot"></span>LIVE</div>
+    <nav class="header-nav">
+      <a href="/dashboard" class="nav-link {war_room_active}">[ WAR ROOM ]</a>
+      <span class="nav-sep">|</span>
+      <a href="/system" class="nav-link {system_active}">[ SYSTEM STATUS ]</a>
+    </nav>
   </div>
   <div class="header-meta">
     <span class="header-date" id="hdr-date"></span>
@@ -619,6 +745,19 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <button class="refresh-btn" onclick="loadAll()">⟳ REFRESH</button>
   </div>
 </header>
+"""
+
+DASHBOARD_HTML = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MLB AI WAR ROOM</title>
+<style>{SHARED_STYLE}</style>
+</head>
+<body>
+
+{get_header("dashboard")}
 
 <div class="container">
 
@@ -651,7 +790,440 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     </div>
   </div>
 
-  <!-- ═══════════════ 3. SYSTEM STATUS ═══════════════ -->
+</div><!-- /container -->
+
+<!-- DEEP DIVE MODAL -->
+<div id="deep-dive-modal" class="modal-overlay" onclick="closeModal(event)">
+  <div class="modal-content" onclick="event.stopPropagation()">
+    <button class="modal-close" onclick="closeModal()">×</button>
+    <div id="modal-body-content"></div>
+  </div>
+</div>
+
+<script>
+{SHARED_JS_HELPERS}
+
+let currentIntel = {{ games: [], edges: {{}}, preds: {{}} }};
+
+function resolveTeam(side, away, home) {{
+  if (side === 'away_ml') return away || 'Away';
+  if (side === 'home_ml') return home || 'Home';
+  if (side === 'over')    return 'Over';
+  if (side === 'under')   return 'Under';
+  return side || '—';
+}}
+
+function movementHtml(dir) {{
+  if (!dir) return '';
+  const map = {{
+    toward_model:    ['mv-toward',  '↑ w/ model'],
+    away_from_model: ['mv-away',    '↓ vs model'],
+    sharp_away:      ['mv-sharp',   '⚡ sharp away'],
+    sharp_home:      ['mv-sharp',   '⚡ sharp home'],
+    neutral:         ['mv-neutral', '→ neutral'],
+  }};
+  const [cls, lbl] = map[dir] || ['mv-neutral', dir];
+  return `<span class="${{cls}}">${{lbl}}</span>`;
+}}
+
+function edgeChip(confidence, edgePct) {{
+  const pctStr = edgePct != null ? ` ${(edgePct*100).toFixed(1)}%` : '';
+  if (!confidence || confidence === 'weak') {{
+    return `<span class="chip c-weak">WEAK${{pctStr}}</span>`;
+  }}
+  const cls = confidence === 'strong' ? 'c-strong' : 'c-medium';
+  return `<span class="chip ${{cls}}">${{confidence.toUpperCase()}}${{pctStr}}</span>`;
+}}
+
+function betChip(result) {{
+  if (!result || result === 'no_bet') return '<span class="chip c-no_bet">NO BET</span>';
+  return `<span class="chip c-${{result}}">${{result.toUpperCase()}}</span>`;
+}}
+
+async function loadAccuracy() {{
+  try {{
+    const res = await fetch('/api/reviews/accuracy');
+    const data = await res.json();
+    
+    const mkStat = (label, stats) => {{
+      if (!stats || stats.bets === 0) {{
+        return `<div class="s-stat">
+          <div class="s-stat-val muted">0%</div>
+          <div class="s-stat-lbl">${{label}} (0)</div>
+        </div>`;
+      }}
+      const val = stats.win_rate * 100;
+      const cls = colorClass(val, 55, 48);
+      return `<div class="s-stat">
+        <div class="s-stat-val ${{cls}}">${{val.toFixed(1)}}%</div>
+        <div class="s-stat-lbl">${{label}} (${{stats.bets}})</div>
+      </div>`;
+    }};
+
+    $('market-performance').innerHTML = `
+      <div class="summary-bar" style="border-left-color: var(--purple); background: var(--surface3); margin-bottom: 12px;">
+        <div style="font-family: monospace; font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; width: 100%; margin-bottom: 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px;">
+          Lifetime Market Performance — Model: ${{data.current_model}}
+        </div>
+        ${{mkStat('Moneyline', data.moneyline)}}
+        ${{mkStat('Totals', data.totals)}}
+        ${{mkStat('Run Line', data.run_line)}}
+        <div style="margin-left:auto"></div>
+        ${{mkStat('Overall', data.overall)}}
+      </div>
+    `;
+
+    if (data.confidence_bins) {{
+      const bins = data.confidence_bins;
+      const binNames = ["50-59%", "60-69%", "70-79%", "80%+"];
+      
+      const mkBin = (name) => {{
+        const stats = bins[name];
+        if (!stats || stats.bets === 0) return '';
+        const val = stats.win_rate * 100;
+        const cls = colorClass(val, 55, 48);
+        return `
+          <div class="s-stat" style="min-width: 200px;">
+            <div class="s-stat-val ${{cls}}">${{val.toFixed(1)}}%</div>
+            <div class="s-stat-lbl">${{name}} Confidence: ${{stats.wins}}W - ${{stats.losses}}L</div>
+          </div>
+        `;
+      }};
+
+      $('confidence-performance').innerHTML = `
+        <div class="summary-bar" style="border-left-color: var(--orange); background: var(--surface2); margin-bottom: 24px;">
+          <div style="font-family: monospace; font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; width: 100%; margin-bottom: 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px;">
+            Win Rate by Model Confidence
+          </div>
+          ${{binNames.map(name => mkBin(name)).join('')}}
+        </div>
+      `;
+    }}
+  }} catch(e) {{ console.error("Error loading accuracy", e); }}
+}}
+
+async function loadDebrief() {{
+  const yest = yesterdayStr();
+  $('debrief-badge').textContent = friendlyDate(yest);
+
+  try {{
+    const res = await fetch('/api/reviews/recent?limit=100');
+    const all = await res.json();
+    const rows = all.filter(r => r.date === yest);
+
+    if (!rows.length) {{
+      $('debrief-summary').innerHTML = '<div class="empty">No graded games for yesterday.</div>';
+      $('debrief-table').innerHTML = '';
+      return;
+    }}
+
+    const correct   = rows.filter(r => r.model_correct).length;
+    const wins      = rows.filter(r => r.bet_result === 'win').length;
+    const losses    = rows.filter(r => r.bet_result === 'loss').length;
+    const pushes    = rows.filter(r => r.bet_result === 'push').length;
+    const graded    = wins + losses + pushes;
+    const winRate   = (wins + losses) > 0 ? wins / (wins + losses) : null;
+    const corrRate  = rows.length > 0 ? correct / rows.length : null;
+    const wrPct     = winRate  != null ? (winRate*100).toFixed(1)+'%' : '—';
+    const crPct     = corrRate != null ? (corrRate*100).toFixed(1)+'%' : '—';
+    const wrCls     = colorClass(winRate  != null ? winRate*100  : null, 55, 48);
+    const crCls     = colorClass(corrRate != null ? corrRate*100 : null, 55, 50);
+
+    $('debrief-summary').innerHTML = `
+      <div class="summary-bar">
+        <div class="s-stat">
+          <div class="s-stat-val ${{wrCls}}">${{correct}}/${{rows.length}}</div>
+          <div class="s-stat-lbl">Model Correct</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val ${{wrCls}}">${{crPct}}</div>
+          <div class="s-stat-lbl">Correct Rate</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val ${{wrCls}}">${{wrPct}}</div>
+          <div class="s-stat-lbl">Bet Win Rate</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val green">${{wins}}</div>
+          <div class="s-stat-lbl">Wins</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val red">${{losses}}</div>
+          <div class="s-stat-lbl">Losses</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val muted">${{pushes}}</div>
+          <div class="s-stat-lbl">Pushes</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val">${{graded}}</div>
+          <div class="s-stat-lbl">Bets Graded</div>
+        </div>
+      </div>`;
+
+    const trows = rows.map(r => {{
+      const away = r.away_team || (r.matchup || '').split(' @ ')[0] || '?';
+      const home = r.home_team || (r.matchup || '').split(' @ ')[1] || '?';
+      const predicted = resolveTeam(r.predicted_side, away, home);
+      const actual    = r.actual_winner === 'away' ? away
+                      : r.actual_winner === 'home' ? home
+                      : (r.actual_winner || '—');
+      const ci = r.model_correct ? '<span class="ok">✓</span>' : '<span class="fail">✗</span>';
+
+      let proj = '—';
+      if (r.model_total != null)                                    proj = fmt(r.model_total,1);
+      else if (r.projected_away_score != null && r.projected_home_score != null)
+        proj = fmt(r.projected_away_score + r.projected_home_score, 1);
+      const act = (r.actual_total != null && r.actual_total > 0) ? r.actual_total : '—';
+      const totStr = proj === '—' ? '—' : `${{proj}} → ${{act}}`;
+
+      const epStr   = r.edge_pct != null ? (r.edge_pct*100).toFixed(1)+'%' : '—';
+      const epCls   = r.edge_pct != null && r.edge_pct > 0 ? 'green' : 'muted';
+      const noteRaw = (r.actual_outcome_summary || '').slice(0, 120);
+      const note    = noteRaw ? `<div class="outcome-note" title="${{esc(r.actual_outcome_summary)}}">${{esc(noteRaw)}}</div>` : '';
+
+      const hasRealScore = r.actual_total != null && r.actual_total > 0;
+      const scoreDisplay = hasRealScore ? (r.final_score || '—') : '—';
+
+      return `<tr>
+        <td style="font-weight:600;white-space:nowrap">${{esc(r.matchup||'—')}}</td>
+        <td class="mono" style="font-size:12px">${{esc(predicted)}}</td>
+        <td class="mono" style="font-size:12px">${{esc(actual)}}</td>
+        <td style="text-align:center">${{ci}}</td>
+        <td class="mono" style="font-size:12px">${{totStr}}</td>
+        <td class="mono ${{epCls}}" style="font-size:12px">${{epStr}}</td>
+        <td class="mono" style="font-size:12px">${{scoreDisplay}}</td>
+        <td>${{betChip(r.bet_result)}}</td>
+        <td>${{note}}</td>
+      </tr>`;
+    }}).join('');
+
+    $('debrief-table').innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Matchup</th><th>Predicted</th><th>Actual</th>
+          <th style="text-align:center">✓/✗</th>
+          <th>Proj→Act Total</th><th>Edge %</th>
+          <th>Score</th><th>Bet</th><th>Note</th>
+        </tr></thead>
+        <tbody>${{trows}}</tbody>
+      </table>`;
+
+  }} catch(e) {{
+    $('debrief-summary').innerHTML = `<div class="empty">Error: ${{esc(e.message)}}</div>`;
+    $('debrief-table').innerHTML = '';
+  }}
+}}
+
+async function loadIntel() {{
+  try {{
+    const [gr, er, pr] = await Promise.all([
+      fetch('/api/games/today'),
+      fetch('/api/edges/today'),
+      fetch('/api/model/predictions/today'),
+    ]);
+    const games = await gr.json();
+    const edges = await er.json();
+    const preds = await pr.json();
+
+    currentIntel.games = games;
+    edges.forEach(e => currentIntel.edges[e.game_id] = e);
+    preds.forEach(p => currentIntel.preds[p.game_id] = p);
+
+    const em = currentIntel.edges, pm = currentIntel.preds;
+
+    $('intel-badge').textContent = `${{games.length}} GAME${{games.length !== 1 ? 'S' : ''}}`;
+
+    if (!games.length) {{
+      $('game-grid').innerHTML = '<div class="empty">No games scheduled today.</div>';
+      return;
+    }}
+
+    const cards = games.map(g => {{
+      const edge = em[g.game_id];
+      const pred = pm[g.game_id];
+
+      const sl = (g.status||'').toLowerCase();
+      const isLive  = sl.includes('progress') || sl.includes('live') || sl === 'in_progress';
+      const isFinal = sl.includes('final') || sl.includes('complet');
+
+      let statusHtml;
+      if (isLive) {{
+        statusHtml = `<div class="gc-status-live"><span class="pulse-dot" style="width:6px;height:6px"></span>LIVE</div>`;
+      }} else if (isFinal) {{
+        statusHtml = `<div class="gc-status-final">FINAL</div>`;
+      }} else {{
+        statusHtml = `<div class="gc-status-time">${{gameTime(g.start_time)}}</div>`;
+      }}
+
+      let scoreHtml = '';
+      if ((isLive || isFinal) && g.final_away_score != null) {{
+        const ac = g.final_away_score > g.final_home_score ? 'cyan' : 'muted';
+        const hc = g.final_home_score > g.final_away_score ? 'purple' : 'muted';
+        scoreHtml = `<div class="gc-score">
+          <span class="${{ac}}">${{g.final_away_score}}</span>
+          <span class="sep">—</span>
+          <span class="${{hc}}">${{g.final_home_score}}</span>
+        </div>`;
+      }}
+
+      let wpHtml = '';
+      if (pred) {{
+        const ap = Math.round(pred.away_win_pct * 100);
+        const hp = 100 - ap;
+        wpHtml = `<div class="wp-bar-wrap">
+          <div class="wp-bar">
+            <div class="wp-away" style="width:${{ap}}%"></div>
+            <div class="wp-home" style="width:${{hp}}%"></div>
+          </div>
+          <div class="wp-labels">
+            <span class="wp-lbl-a">${{ap}}% ${{esc(g.away_team)}}</span>
+            <span class="wp-lbl-h">${{esc(g.home_team)}} ${{hp}}%</span>
+          </div>
+        </div>`;
+      }}
+
+      let totLines = [];
+      const projT = pred?.projected_total ?? edge?.model_total;
+      if (projT != null) totLines.push(`Proj: <strong>${{fmt(projT,1)}}</strong>`);
+      if (edge?.book_total != null) totLines.push(`Line: <strong>${{fmt(edge.book_total,1)}}</strong>`);
+
+      const echip = edge ? edgeChip(edge.confidence, edge.edge_pct) : '<span class="chip c-none">NO DATA</span>';
+      let playHtml = '';
+      if (edge?.play) {{
+        const pl = edge.play.replace('_',' ').toUpperCase();
+        playHtml = `<span class="mono" style="font-size:10px;color:var(--cyan)">${{pl}}</span>`;
+      }}
+      const mvHtml = movementHtml(edge?.movement_direction);
+
+      const cls = isLive ? 'game-card is-live' : isFinal ? 'game-card is-final' : 'game-card';
+
+      return `<div class="${{cls}}" onclick="openDeepDive(${{g.game_id}})">
+        <div class="gc-header">
+          <div class="gc-matchup">
+            <span class="aw">${{esc(g.away_team)}}</span>
+            <span class="at">@</span>
+            <span class="hw">${{esc(g.home_team)}}</span>
+          </div>
+          ${{statusHtml}}
+        </div>
+        ${{scoreHtml}}
+        <div class="gc-pitchers">${{esc(g.away_probable_pitcher||'TBD')}} vs ${{esc(g.home_probable_pitcher||'TBD')}}</div>
+        ${{wpHtml}}
+        <div class="gc-footer">
+          <div class="gc-totals">
+            ${{totLines.map(l => `<div>${{l}}</div>`).join('')}}
+            ${{playHtml}}
+          </div>
+          <div class="gc-right">
+            ${{echip}}
+            ${{mvHtml}}
+          </div>
+        </div>
+      </div>`;
+    }}).join('');
+
+    $('game-grid').innerHTML = cards;
+
+  }} catch(e) {{
+    $('game-grid').innerHTML = `<div class="empty">Error: ${{esc(e.message)}}</div>`;
+  }}
+}}
+
+function openDeepDive(gameId) {{
+  const g = currentIntel.games.find(x => x.game_id == gameId);
+  const e = currentIntel.edges[gameId];
+  const p = currentIntel.preds[gameId];
+  if (!g) return;
+
+  const content = `
+    <div class="modal-title">${{esc(g.away_team)}} @ ${{esc(g.home_team)}} — DEEP DIVE</div>
+    <div class="dive-grid">
+      <div class="dive-section">
+        <div class="dive-label">Implied Probabilities (Book)</div>
+        <div class="dive-val">
+          <span class="cyan">AWAY: ${{e ? pct0_1(e.implied_away_pct) : '—'}}</span><br>
+          <span class="purple">HOME: ${{e ? pct0_1(e.implied_home_pct) : '—'}}</span>
+        </div>
+      </div>
+      <div class="dive-section">
+        <div class="dive-label">Expected Value (EV)</div>
+        <div class="dive-val">
+          <span class="${{e?.ev_away > 0 ? 'green' : 'red'}}">ML AWAY: ${{e ? fmt(e.ev_away, 3) : '—'}}</span><br>
+          <span class="${{e?.ev_home > 0 ? 'green' : 'red'}}">ML HOME: ${{e ? fmt(e.ev_home, 3) : '—'}}</span>
+        </div>
+      </div>
+      <div class="dive-section">
+        <div class="dive-label">Totals EV</div>
+        <div class="dive-val">
+          <span class="${{e?.ev_over > 0 ? 'green' : 'red'}}">OVER: ${{e ? fmt(e.ev_over, 3) : '—'}}</span><br>
+          <span class="${{e?.ev_under > 0 ? 'green' : 'red'}}">UNDER: ${{e ? fmt(e.ev_under, 3) : '—'}}</span>
+        </div>
+      </div>
+      <div class="dive-section">
+        <div class="dive-label">Model Confidence Score</div>
+        <div class="dive-val large cyan">${{p ? fmt(p.confidence_score, 2) : '—'}}</div>
+      </div>
+      <div class="dive-section">
+        <div class="dive-label">${{esc(g.away_team)}} Starter xERA</div>
+        <div class="dive-val yellow">${{p ? fmt(p.away_starter_xera, 2) : '—'}}</div>
+      </div>
+      <div class="dive-section">
+        <div class="dive-label">${{esc(g.home_team)}} Starter xERA</div>
+        <div class="dive-val yellow">${{p ? fmt(p.home_starter_xera, 2) : '—'}}</div>
+      </div>
+    </div>
+    <div style="margin-top: 24px; font-family: monospace; font-size: 11px; color: var(--muted);">
+      * All EV values represent unit return per unit wagered. Positive EV indicates a theoretical edge.
+    </div>
+  `;
+  
+  $('modal-body-content').innerHTML = content;
+  $('deep-dive-modal').style.display = 'flex';
+}}
+
+function closeModal(e) {{
+  $('deep-dive-modal').style.display = 'none';
+}}
+
+async function loadAll() {{
+  await Promise.all([loadAccuracy(), loadDebrief(), loadIntel()]);
+}}
+
+let countdown = 60;
+function tick() {{
+  countdown--;
+  $('cdown').textContent = countdown;
+  if (countdown <= 0) {{ loadAll(); countdown = 60; }}
+}}
+
+document.addEventListener('DOMContentLoaded', () => {{
+  $('hdr-date').textContent = new Date().toLocaleDateString('en-US', {{
+    weekday:'short', month:'short', day:'numeric', year:'numeric',
+  }}).toUpperCase();
+  loadAll();
+  setInterval(tick, 1000);
+}});
+</script>
+</body>
+</html>
+"""
+
+SYSTEM_HTML = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SYSTEM STATUS | MLB AI</title>
+<style>{SHARED_STYLE}</style>
+</head>
+<body>
+
+{get_header("system")}
+
+<div class="container">
+
+  <!-- ═══════════════ SYSTEM STATUS ═══════════════ -->
   <div class="section">
     <div class="section-head">
       <div class="section-label">System Status</div>
@@ -680,483 +1252,114 @@ tr:hover td { background: rgba(6,182,212,0.025); }
 </div><!-- /container -->
 
 <script>
-// ── Helpers ──────────────────────────────────────────────────────────────────
-const $  = id => document.getElementById(id);
-const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-const fmt = (n, d=1) => n == null ? '—' : (+n).toFixed(d);
-const pct0_1 = (n, d=1) => n == null ? '—' : (+n * 100).toFixed(d) + '%';
-const pct100 = (n, d=1) => n == null ? '—' : (+n).toFixed(d) + '%';
+{SHARED_JS_HELPERS}
 
-function todayStr() {
-  const d = new Date();
-  return [d.getFullYear(), String(d.getMonth()+1).padStart(2,'0'), String(d.getDate()).padStart(2,'0')].join('-');
-}
-function yesterdayStr() {
-  const d = new Date(); d.setDate(d.getDate()-1);
-  return [d.getFullYear(), String(d.getMonth()+1).padStart(2,'0'), String(d.getDate()).padStart(2,'0')].join('-');
-}
-function friendlyDate(yyyymmdd) {
-  if (!yyyymmdd) return '';
-  const p = yyyymmdd.split('-');
-  return new Date(+p[0], +p[1]-1, +p[2]).toLocaleDateString('en-US', {weekday:'short',month:'short',day:'numeric',year:'numeric'});
-}
-function gameTime(iso) {
-  if (!iso) return '—';
-  try {
-    const d = new Date(iso);
-    if (isNaN(d)) return iso;
-    return d.toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit',timeZoneName:'short'});
-  } catch { return iso; }
-}
-function colorClass(val, good, warn) {
-  if (val == null) return 'muted';
-  return val >= good ? 'green' : val >= warn ? 'yellow' : 'red';
-}
-function resolveTeam(side, away, home) {
-  if (side === 'away_ml') return away || 'Away';
-  if (side === 'home_ml') return home || 'Home';
-  if (side === 'over')    return 'Over';
-  if (side === 'under')   return 'Under';
-  return side || '—';
-}
-
-function movementHtml(dir) {
-  if (!dir) return '';
-  const map = {
-    toward_model:    ['mv-toward',  '↑ w/ model'],
-    away_from_model: ['mv-away',    '↓ vs model'],
-    sharp_away:      ['mv-sharp',   '⚡ sharp away'],
-    sharp_home:      ['mv-sharp',   '⚡ sharp home'],
-    neutral:         ['mv-neutral', '→ neutral'],
-  };
-  const [cls, lbl] = map[dir] || ['mv-neutral', dir];
-  return `<span class="${cls}">${lbl}</span>`;
-}
-
-function edgeChip(confidence, edgePct) {
-  const pctStr = edgePct != null ? ` ${(edgePct*100).toFixed(1)}%` : '';
-  if (!confidence || confidence === 'weak') {
-    return `<span class="chip c-weak">WEAK${pctStr}</span>`;
-  }
-  const cls = confidence === 'strong' ? 'c-strong' : 'c-medium';
-  return `<span class="chip ${cls}">${confidence.toUpperCase()}${pctStr}</span>`;
-}
-
-function betChip(result) {
-  if (!result || result === 'no_bet') return '<span class="chip c-no_bet">NO BET</span>';
-  return `<span class="chip c-${result}">${result.toUpperCase()}</span>`;
-}
-
-function nextRunHtml(iso) {
+function nextRunHtml(iso) {{
   if (!iso) return '<span class="t-pending">no next run</span>';
-  try {
+  try {{
     const d = new Date(iso), now = new Date();
     const diffMin = Math.round((d - now) / 60000);
-    const ts = d.toLocaleTimeString('en-US', {hour:'numeric', minute:'2-digit', timeZoneName:'short'});
-    if (d < now)    return `<span class="t-pending">${ts}</span>`;
-    if (diffMin < 60) return `<span class="t-soon">${ts} (${diffMin}m)</span>`;
-    return `<span class="t-time">${ts}</span>`;
-  } catch { return `<span class="t-time">${iso}</span>`; }
-}
+    const ts = d.toLocaleTimeString('en-US', {{hour:'numeric', minute:'2-digit', timeZoneName:'short'}});
+    if (d < now)    return `<span class="t-pending">${{ts}}</span>`;
+    if (diffMin < 60) return `<span class="t-soon">${{ts}} (${{diffMin}}m)</span>`;
+    return `<span class="t-time">${{ts}}</span>`;
+  }} catch {{ return `<span class="t-time">${{iso}}</span>`; }}
+}}
 
-async function loadAccuracy() {
-  try {
-    const res = await fetch('/api/reviews/accuracy');
-    const data = await res.json();
-    
-    const mkStat = (label, stats) => {
-      if (!stats || stats.bets === 0) {
-        return `<div class="s-stat">
-          <div class="s-stat-val muted">0%</div>
-          <div class="s-stat-lbl">${label} (0)</div>
-        </div>`;
-      }
-      const val = stats.win_rate * 100;
-      const cls = colorClass(val, 55, 48);
-      return `<div class="s-stat">
-        <div class="s-stat-val ${cls}">${val.toFixed(1)}%</div>
-        <div class="s-stat-lbl">${label} (${stats.bets})</div>
-      </div>`;
-    };
-
-    $('market-performance').innerHTML = `
-      <div class="summary-bar" style="border-left-color: var(--purple); background: var(--surface3); margin-bottom: 12px;">
-        <div style="font-family: monospace; font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; width: 100%; margin-bottom: 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px;">
-          Lifetime Market Performance — Model: ${data.current_model}
-        </div>
-        ${mkStat('Moneyline', data.moneyline)}
-        ${mkStat('Totals', data.totals)}
-        ${mkStat('Run Line', data.run_line)}
-        <div style="margin-left:auto"></div>
-        ${mkStat('Overall', data.overall)}
-      </div>
-    `;
-
-    if (data.confidence_bins) {
-      const bins = data.confidence_bins;
-      const binNames = ["50-59%", "60-69%", "70-79%", "80%+"];
-      
-      const mkBin = (name) => {
-        const stats = bins[name];
-        if (!stats || stats.bets === 0) return '';
-        const val = stats.win_rate * 100;
-        const cls = colorClass(val, 55, 48);
-        return `
-          <div class="s-stat" style="min-width: 200px;">
-            <div class="s-stat-val ${cls}">${val.toFixed(1)}%</div>
-            <div class="s-stat-lbl">${name} Confidence: ${stats.wins}W - ${stats.losses}L</div>
-          </div>
-        `;
-      };
-
-      $('confidence-performance').innerHTML = `
-        <div class="summary-bar" style="border-left-color: var(--orange); background: var(--surface2); margin-bottom: 24px;">
-          <div style="font-family: monospace; font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; width: 100%; margin-bottom: 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px;">
-            Win Rate by Model Confidence
-          </div>
-          ${binNames.map(name => mkBin(name)).join('')}
-        </div>
-      `;
-    }
-  } catch(e) { console.error("Error loading accuracy", e); }
-}
-
-// ── SECTION 1: YESTERDAY'S DEBRIEF ──────────────────────────────────────────
-async function loadDebrief() {
-  const yest = yesterdayStr();
-  $('debrief-badge').textContent = friendlyDate(yest);
-
-  try {
-    const res = await fetch('/api/reviews/recent?limit=100');
-    const all = await res.json();
-    const rows = all.filter(r => r.date === yest);
-
-    if (!rows.length) {
-      $('debrief-summary').innerHTML = '<div class="empty">No graded games for yesterday.</div>';
-      $('debrief-table').innerHTML = '';
-      return;
-    }
-
-    const correct   = rows.filter(r => r.model_correct).length;
-    const wins      = rows.filter(r => r.bet_result === 'win').length;
-    const losses    = rows.filter(r => r.bet_result === 'loss').length;
-    const pushes    = rows.filter(r => r.bet_result === 'push').length;
-    const graded    = wins + losses + pushes;
-    const winRate   = (wins + losses) > 0 ? wins / (wins + losses) : null;
-    const corrRate  = rows.length > 0 ? correct / rows.length : null;
-    const wrPct     = winRate  != null ? (winRate*100).toFixed(1)+'%' : '—';
-    const crPct     = corrRate != null ? (corrRate*100).toFixed(1)+'%' : '—';
-    const wrCls     = colorClass(winRate  != null ? winRate*100  : null, 55, 48);
-    const crCls     = colorClass(corrRate != null ? corrRate*100 : null, 55, 50);
-
-    $('debrief-summary').innerHTML = `
-      <div class="summary-bar">
-        <div class="s-stat">
-          <div class="s-stat-val ${crCls}">${correct}/${rows.length}</div>
-          <div class="s-stat-lbl">Model Correct</div>
-        </div>
-        <div class="s-stat">
-          <div class="s-stat-val ${crCls}">${crPct}</div>
-          <div class="s-stat-lbl">Correct Rate</div>
-        </div>
-        <div class="s-stat">
-          <div class="s-stat-val ${wrCls}">${wrPct}</div>
-          <div class="s-stat-lbl">Bet Win Rate</div>
-        </div>
-        <div class="s-stat">
-          <div class="s-stat-val green">${wins}</div>
-          <div class="s-stat-lbl">Wins</div>
-        </div>
-        <div class="s-stat">
-          <div class="s-stat-val red">${losses}</div>
-          <div class="s-stat-lbl">Losses</div>
-        </div>
-        <div class="s-stat">
-          <div class="s-stat-val muted">${pushes}</div>
-          <div class="s-stat-lbl">Pushes</div>
-        </div>
-        <div class="s-stat">
-          <div class="s-stat-val">${graded}</div>
-          <div class="s-stat-lbl">Bets Graded</div>
-        </div>
-      </div>`;
-
-    const trows = rows.map(r => {
-      const away = r.away_team || (r.matchup || '').split(' @ ')[0] || '?';
-      const home = r.home_team || (r.matchup || '').split(' @ ')[1] || '?';
-      const predicted = resolveTeam(r.predicted_side, away, home);
-      const actual    = r.actual_winner === 'away' ? away
-                      : r.actual_winner === 'home' ? home
-                      : (r.actual_winner || '—');
-      const ci = r.model_correct ? '<span class="ok">✓</span>' : '<span class="fail">✗</span>';
-
-      // projected vs actual total
-      let proj = '—';
-      if (r.model_total != null)                                    proj = fmt(r.model_total,1);
-      else if (r.projected_away_score != null && r.projected_home_score != null)
-        proj = fmt(r.projected_away_score + r.projected_home_score, 1);
-      const act = (r.actual_total != null && r.actual_total > 0) ? r.actual_total : '—';
-      const totStr = proj === '—' ? '—' : `${proj} → ${act}`;
-
-      const epStr   = r.edge_pct != null ? (r.edge_pct*100).toFixed(1)+'%' : '—';
-      const epCls   = r.edge_pct != null && r.edge_pct > 0 ? 'green' : 'muted';
-      const noteRaw = (r.actual_outcome_summary || '').slice(0, 120);
-      const note    = noteRaw ? `<div class="outcome-note" title="${esc(r.actual_outcome_summary)}">${esc(noteRaw)}</div>` : '';
-
-      // A 0-0 score in MLB is essentially impossible — display "—" when
-      // both scores are 0, since it just means the score wasn't fetched yet.
-      const hasRealScore = r.actual_total != null && r.actual_total > 0;
-      const scoreDisplay = hasRealScore ? (r.final_score || '—') : '—';
-
-      return `<tr>
-        <td style="font-weight:600;white-space:nowrap">${esc(r.matchup||'—')}</td>
-        <td class="mono" style="font-size:12px">${esc(predicted)}</td>
-        <td class="mono" style="font-size:12px">${esc(actual)}</td>
-        <td style="text-align:center">${ci}</td>
-        <td class="mono" style="font-size:12px">${totStr}</td>
-        <td class="mono ${epCls}" style="font-size:12px">${epStr}</td>
-        <td class="mono" style="font-size:12px">${scoreDisplay}</td>
-        <td>${betChip(r.bet_result)}</td>
-        <td>${note}</td>
-      </tr>`;
-    }).join('');
-
-    $('debrief-table').innerHTML = `
-      <table>
-        <thead><tr>
-          <th>Matchup</th><th>Predicted</th><th>Actual</th>
-          <th style="text-align:center">✓/✗</th>
-          <th>Proj→Act Total</th><th>Edge %</th>
-          <th>Score</th><th>Bet</th><th>Note</th>
-        </tr></thead>
-        <tbody>${trows}</tbody>
-      </table>`;
-
-  } catch(e) {
-    $('debrief-summary').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
-    $('debrief-table').innerHTML = '';
-  }
-}
-
-// ── SECTION 2: TODAY'S ACTIVE INTEL ─────────────────────────────────────────
-async function loadIntel() {
-  try {
-    const [gr, er, pr] = await Promise.all([
-      fetch('/api/games/today'),
-      fetch('/api/edges/today'),
-      fetch('/api/model/predictions/today'),
-    ]);
-    const games = await gr.json();
-    const edges = await er.json();
-    const preds = await pr.json();
-
-    const em = {}, pm = {};
-    edges.forEach(e => em[e.game_id] = e);
-    preds.forEach(p => pm[p.game_id] = p);
-
-    $('intel-badge').textContent = `${games.length} GAME${games.length !== 1 ? 'S' : ''}`;
-
-    if (!games.length) {
-      $('game-grid').innerHTML = '<div class="empty">No games scheduled today.</div>';
-      return;
-    }
-
-    const cards = games.map(g => {
-      const edge = em[g.game_id];
-      const pred = pm[g.game_id];
-
-      const sl = (g.status||'').toLowerCase();
-      const isLive  = sl.includes('progress') || sl.includes('live') || sl === 'in_progress';
-      const isFinal = sl.includes('final') || sl.includes('complet');
-
-      // Status widget (top-right)
-      let statusHtml;
-      if (isLive) {
-        statusHtml = `<div class="gc-status-live"><span class="pulse-dot" style="width:6px;height:6px"></span>LIVE</div>`;
-      } else if (isFinal) {
-        statusHtml = `<div class="gc-status-final">FINAL</div>`;
-      } else {
-        statusHtml = `<div class="gc-status-time">${gameTime(g.start_time)}</div>`;
-      }
-
-      // Score overlay for live/final
-      let scoreHtml = '';
-      if ((isLive || isFinal) && g.final_away_score != null) {
-        const ac = g.final_away_score > g.final_home_score ? 'cyan' : 'muted';
-        const hc = g.final_home_score > g.final_away_score ? 'purple' : 'muted';
-        scoreHtml = `<div class="gc-score">
-          <span class="${ac}">${g.final_away_score}</span>
-          <span class="sep">—</span>
-          <span class="${hc}">${g.final_home_score}</span>
-        </div>`;
-      }
-
-      // Win-probability bar
-      let wpHtml = '';
-      if (pred) {
-        const ap = Math.round(pred.away_win_pct * 100);
-        const hp = 100 - ap;
-        wpHtml = `<div class="wp-bar-wrap">
-          <div class="wp-bar">
-            <div class="wp-away" style="width:${ap}%"></div>
-            <div class="wp-home" style="width:${hp}%"></div>
-          </div>
-          <div class="wp-labels">
-            <span class="wp-lbl-a">${ap}% ${esc(g.away_team)}</span>
-            <span class="wp-lbl-h">${esc(g.home_team)} ${hp}%</span>
-          </div>
-        </div>`;
-      }
-
-      // Projected / book totals
-      let totLines = [];
-      const projT = pred?.projected_total ?? edge?.model_total;
-      if (projT != null) totLines.push(`Proj: <strong>${fmt(projT,1)}</strong>`);
-      if (edge?.book_total != null) totLines.push(`Line: <strong>${fmt(edge.book_total,1)}</strong>`);
-
-      // Edge chip + play label
-      const echip = edge ? edgeChip(edge.confidence, edge.edge_pct) : '<span class="chip c-none">NO DATA</span>';
-      let playHtml = '';
-      if (edge?.play) {
-        const pl = edge.play.replace('_',' ').toUpperCase();
-        playHtml = `<span class="mono" style="font-size:10px;color:var(--cyan)">${pl}</span>`;
-      }
-      const mvHtml = movementHtml(edge?.movement_direction);
-
-      const cls = isLive ? 'game-card is-live' : isFinal ? 'game-card is-final' : 'game-card';
-
-      return `<div class="${cls}">
-        <div class="gc-header">
-          <div class="gc-matchup">
-            <span class="aw">${esc(g.away_team)}</span>
-            <span class="at">@</span>
-            <span class="hw">${esc(g.home_team)}</span>
-          </div>
-          ${statusHtml}
-        </div>
-        ${scoreHtml}
-        <div class="gc-pitchers">${esc(g.away_probable_pitcher||'TBD')} vs ${esc(g.home_probable_pitcher||'TBD')}</div>
-        ${wpHtml}
-        <div class="gc-footer">
-          <div class="gc-totals">
-            ${totLines.map(l => `<div>${l}</div>`).join('')}
-            ${playHtml}
-          </div>
-          <div class="gc-right">
-            ${echip}
-            ${mvHtml}
-          </div>
-        </div>
-      </div>`;
-    }).join('');
-
-    $('game-grid').innerHTML = cards;
-
-  } catch(e) {
-    $('game-grid').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
-  }
-}
-
-// ── SECTION 3: SYSTEM STATUS ─────────────────────────────────────────────────
-async function loadStatus() {
-  try {
+async function loadStatus() {{
+  try {{
     const res = await fetch('/api/status');
     const data = await res.json();
     const jobs    = data.jobs    || [];
-    const model   = data.model   || {};
+    const model   = data.model   || {{}};
     const bt      = data.backtest;
 
-    $('status-badge').textContent = `${jobs.length} JOBS`;
+    $('status-badge').textContent = `${{jobs.length}} JOBS`;
 
-    // ── Terminal ──
-    const sorted = [...jobs].sort((a,b) => {
+    const sorted = [...jobs].sort((a,b) => {{
       if (!a.next_run_time) return 1;
       if (!b.next_run_time) return -1;
       return new Date(a.next_run_time) - new Date(b.next_run_time);
-    });
+    }});
 
     const lines = [
       `<div><span class="t-prompt">$</span> <span class="t-cmd">scheduler --list --tz=America/New_York</span></div>`,
-      `<div><span class="t-dim">${'─'.repeat(52)}</span></div>`,
+      `<div><span class="t-dim">${{'─'.repeat(52)}}</span></div>`,
     ];
 
-    if (!sorted.length) {
+    if (!sorted.length) {{
       lines.push(`<div><span class="t-pending">no jobs registered</span></div>`);
-    } else {
-      sorted.forEach(j => {
+    }} else {{
+      sorted.forEach(j => {{
         const name = (j.name || j.id || '?').replace(/_/g, '-').padEnd(38);
-        lines.push(`<div><span class="t-name">${esc(name)}</span>${nextRunHtml(j.next_run_time)}</div>`);
-      });
-    }
+        lines.push(`<div><span class="t-name">${{esc(name)}}</span>${{nextRunHtml(j.next_run_time)}}</div>`);
+      }});
+    }}
 
-    lines.push(`<div><span class="t-dim">${'─'.repeat(52)}</span></div>`);
+    lines.push(`<div><span class="t-dim">${{'─'.repeat(52)}}</span></div>`);
     lines.push(`<div><span class="t-prompt">$</span> <span class="t-ok">scheduler running ✓</span></div>`);
 
     $('term-body').innerHTML = lines.join('');
 
-    // ── Model panel ──
     const accCls = bt?.accuracy != null ? colorClass(bt.accuracy * 100, 60, 55) : 'muted';
     const cvCls  = bt?.cv_accuracy != null ? colorClass(bt.cv_accuracy * 100, 58, 53) : 'muted';
     const winCls = model.winner_accuracy_pct != null ? colorClass(model.winner_accuracy_pct, 55, 50) : 'muted';
     const betCls = model.bet_win_rate != null ? colorClass(model.bet_win_rate, 55, 48) : 'muted';
 
     $('model-body').innerHTML = `
-      <div class="mv-badge">◈ ${esc(model.version || 'unknown')}</div>
+      <div class="mv-badge">◈ ${{esc(model.version || 'unknown')}}</div>
       <div class="ms-grid">
         <div class="ms-tile">
-          <div class="ms-val ${accCls}">${bt?.accuracy != null ? pct0_1(bt.accuracy) : '—'}</div>
+          <div class="ms-val ${{accCls}}">${{bt?.accuracy != null ? pct0_1(bt.accuracy) : '—'}}</div>
           <div class="ms-lbl">Backtest Accuracy</div>
         </div>
         <div class="ms-tile">
-          <div class="ms-val ${cvCls}">${bt?.cv_accuracy != null ? pct0_1(bt.cv_accuracy) : '—'}</div>
+          <div class="ms-val ${{cvCls}}">${{bt?.cv_accuracy != null ? pct0_1(bt.cv_accuracy) : '—'}}</div>
           <div class="ms-lbl">Cross-Val Accuracy</div>
         </div>
         <div class="ms-tile">
-          <div class="ms-val">${model.total_predictions ?? '—'}</div>
+          <div class="ms-val">${{model.total_predictions ?? '—'}}</div>
           <div class="ms-lbl">Total Predictions</div>
         </div>
         <div class="ms-tile">
-          <div class="ms-val ${winCls}">${model.winner_accuracy_pct != null ? pct100(model.winner_accuracy_pct) : '—'}</div>
+          <div class="ms-val ${{winCls}}">${{model.winner_accuracy_pct != null ? pct100(model.winner_accuracy_pct) : '—'}}</div>
           <div class="ms-lbl">Winner Accuracy %</div>
         </div>
         <div class="ms-tile">
-          <div class="ms-val">${model.bets_graded ?? '—'}</div>
+          <div class="ms-val">${{model.bets_graded ?? '—'}}</div>
           <div class="ms-lbl">Bets Graded</div>
         </div>
         <div class="ms-tile">
-          <div class="ms-val ${betCls}">${model.bet_win_rate != null ? pct100(model.bet_win_rate) : '—'}</div>
+          <div class="ms-val ${{betCls}}">${{model.bet_win_rate != null ? pct100(model.bet_win_rate) : '—'}}</div>
           <div class="ms-lbl">Bet Win Rate</div>
         </div>
       </div>
-      ${bt?.seasons ? `<div class="ms-footnote">Seasons: ${esc(bt.seasons)} · ${(bt.n_games||0).toLocaleString()} games trained</div>` : ''}`;
+      ${{bt?.seasons ? `<div class="ms-footnote">Seasons: ${{esc(bt.seasons)}} · ${{ (bt.n_games || 0).toLocaleString() }} games trained</div>` : ''}}`;
 
-  } catch(e) {
-    $('term-body').innerHTML  = `<div class="t-err">Error: ${esc(e.message)}</div>`;
+  }} catch(e) {{
+    $('term-body').innerHTML  = `<div class="t-err">Error: ${{esc(e.message)}}</div>`;
     $('model-body').innerHTML = `<div class="empty">Error loading model stats</div>`;
-  }
-}
+  }}
+}}
 
-// ── Orchestration ─────────────────────────────────────────────────────────────
-async function loadAll() {
-  await Promise.all([loadAccuracy(), loadDebrief(), loadIntel(), loadStatus()]);
-}
+async function loadAll() {{
+  await loadStatus();
+}}
 
-// ── Countdown ─────────────────────────────────────────────────────────────────
 let countdown = 60;
-function tick() {
+function tick() {{
   countdown--;
   $('cdown').textContent = countdown;
-  if (countdown <= 0) { loadAll(); countdown = 60; }
-}
+  if (countdown <= 0) {{ loadAll(); countdown = 60; }}
+}}
 
-// ── Init ──────────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-  $('hdr-date').textContent = new Date().toLocaleDateString('en-US', {
+document.addEventListener('DOMContentLoaded', () => {{
+  $('hdr-date').textContent = new Date().toLocaleDateString('en-US', {{
     weekday:'short', month:'short', day:'numeric', year:'numeric',
-  }).toUpperCase();
+  }}).toUpperCase();
   loadAll();
   setInterval(tick, 1000);
-});
+}});
 </script>
 </body>
 </html>
@@ -1166,3 +1369,7 @@ document.addEventListener('DOMContentLoaded', () => {
 @router.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
     return HTMLResponse(content=DASHBOARD_HTML)
+
+@router.get("/system", response_class=HTMLResponse)
+def system_dashboard():
+    return HTMLResponse(content=SYSTEM_HTML)

@@ -1,58 +1,246 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import THE_ODDS_API_KEY, THE_ODDS_API_URL
 from app.models.schema import Game, GameOdds, LineMovement, SnapshotType
-from app.services.ev_math import ml_to_implied_prob, prob_move, is_sharp_move
+from app.services.ev_math import is_sharp_move, ml_to_implied_prob, prob_move, remove_vig
+
+ET = ZoneInfo("America/New_York")
+DEFAULT_BOOKS = [
+    "draftkings",
+    "fanduel",
+    "betmgm",
+    "caesars",
+    "espnbet",
+    "betrivers",
+]
+ODDS_FRESHNESS_MINUTES: dict[SnapshotType, int] = {
+    SnapshotType.open: 180,
+    SnapshotType.pregame: 90,
+    SnapshotType.live: 15,
+}
 
 
 async def fetch_and_store_odds(
     db: Session,
     snapshot_type: SnapshotType,
-    books: list[str] = ["draftkings"],
+    books: list[str] | None = None,
 ) -> list[GameOdds]:
     """
     Fetch odds and store with the given snapshot type.
-    Skips games that already have this snapshot type stored (idempotent).
+    Stores at least one usable odds row per matched game when possible.
+    If no new row is written for a matched game, reuses the latest fresh row
+    for the same snapshot type within the freshness window.
     """
+    requested_books = books or list(DEFAULT_BOOKS)
     params = {
         "apiKey": THE_ODDS_API_KEY,
         "regions": "us",
         "markets": "h2h,totals",
         "oddsFormat": "american",
-        "bookmakers": ",".join(books),
+        "bookmakers": ",".join(requested_books),
     }
 
     async with httpx.AsyncClient() as client:
         resp = await client.get(THE_ODDS_API_URL, params=params, timeout=10)
         resp.raise_for_status()
         raw_events = resp.json()
+        raw_size_bytes = len(resp.content or b"")
 
-    stored = []
-    skipped = 0
+    print(
+        f"[odds] fetch snapshot={snapshot_type.value} books={requested_books} "
+        f"events_returned={len(raw_events)} mlb_events={len(raw_events)} raw_bytes={raw_size_bytes}"
+    )
+
+    stored: list[GameOdds] = []
+    selected_rows: dict[int, GameOdds] = {}
+    matched_game_ids: set[int] = set()
+    matched_event_count = 0
+    unmatched_events: list[str] = []
+    skipped_inserts: list[str] = []
+    inserted_rows: list[str] = []
+    refreshed_rows: list[str] = []
+    duplicate_fresh_reuse = 0
 
     for event in raw_events:
-        game = _match_game(db, event)
+        game, match_reason = _match_game(db, event)
         if not game:
+            unmatched_events.append(
+                f"{event.get('away_team', '?')} @ {event.get('home_team', '?')} "
+                f"(date={event.get('commence_time', '?')}, reason={match_reason})"
+            )
+            continue
+        matched_event_count += 1
+        matched_game_ids.add(game.game_id)
+
+        valid_for_game = False
+        bookmakers = _sorted_bookmakers(event, requested_books)
+        if not bookmakers:
+            unmatched_events.append(
+                f"{event.get('away_team', '?')} @ {event.get('home_team', '?')} "
+                f"(game_id={game.game_id}, reason=no_requested_bookmakers)"
+            )
             continue
 
-        for bookmaker in event.get("bookmakers", []):
-            odds_row = _parse_bookmaker(event, bookmaker, game.game_id, snapshot_type)
+        for bookmaker in bookmakers:
+            odds_row, parse_reason = _parse_bookmaker(event, bookmaker, game.game_id, snapshot_type)
             if not odds_row:
+                skipped_inserts.append(
+                    f"game_id={game.game_id} sportsbook={bookmaker.get('key', '?')} "
+                    f"snapshot={snapshot_type.value} reason={parse_reason}"
+                )
                 continue
-            try:
-                db.add(odds_row)
-                db.flush()  # catch unique constraint before commit
-                stored.append(odds_row)
-            except IntegrityError:
-                db.rollback()
-                skipped += 1  # already have this snapshot, skip quietly
+            valid_for_game = True
+            existing = _get_existing_snapshot(
+                db,
+                game_id=game.game_id,
+                sportsbook=odds_row.sportsbook,
+                snapshot_type=snapshot_type,
+            )
+            if existing is not None:
+                if is_odds_snapshot_fresh(existing):
+                    duplicate_fresh_reuse += 1
+                    skipped_inserts.append(
+                        f"game_id={game.game_id} sportsbook={existing.sportsbook} "
+                        f"snapshot={snapshot_type.value} reason=fresh_existing_snapshot_reused"
+                    )
+                    if game.game_id not in selected_rows:
+                        selected_rows[game.game_id] = existing
+                    continue
+
+                _refresh_existing_snapshot(existing, odds_row)
+                db.flush()
+                refreshed_rows.append(
+                    f"id={existing.id} game_id={existing.game_id} sportsbook={existing.sportsbook} "
+                    f"snapshot={existing.snapshot_type.value}"
+                )
+                if game.game_id not in selected_rows:
+                    selected_rows[game.game_id] = existing
+                continue
+            db.add(odds_row)
+            db.flush()
+            stored.append(odds_row)
+            inserted_rows.append(
+                f"id={odds_row.id} game_id={odds_row.game_id} sportsbook={odds_row.sportsbook} "
+                f"snapshot={odds_row.snapshot_type.value}"
+            )
+            if game.game_id not in selected_rows:
+                selected_rows[game.game_id] = odds_row
+
+        if not valid_for_game:
+            unmatched_events.append(
+                f"{event.get('away_team', '?')} @ {event.get('home_team', '?')} "
+                f"(game_id={game.game_id}, reason=no_valid_bookmaker_markets)"
+            )
 
     db.commit()
-    return stored
+
+    reused = 0
+    unresolved_matched_games: list[str] = []
+    for game_id in matched_game_ids:
+        if game_id in selected_rows:
+            continue
+        latest = get_latest_odds_snapshot(db, game_id=game_id, snapshot_type=snapshot_type)
+        if latest is not None and is_odds_snapshot_fresh(latest):
+            selected_rows[game_id] = latest
+            reused += 1
+            skipped_inserts.append(
+                f"game_id={game_id} sportsbook={latest.sportsbook} "
+                f"snapshot={snapshot_type.value} reason=fallback_reuse_fresh_existing_snapshot"
+            )
+        else:
+            game = db.query(Game).filter(Game.game_id == game_id).first()
+            unresolved_matched_games.append(
+                f"game_id={game_id} matchup={game.away_team if game else '?'} @ "
+                f"{game.home_team if game else '?'} reason=no_fresh_snapshot_selected"
+            )
+
+    event_dates = sorted({_event_game_date(event) for event in raw_events})
+    for game in _games_on_dates(db, event_dates):
+        if game.game_id in matched_game_ids:
+            continue
+        unmatched_events.append(
+            f"{game.away_team} @ {game.home_team} "
+            f"(game_id={game.game_id}, reason=no_api_event_for_game_date)"
+        )
+
+    print(
+        f"[odds] snapshot={snapshot_type.value} matched_events={matched_event_count} "
+        f"matched_games={len(matched_game_ids)} unmatched_entries={len(unmatched_events)} "
+        f"stored_new={len(stored)} refreshed_existing={len(refreshed_rows)} "
+        f"reused_fresh={reused} duplicate_fresh_reuse={duplicate_fresh_reuse} "
+        f"returned_rows={len(selected_rows)}"
+    )
+    if unmatched_events:
+        print(f"[odds] unmatched_sample={unmatched_events[:10]}")
+    if skipped_inserts:
+        print(f"[odds] skipped_inserts_sample={skipped_inserts[:20]}")
+    if inserted_rows:
+        print(f"[odds] inserted_rows_sample={inserted_rows[:20]}")
+    if refreshed_rows:
+        print(f"[odds] refreshed_rows_sample={refreshed_rows[:20]}")
+    if unresolved_matched_games:
+        print(f"[odds] unresolved_matched_games={unresolved_matched_games[:20]}")
+
+    return list(selected_rows.values())
+
+
+def is_odds_snapshot_fresh(
+    odds_row: GameOdds,
+    *,
+    now: datetime | None = None,
+    max_age_minutes: int | None = None,
+) -> bool:
+    if not odds_row or not odds_row.fetched_at:
+        return False
+
+    max_age = max_age_minutes or ODDS_FRESHNESS_MINUTES.get(odds_row.snapshot_type, 60)
+    now_utc = now or datetime.now(timezone.utc)
+    fetched_at = odds_row.fetched_at
+    if fetched_at.tzinfo is None:
+        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+    age_seconds = (now_utc - fetched_at).total_seconds()
+    return 0 <= age_seconds <= (max_age * 60)
+
+
+def get_latest_odds_snapshot(
+    db: Session,
+    *,
+    game_id: int,
+    snapshot_type: SnapshotType,
+) -> GameOdds | None:
+    return (
+        db.query(GameOdds)
+        .filter(
+            GameOdds.game_id == game_id,
+            GameOdds.snapshot_type == snapshot_type,
+        )
+        .order_by(GameOdds.fetched_at.desc(), GameOdds.id.desc())
+        .first()
+    )
+
+
+def get_market_home_probability(odds_row: GameOdds | None) -> float | None:
+    if odds_row is None or odds_row.away_ml is None or odds_row.home_ml is None:
+        return None
+    away_raw = ml_to_implied_prob(odds_row.away_ml)
+    home_raw = ml_to_implied_prob(odds_row.home_ml)
+    _away_prob, home_prob = remove_vig(away_raw, home_raw)
+    return float(home_prob)
+
+
+def _refresh_existing_snapshot(existing: GameOdds, incoming: GameOdds) -> None:
+    existing.fetched_at = incoming.fetched_at
+    existing.away_ml = incoming.away_ml
+    existing.home_ml = incoming.home_ml
+    existing.total_line = incoming.total_line
+    existing.over_odds = incoming.over_odds
+    existing.under_odds = incoming.under_odds
+    existing.runline_away = incoming.runline_away
+    existing.runline_odds = incoming.runline_odds
 
 
 def compute_line_movement(
@@ -64,24 +252,18 @@ def compute_line_movement(
     Compare open vs pregame snapshots for a game and store the movement summary.
     Call this after the pregame snapshot is stored.
     """
-    open_odds = (
-        db.query(GameOdds)
-        .filter(
-            GameOdds.game_id == game_id,
-            GameOdds.sportsbook == sportsbook,
-            GameOdds.snapshot_type == SnapshotType.open,
-        )
-        .first()
-    )
-    pregame_odds = (
-        db.query(GameOdds)
-        .filter(
-            GameOdds.game_id == game_id,
-            GameOdds.sportsbook == sportsbook,
-            GameOdds.snapshot_type == SnapshotType.pregame,
-        )
-        .first()
-    )
+    open_odds = _get_existing_snapshot(
+        db,
+        game_id=game_id,
+        sportsbook=sportsbook,
+        snapshot_type=SnapshotType.open,
+    ) or get_latest_odds_snapshot(db, game_id=game_id, snapshot_type=SnapshotType.open)
+    pregame_odds = _get_existing_snapshot(
+        db,
+        game_id=game_id,
+        sportsbook=sportsbook,
+        snapshot_type=SnapshotType.pregame,
+    ) or get_latest_odds_snapshot(db, game_id=game_id, snapshot_type=SnapshotType.pregame)
 
     if not open_odds or not pregame_odds:
         return None  # can't compute without both snapshots
@@ -171,30 +353,108 @@ _ODDS_TO_MLB: dict[str, str] = {
     # 2025 relocation variants that may appear in The Odds API
     "Athletics":               "Oakland Athletics",
     "Sacramento Athletics":    "Oakland Athletics",
+    "Athletics (Sacramento)":  "Oakland Athletics",
 }
 
 
-def _match_game(db: Session, event: dict) -> Game | None:
-    """
-    Match an odds API event to a game in our DB using the static team-name
-    lookup table. Falls back to a case-insensitive partial match if the name
-    isn't in the map (handles future expansions / API naming drift).
-    """
+def _normalize_team_name(value: str | None) -> str:
+    if not value:
+        return ""
+    normalized = "".join(ch.lower() if ch.isalnum() else " " for ch in value)
+    return " ".join(normalized.split())
+
+
+def _games_on_dates(db: Session, game_dates: list[date]) -> list[Game]:
+    if not game_dates:
+        return []
+    return db.query(Game).filter(Game.game_date.in_(game_dates)).all()
+
+
+def _parse_event_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(ET)
+
+
+def _event_game_date(event: dict) -> datetime.date:
+    event_dt = _parse_event_datetime(event.get("commence_time"))
+    if event_dt is not None:
+        return event_dt.date()
+    return datetime.now(ET).date()
+
+
+def _sorted_bookmakers(event: dict, requested_books: list[str]) -> list[dict]:
+    priority = {book: idx for idx, book in enumerate(requested_books)}
+    bookmakers = [
+        book for book in event.get("bookmakers", [])
+        if not requested_books or book.get("key") in priority
+    ]
+    return sorted(bookmakers, key=lambda book: priority.get(book.get("key"), len(priority)))
+
+
+def _get_existing_snapshot(
+    db: Session,
+    *,
+    game_id: int,
+    sportsbook: str,
+    snapshot_type: SnapshotType,
+) -> GameOdds | None:
+    return (
+        db.query(GameOdds)
+        .filter(
+            GameOdds.game_id == game_id,
+            GameOdds.sportsbook == sportsbook,
+            GameOdds.snapshot_type == snapshot_type,
+        )
+        .order_by(GameOdds.fetched_at.desc(), GameOdds.id.desc())
+        .first()
+    )
+
+
+def _match_game(db: Session, event: dict) -> tuple[Game | None, str | None]:
+    """Match an odds event to a DB game using exact normalized team aliases."""
     raw_away = event.get("away_team", "")
     raw_home = event.get("home_team", "")
+    if not raw_away or not raw_home:
+        return None, "missing_team_names"
+
     away_name = _ODDS_TO_MLB.get(raw_away, raw_away)
     home_name = _ODDS_TO_MLB.get(raw_home, raw_home)
-    today = datetime.now(timezone.utc).date()
+    game_date = _event_game_date(event)
+    away_norm = _normalize_team_name(away_name)
+    home_norm = _normalize_team_name(home_name)
 
-    return (
+    games_on_date = db.query(Game).filter(Game.game_date == game_date).all()
+    if not games_on_date:
+        return None, f"no_games_on_date:{game_date.isoformat()}"
+
+    for game in games_on_date:
+        if (
+            _normalize_team_name(game.away_team) == away_norm
+            and _normalize_team_name(game.home_team) == home_norm
+        ):
+            return game, None
+
+    team_match_any_date = (
         db.query(Game)
         .filter(
-            Game.game_date == today,
             Game.away_team.ilike(away_name),
             Game.home_team.ilike(home_name),
         )
         .first()
     )
+    if team_match_any_date is not None:
+        return None, (
+            f"team_match_date_mismatch:db_date={team_match_any_date.game_date.isoformat()}"
+        )
+
+    return None, "no_exact_team_match_on_date"
 
 
 def _parse_bookmaker(
@@ -202,7 +462,7 @@ def _parse_bookmaker(
     bookmaker: dict,
     game_id: int,
     snapshot_type: SnapshotType,
-) -> GameOdds | None:
+) -> tuple[GameOdds | None, str | None]:
     row = GameOdds(
         game_id=game_id,
         sportsbook=bookmaker["key"],
@@ -226,5 +486,5 @@ def _parse_bookmaker(
                     row.under_odds = int(o["price"])
 
     if row.away_ml is None or row.home_ml is None:
-        return None
-    return row
+        return None, "missing_h2h_prices"
+    return row, None

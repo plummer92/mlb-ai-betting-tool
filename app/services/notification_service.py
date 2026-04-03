@@ -2,11 +2,7 @@ from __future__ import annotations
 
 from app.config import ALERT_DESTINATION, DISCORD_WEBHOOK_URL
 
-# Print webhook URL prefix at startup so we can confirm it loaded correctly
-_url = DISCORD_WEBHOOK_URL or ""
-if _url:
-    print(f"[alerts] Webhook URL: {_url[:20]}...", flush=True)
-else:
+if not DISCORD_WEBHOOK_URL:
     print("[alerts] WARNING: DISCORD_WEBHOOK_URL is not set", flush=True)
 
 

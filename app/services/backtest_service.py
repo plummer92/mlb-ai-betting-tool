@@ -1,62 +1,258 @@
 """
-Backtest service — collects historical game data from the MLB Stats API,
-runs the Monte Carlo simulator on each game using that season's team stats,
-then fits a logistic regression to find which features actually predict outcomes.
+Point-in-time backtest service.
+
+Historical rows are built chronologically from prior completed games only.
+No season-end team or pitcher aggregates are reused across earlier games.
 """
 import json
 import logging
+import math
 import time
 import traceback
-from datetime import date
-
-import math
+from collections import Counter
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 
 import numpy as np
 import requests
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import Session
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss, log_loss as sk_log_loss
-from sklearn.model_selection import cross_val_score
 from sklearn.preprocessing import StandardScaler
-from sqlalchemy.orm import Session
 
 from app.config import MLB_API_BASE
-from app.models.schema import BacktestGame, BacktestResult
-from app.services.feature_builder import PARK_FACTORS
-from app.services.mlb_api import fetch_bullpen_stats, fetch_pitcher_stats, fetch_team_stats
-from app.services.statcast_service import fetch_team_statcast
+from app.models.schema import BacktestGame, BacktestResult, GameOdds, SnapshotType
+from app.services.feature_builder import PARK_FACTORS, PYTHAG_EXPONENT
+from app.services.mlb_api import fetch_pitcher_stats
 
 logger = logging.getLogger(__name__)
 
-# How often to commit within a season loop (keeps the Neon connection alive)
 _COMMIT_INTERVAL = 50
+_DEFAULT_KBB = 5.3
+_DEFAULT_WHIP = 1.30
+_DEFAULT_OPS = 0.720
+_DEFAULT_PYTHAG = 0.500
+_DEFAULT_ODDS_POLICY = "closest_prior"
 
-# Features used for logistic regression (all expressed as home-minus-away advantages)
 FEATURE_NAMES = [
-    "home_era_adv",         # away_era  - home_era  (positive = home pitches better)
-    "home_whip_adv",        # away_whip - home_whip
-    "home_ops_adv",         # home_ops  - away_ops
-    "home_starter_era_adv", # away_starter_era - home_starter_era (may be 0 if no data)
-    "win_pct_adv",          # home_win_pct - away_win_pct (replaces two separate features)
-    "park_factor_adv",      # venue-based park factor from PARK_FACTORS lookup
-    "kbb_adv",              # home_starter_kbb - away_starter_kbb (K/9 − BB/9 differential)
-    # bullpen_era_adv excluded: pitchingType=R split returns team ERA, not reliever-only;
-    #   coefficient was identical to home_era_adv (-0.071). Re-add once API returns
-    #   distinct reliever ERA. Columns (home_bullpen_era, away_bullpen_era) kept in DB.
-    # run_diff_adv excluded: multicollinear with win_pct_adv — coefficient inverts sign
+    "home_whip_adv",
+    "home_ops_adv",
+    "run_diff_adv",
+    "kbb_adv",
+    "park_factor_adv",
+    "pythagorean_win_pct_adv",
 ]
 
-# Default K-BB differential (league-average k9 8.5 minus league-average bb9 3.2)
-_DEFAULT_KBB = 5.3
+POINT_IN_TIME_WARNING = (
+    "Backtest rows are rebuilt with a strict game-start cutoff. Rows with missing "
+    "pregame features or missing historical odds linkage are flagged explicitly."
+)
 
 
-# ── Season collection ─────────────────────────────────────────────────────────
+@dataclass
+class TeamRollingStats:
+    games_played: int = 0
+    wins: int = 0
+    losses: int = 0
+    runs_scored: int = 0
+    runs_allowed: int = 0
+    batting_ab: int = 0
+    batting_hits: int = 0
+    batting_doubles: int = 0
+    batting_triples: int = 0
+    batting_home_runs: int = 0
+    batting_walks: int = 0
+    batting_hbp: int = 0
+    batting_sf: int = 0
+    pitching_outs: int = 0
+    pitching_er: int = 0
+    pitching_hits_allowed: int = 0
+    pitching_walks: int = 0
+    bullpen_outs: int = 0
+    bullpen_er: int = 0
+
+
+@dataclass
+class PitcherRollingStats:
+    starts: int = 0
+    outs: int = 0
+    earned_runs: int = 0
+    hits_allowed: int = 0
+    walks: int = 0
+    strikeouts: int = 0
+
+
+def build_live_feature_vector(home_team: dict, away_team: dict) -> dict[str, float]:
+    return {
+        "home_whip_adv": float(away_team.get("team_whip", _DEFAULT_WHIP)) - float(home_team.get("team_whip", _DEFAULT_WHIP)),
+        "home_ops_adv": float(home_team.get("ops", _DEFAULT_OPS)) - float(away_team.get("ops", _DEFAULT_OPS)),
+        "run_diff_adv": float(home_team.get("run_differential_per_game") or 0.0) - float(away_team.get("run_differential_per_game") or 0.0),
+        "kbb_adv": float(home_team.get("starter_kbb_percent") or 0.12) - float(away_team.get("starter_kbb_percent") or 0.12),
+        "park_factor_adv": float(home_team.get("park_run_factor", 1.0)) - 1.0,
+        "pythagorean_win_pct_adv": float(home_team.get("pythagorean_win_pct") or _DEFAULT_PYTHAG) - float(away_team.get("pythagorean_win_pct") or _DEFAULT_PYTHAG),
+    }
+
+
+def score_logistic_home_probability(features: dict[str, float], result: BacktestResult | None) -> float | None:
+    if result is None:
+        return None
+
+    try:
+        coefs = json.loads(result.coefficients_json)
+        intercept = float(coefs.get("__intercept__"))
+        means = coefs.get("__scaler_mean__")
+        scales = coefs.get("__scaler_scale__")
+        if not isinstance(means, list) or not isinstance(scales, list):
+            return None
+
+        logit = intercept
+        for idx, feature_name in enumerate(FEATURE_NAMES):
+            raw_value = float(features.get(feature_name, 0.0))
+            mean = float(means[idx])
+            scale = float(scales[idx] or 1.0)
+            standardized = (raw_value - mean) / scale if scale else 0.0
+            logit += float(coefs.get(feature_name, 0.0)) * standardized
+        probability = 1.0 / (1.0 + math.exp(-logit))
+        return round(max(0.05, min(0.95, probability)), 4)
+    except Exception:
+        return None
+
+
+def _safe_float(value, default: float | None = None) -> float | None:
+    if value in (None, "", "-", "--", "---", "-.--", ".---"):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value, default: int = 0) -> int:
+    if value in (None, "", "-", "--", "---"):
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _parse_innings_to_outs(value: str | None) -> int:
+    if not value:
+        return 0
+    try:
+        whole, _, fraction = str(value).partition(".")
+        outs = int(whole) * 3
+        if fraction:
+            outs += int(fraction[:1])
+        return outs
+    except (TypeError, ValueError):
+        return 0
+
+
+def _outs_to_ip(outs: int) -> float:
+    return outs / 3.0 if outs > 0 else 0.0
+
+
+def _calc_ops(stats: TeamRollingStats) -> float | None:
+    if stats.batting_ab <= 0:
+        return None
+    singles = max(stats.batting_hits - stats.batting_doubles - stats.batting_triples - stats.batting_home_runs, 0)
+    total_bases = singles + (2 * stats.batting_doubles) + (3 * stats.batting_triples) + (4 * stats.batting_home_runs)
+    obp_denom = stats.batting_ab + stats.batting_walks + stats.batting_hbp + stats.batting_sf
+    obp = ((stats.batting_hits + stats.batting_walks + stats.batting_hbp) / obp_denom) if obp_denom > 0 else None
+    slg = (total_bases / stats.batting_ab) if stats.batting_ab > 0 else None
+    if obp is None or slg is None:
+        return None
+    return round(obp + slg, 4)
+
+
+def _calc_team_whip(stats: TeamRollingStats) -> float | None:
+    ip = _outs_to_ip(stats.pitching_outs)
+    if ip <= 0:
+        return None
+    return round((stats.pitching_hits_allowed + stats.pitching_walks) / ip, 4)
+
+
+def _calc_team_era(stats: TeamRollingStats) -> float | None:
+    if stats.pitching_outs <= 0:
+        return None
+    return round((stats.pitching_er * 27.0) / stats.pitching_outs, 4)
+
+
+def _calc_bullpen_era(stats: TeamRollingStats) -> float | None:
+    if stats.bullpen_outs <= 0:
+        return None
+    return round((stats.bullpen_er * 27.0) / stats.bullpen_outs, 4)
+
+
+def _calc_pythagorean_win_pct(runs_scored: int, runs_allowed: int) -> float | None:
+    if runs_scored <= 0 or runs_allowed <= 0:
+        return None
+    scored = max(float(runs_scored), 1.0)
+    allowed = max(float(runs_allowed), 1.0)
+    return round((scored ** PYTHAG_EXPONENT) / ((scored ** PYTHAG_EXPONENT) + (allowed ** PYTHAG_EXPONENT)), 4)
+
+
+def _team_snapshot(stats: TeamRollingStats | None) -> dict:
+    if stats is None or stats.games_played <= 0:
+        return {
+            "games_played": 0,
+            "win_pct": None,
+            "ops": None,
+            "team_whip": None,
+            "team_era": None,
+            "run_diff": None,
+            "run_diff_per_game": None,
+            "pythagorean_win_pct": None,
+            "bullpen_era": None,
+        }
+    return {
+        "games_played": stats.games_played,
+        "win_pct": round(stats.wins / stats.games_played, 4),
+        "ops": _calc_ops(stats),
+        "team_whip": _calc_team_whip(stats),
+        "team_era": _calc_team_era(stats),
+        "run_diff": stats.runs_scored - stats.runs_allowed,
+        "run_diff_per_game": round((stats.runs_scored - stats.runs_allowed) / stats.games_played, 4),
+        "pythagorean_win_pct": _calc_pythagorean_win_pct(stats.runs_scored, stats.runs_allowed),
+        "bullpen_era": _calc_bullpen_era(stats),
+    }
+
+
+def _pitcher_snapshot(stats: PitcherRollingStats | None) -> dict:
+    if stats is None or stats.starts <= 0 or stats.outs <= 0:
+        return {
+            "starts": 0,
+            "era": None,
+            "whip": None,
+            "kbb": None,
+            "kbb_percent": None,
+        }
+    ip = _outs_to_ip(stats.outs)
+    k9 = (stats.strikeouts * 9.0 / ip) if ip > 0 else None
+    bb9 = (stats.walks * 9.0 / ip) if ip > 0 else None
+    kbb = (k9 - bb9) if k9 is not None and bb9 is not None else None
+    return {
+        "starts": stats.starts,
+        "era": round((stats.earned_runs * 27.0) / stats.outs, 4) if stats.outs > 0 else None,
+        "whip": round((stats.hits_allowed + stats.walks) / ip, 4) if ip > 0 else None,
+        "kbb": round(kbb, 4) if kbb is not None else None,
+        "kbb_percent": round(max(0.05, min(0.25, kbb / 45.0)), 4) if kbb is not None else None,
+    }
+
 
 def _get_with_retry(url: str, max_attempts: int = 3, base_backoff: float = 3.0) -> requests.Response:
-    """
-    GET with simple retry/backoff for transient errors (429, 5xx, timeouts).
-    Raises on the final attempt.
-    """
     for attempt in range(max_attempts):
         try:
             resp = requests.get(url, timeout=30)
@@ -81,12 +277,11 @@ def _get_with_retry(url: str, max_attempts: int = 3, base_backoff: float = 3.0) 
 
 
 def _fetch_season_schedule(season: int) -> list[dict]:
-    """Return all completed regular-season games for a given season."""
     url = (
         f"{MLB_API_BASE}/schedule"
         f"?sportId=1&season={season}&gameType=R"
         f"&startDate={season}-03-01&endDate={season}-11-30"
-        f"&hydrate=team,linescore,probablePitcher"
+        f"&hydrate=team,linescore,probablePitcher,venue"
     )
     resp = _get_with_retry(url)
     resp.raise_for_status()
@@ -102,147 +297,370 @@ def _fetch_season_schedule(season: int) -> list[dict]:
             home = g["teams"]["home"]
             away_pitcher = away.get("probablePitcher") or {}
             home_pitcher = home.get("probablePitcher") or {}
-            away_record = away.get("leagueRecord", {})
-            home_record = home.get("leagueRecord", {})
-            away_w = away_record.get("wins", 0) or 0
-            away_l = away_record.get("losses", 0) or 0
-            home_w = home_record.get("wins", 0) or 0
-            home_l = home_record.get("losses", 0) or 0
             games.append({
-                "game_id":         g["gamePk"],
-                "game_date":       day["date"],
-                "season":          season,
-                "away_team":       away["team"]["name"],
-                "away_team_id":    away["team"]["id"],
-                "home_team":       home["team"]["name"],
-                "home_team_id":    home["team"]["id"],
-                "venue":           g.get("venue", {}).get("name"),
-                "away_score":      away.get("score"),
-                "home_score":      home.get("score"),
-                "home_win":        (home.get("score", 0) or 0) > (away.get("score", 0) or 0),
+                "game_id": g["gamePk"],
+                "game_date": day["date"],
+                "season": season,
+                "away_team": away["team"]["name"],
+                "away_team_id": away["team"]["id"],
+                "home_team": home["team"]["name"],
+                "home_team_id": home["team"]["id"],
+                "venue": g.get("venue", {}).get("name"),
+                "away_score": away.get("score"),
+                "home_score": home.get("score"),
+                "home_win": (home.get("score", 0) or 0) > (away.get("score", 0) or 0),
+                "game_start_time": g.get("gameDate"),
                 "away_starter_id": away_pitcher.get("id"),
                 "home_starter_id": home_pitcher.get("id"),
                 "away_starter_name": away_pitcher.get("fullName"),
                 "home_starter_name": home_pitcher.get("fullName"),
-                "away_win_pct": away_w / (away_w + away_l) if (away_w + away_l) > 0 else 0.5,
-                "home_win_pct": home_w / (home_w + home_l) if (home_w + home_l) > 0 else 0.5,
             })
     return games
 
 
-def collect_season(db: Session, season: int) -> int:
-    """
-    Fetch all completed games for a season, enrich with team + starter stats,
-    and upsert into backtest_games. Returns number of games processed.
+def _fetch_game_feed(game_id: int) -> dict | None:
+    try:
+        resp = _get_with_retry(f"{MLB_API_BASE}/game/{game_id}/feed/live")
+    except Exception:
+        raise
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    return resp.json()
 
-    Key optimisations vs naive approach:
-    - Team stats are cached per season (30 teams × ~2 API calls, reused across all games)
-    - Pitcher stats are cached per (pitcher_id, season) — a starter pitches ~30 games,
-      so without a cache this would be ~4,800 redundant API calls per season.
-    - Commits every _COMMIT_INTERVAL games to keep the Neon Postgres connection alive.
-    - 80ms sleep between pitcher API lookups to avoid triggering MLB API rate limits.
 
-    Bullpen stats note: home_bullpen_era / away_bullpen_era are populated via
-    fetch_bullpen_stats() which uses the MLB Stats API pitchingType=R split.
-    If that split returns no data (common), the columns will equal team ERA as a
-    fallback — they are still populated (never NULL) but carry no additional signal
-    beyond home_team_era until the API returns distinct reliever ERA.
-    """
+def _extract_player_stat(players: dict, player_id: int | None, group: str) -> dict:
+    if not player_id:
+        return {}
+    player = players.get(f"ID{player_id}") or {}
+    return ((player.get("stats") or {}).get(group) or {})
+
+
+def _extract_team_boxscore(game: dict, side: str) -> dict:
+    team = (((game.get("liveData") or {}).get("boxscore") or {}).get("teams") or {}).get(side) or {}
+    players = team.get("players") or {}
+    pitcher_ids = team.get("pitchers") or []
+    actual_starter_id = pitcher_ids[0] if pitcher_ids else None
+    starter_pitching = _extract_player_stat(players, actual_starter_id, "pitching")
+
+    bullpen_er = 0
+    bullpen_outs = 0
+    for pitcher_id in pitcher_ids[1:]:
+        stat = _extract_player_stat(players, pitcher_id, "pitching")
+        bullpen_er += _safe_int(stat.get("earnedRuns"), 0)
+        bullpen_outs += _parse_innings_to_outs(stat.get("inningsPitched"))
+
+    team_batting = (team.get("teamStats") or {}).get("batting") or {}
+    team_pitching = (team.get("teamStats") or {}).get("pitching") or {}
+    starter_name = ((players.get(f"ID{actual_starter_id}") or {}).get("person") or {}).get("fullName") if actual_starter_id else None
+    return {
+        "starter_id": actual_starter_id,
+        "starter_name": starter_name,
+        "starter_outs": _parse_innings_to_outs(starter_pitching.get("inningsPitched")),
+        "starter_er": _safe_int(starter_pitching.get("earnedRuns"), 0),
+        "starter_hits_allowed": _safe_int(starter_pitching.get("hits"), 0),
+        "starter_walks": _safe_int(starter_pitching.get("baseOnBalls"), 0),
+        "starter_strikeouts": _safe_int(starter_pitching.get("strikeOuts"), 0),
+        "team_ab": _safe_int(team_batting.get("atBats"), 0),
+        "team_hits": _safe_int(team_batting.get("hits"), 0),
+        "team_doubles": _safe_int(team_batting.get("doubles"), 0),
+        "team_triples": _safe_int(team_batting.get("triples"), 0),
+        "team_home_runs": _safe_int(team_batting.get("homeRuns"), 0),
+        "team_walks": _safe_int(team_batting.get("baseOnBalls"), 0),
+        "team_hbp": _safe_int(team_batting.get("hitByPitch"), 0),
+        "team_sf": _safe_int(team_batting.get("sacFlies"), 0),
+        "team_pitching_outs": _parse_innings_to_outs(team_pitching.get("inningsPitched")),
+        "team_pitching_er": _safe_int(team_pitching.get("earnedRuns"), 0),
+        "team_pitching_hits_allowed": _safe_int(team_pitching.get("hits"), 0),
+        "team_pitching_walks": _safe_int(team_pitching.get("baseOnBalls"), 0),
+        "bullpen_er": bullpen_er,
+        "bullpen_outs": bullpen_outs,
+    }
+
+
+def _extract_game_fact(schedule_game: dict) -> dict | None:
+    feed = _fetch_game_feed(schedule_game["game_id"])
+    if feed is None:
+        print(f"[backtest] Game {schedule_game['game_id']} missing feed — using schedule-only data")
+        away_box = {}
+        home_box = {}
+    else:
+        away_box = _extract_team_boxscore(feed, "away")
+        home_box = _extract_team_boxscore(feed, "home")
+    start_time = _parse_iso_datetime(schedule_game.get("game_start_time"))
+    if start_time is None:
+        start_time = _parse_iso_datetime((((feed or {}).get("gameData") or {}).get("datetime") or {}).get("dateTime"))
+    if start_time is None:
+        start_time = datetime.combine(date.fromisoformat(schedule_game["game_date"]), datetime.min.time(), tzinfo=timezone.utc)
+
+    return {
+        **schedule_game,
+        "game_start_dt": start_time,
+        "away_starter_id": away_box.get("starter_id") or schedule_game.get("away_starter_id"),
+        "home_starter_id": home_box.get("starter_id") or schedule_game.get("home_starter_id"),
+        "away_starter_name": away_box.get("starter_name") or schedule_game.get("away_starter_name"),
+        "home_starter_name": home_box.get("starter_name") or schedule_game.get("home_starter_name"),
+        "away_box": away_box,
+        "home_box": home_box,
+    }
+
+
+def _update_team_state(stats: TeamRollingStats, box: dict, runs_scored: int, runs_allowed: int, won: bool) -> None:
+    stats.games_played += 1
+    stats.wins += 1 if won else 0
+    stats.losses += 0 if won else 1
+    stats.runs_scored += _safe_int(runs_scored, 0)
+    stats.runs_allowed += _safe_int(runs_allowed, 0)
+    stats.batting_ab += _safe_int(box.get("team_ab"), 0)
+    stats.batting_hits += _safe_int(box.get("team_hits"), 0)
+    stats.batting_doubles += _safe_int(box.get("team_doubles"), 0)
+    stats.batting_triples += _safe_int(box.get("team_triples"), 0)
+    stats.batting_home_runs += _safe_int(box.get("team_home_runs"), 0)
+    stats.batting_walks += _safe_int(box.get("team_walks"), 0)
+    stats.batting_hbp += _safe_int(box.get("team_hbp"), 0)
+    stats.batting_sf += _safe_int(box.get("team_sf"), 0)
+    stats.pitching_outs += _safe_int(box.get("team_pitching_outs"), 0)
+    stats.pitching_er += _safe_int(box.get("team_pitching_er"), 0)
+    stats.pitching_hits_allowed += _safe_int(box.get("team_pitching_hits_allowed"), 0)
+    stats.pitching_walks += _safe_int(box.get("team_pitching_walks"), 0)
+    stats.bullpen_outs += _safe_int(box.get("bullpen_outs"), 0)
+    stats.bullpen_er += _safe_int(box.get("bullpen_er"), 0)
+
+
+def _update_pitcher_state(stats: PitcherRollingStats, box: dict) -> None:
+    outs = _safe_int(box.get("starter_outs"), 0)
+    if outs <= 0:
+        return
+    stats.starts += 1
+    stats.outs += outs
+    stats.earned_runs += _safe_int(box.get("starter_er"), 0)
+    stats.hits_allowed += _safe_int(box.get("starter_hits_allowed"), 0)
+    stats.walks += _safe_int(box.get("starter_walks"), 0)
+    stats.strikeouts += _safe_int(box.get("starter_strikeouts"), 0)
+
+
+def _select_historical_odds_snapshot(
+    db: Session,
+    *,
+    game_id: int,
+    cutoff_time: datetime,
+    policy: str = _DEFAULT_ODDS_POLICY,
+) -> GameOdds | None:
+    base_query = (
+        db.query(GameOdds)
+        .filter(GameOdds.game_id == game_id, GameOdds.fetched_at <= cutoff_time)
+        .order_by(GameOdds.fetched_at.desc(), GameOdds.id.desc())
+    )
+    if policy == "pregame":
+        return base_query.filter(GameOdds.snapshot_type == SnapshotType.pregame).first()
+    if policy == "open":
+        return base_query.filter(GameOdds.snapshot_type == SnapshotType.open).first()
+    if policy == "closest_prior":
+        rows = base_query.filter(GameOdds.snapshot_type.in_([SnapshotType.pregame, SnapshotType.open])).limit(10).all()
+        if not rows:
+            return None
+        rows.sort(
+            key=lambda row: (
+                row.fetched_at or datetime.min.replace(tzinfo=timezone.utc),
+                1 if row.snapshot_type == SnapshotType.pregame else 0,
+                row.id or 0,
+            ),
+            reverse=True,
+        )
+        return rows[0]
+    raise ValueError(f"Unsupported odds policy: {policy}")
+
+
+def _season_needs_stale_pit_rebuild(db: Session, season: int) -> tuple[int, int]:
+    existing_rows = (
+        db.query(BacktestGame.game_id, BacktestGame.feature_cutoff_time, BacktestGame.odds_snapshot_policy, BacktestGame.incomplete_reasons_json)
+        .filter(BacktestGame.season == season)
+        .all()
+    )
+    stale_rows = [
+        row for row in existing_rows
+        if row.feature_cutoff_time is None
+        and row.odds_snapshot_policy is None
+        and row.incomplete_reasons_json is None
+    ]
+    return len(existing_rows), len(stale_rows)
+
+
+def collect_season(db: Session, season: int, *, odds_policy: str = _DEFAULT_ODDS_POLICY) -> int:
     print(f"[backtest] Starting collection for season {season}", flush=True)
-    games = _fetch_season_schedule(season)
-    print(f"[backtest] Season {season}: {len(games)} completed games found in schedule", flush=True)
-    if not games:
-        print(f"[backtest] Season {season}: no games returned — aborting", flush=True)
+    existing_rows_before, stale_rows_before = _season_needs_stale_pit_rebuild(db, season)
+    if stale_rows_before:
+        deleted = (
+            db.query(BacktestGame)
+            .filter(BacktestGame.season == season)
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        print(
+            f"[backtest] Season {season}: deleted {deleted} stale pre-PIT rows before rebuild "
+            f"(existing={existing_rows_before}, stale={stale_rows_before})",
+            flush=True,
+        )
+        existing_game_ids: set[int] = set()
+    else:
+        existing_game_ids = {
+            game_id for (game_id,) in db.query(BacktestGame.game_id).filter(BacktestGame.season == season).all()
+        }
+
+    schedule_games = _fetch_season_schedule(season)
+    print(f"[backtest] Season {season}: {len(schedule_games)} completed games found in schedule", flush=True)
+    if not schedule_games:
         return 0
 
-    # ── Caches — populated lazily, survive across the whole season loop ──────
-    team_stats_cache:    dict[int, dict]          = {}
-    bullpen_stats_cache: dict[int, dict | None]   = {}
-    pitcher_stats_cache: dict[tuple, dict | None] = {}  # key: (pitcher_id, season)
-
-    def _team_stats(team_id: int) -> dict:
-        if team_id not in team_stats_cache:
-            team_stats_cache[team_id] = fetch_team_stats(team_id, season)
-        return team_stats_cache[team_id]
-
-    def _bullpen_stats(team_id: int) -> dict | None:
-        if team_id not in bullpen_stats_cache:
-            time.sleep(0.08)
-            bullpen_stats_cache[team_id] = fetch_bullpen_stats(team_id, season)
-        return bullpen_stats_cache[team_id]
-
-    def _pitcher_stats(pitcher_id: int | None) -> dict | None:
-        if pitcher_id is None:
-            return None
-        key = (pitcher_id, season)
-        if key not in pitcher_stats_cache:
-            time.sleep(0.08)  # 80 ms — polite to MLB API, avoids 429s
-            print(f"[backtest]   fetching pitcher {pitcher_id} season {season} (cache miss)", flush=True)
-            pitcher_stats_cache[key] = fetch_pitcher_stats(pitcher_id, season)
-            print(f"[backtest]   pitcher {pitcher_id} done", flush=True)
-        return pitcher_stats_cache[key]
-
-    processed = 0
-    errors    = 0
-
-    for idx, g in enumerate(games, start=1):
+    facts: list[dict] = []
+    skip_reason_counts: Counter[str] = Counter()
+    for idx, game in enumerate(schedule_games, start=1):
         try:
-            away_stats = _team_stats(g["away_team_id"])
-            home_stats = _team_stats(g["home_team_id"])
+            game_id = game["game_id"]
+            fact = _extract_game_fact(game)
+            if fact is None:
+                print(f"[backtest] Skipping game {game_id} — no feed available", flush=True)
+                continue
+            facts.append(fact)
+            if idx % _COMMIT_INTERVAL == 0:
+                print(f"[backtest] Season {season}: fetched {idx}/{len(schedule_games)} game feeds", flush=True)
+        except Exception:
+            skip_reason_counts.update(["feed_fetch_error"])
+            print(f"[backtest] Season {season} — feed error on game {game['game_id']} ({idx}/{len(schedule_games)}):", flush=True)
+            traceback.print_exc()
 
-            away_starter = _pitcher_stats(g["away_starter_id"])
-            home_starter = _pitcher_stats(g["home_starter_id"])
+    facts.sort(key=lambda item: (item["game_start_dt"], item["game_id"]))
+    team_state: dict[int, TeamRollingStats] = {}
+    pitcher_state: dict[int, PitcherRollingStats] = {}
+    pitcher_api_cache: dict[int, dict] = {}
+    processed = 0
+    errors = 0
+    inserted = 0
+    updated = 0
+    features_complete_count = 0
+    odds_complete_count = 0
 
-            away_bullpen = _bullpen_stats(g["away_team_id"])
-            home_bullpen = _bullpen_stats(g["home_team_id"])
+    for idx, fact in enumerate(facts, start=1):
+        try:
+            home_team_pre = _team_snapshot(team_state.get(fact["home_team_id"]))
+            away_team_pre = _team_snapshot(team_state.get(fact["away_team_id"]))
+            
+            home_starter_id = fact.get("home_starter_id")
+            away_starter_id = fact.get("away_starter_id")
+            home_pitcher_pre = _pitcher_snapshot(pitcher_state.get(home_starter_id))
+            away_pitcher_pre = _pitcher_snapshot(pitcher_state.get(away_starter_id))
+            
+            # Fallback to season-level kbb from MLB API if rolling data is insufficient.
+            # This ensures we have a baseline for first-time starters in the backtest.
+            if home_pitcher_pre["kbb"] is None and home_starter_id:
+                if home_starter_id not in pitcher_api_cache:
+                    pitcher_api_cache[home_starter_id] = fetch_pitcher_stats(home_starter_id, season)
+                api_stats = pitcher_api_cache[home_starter_id]
+                if api_stats:
+                    home_pitcher_pre["kbb"] = api_stats.get("kbb")
+                    if home_pitcher_pre["era"] is None: home_pitcher_pre["era"] = api_stats.get("era")
+                    if home_pitcher_pre["whip"] is None: home_pitcher_pre["whip"] = api_stats.get("whip")
 
-            # Statcast team metrics — fetched once per (team, season), cached
-            away_sc = fetch_team_statcast(g["away_team_id"], season)
-            home_sc = fetch_team_statcast(g["home_team_id"], season)
+            if away_pitcher_pre["kbb"] is None and away_starter_id:
+                if away_starter_id not in pitcher_api_cache:
+                    pitcher_api_cache[away_starter_id] = fetch_pitcher_stats(away_starter_id, season)
+                api_stats = pitcher_api_cache[away_starter_id]
+                if api_stats:
+                    away_pitcher_pre["kbb"] = api_stats.get("kbb")
+                    if away_pitcher_pre["era"] is None: away_pitcher_pre["era"] = api_stats.get("era")
+                    if away_pitcher_pre["whip"] is None: away_pitcher_pre["whip"] = api_stats.get("whip")
 
-            away_run_diff = away_stats["runs"] - away_stats["runs_allowed"]
-            home_run_diff = home_stats["runs"] - home_stats["runs_allowed"]
+            cutoff_time = fact["game_start_dt"]
+            odds_row = _select_historical_odds_snapshot(
+                db,
+                game_id=fact["game_id"],
+                cutoff_time=cutoff_time,
+                policy=odds_policy,
+            )
+
+            incomplete_reasons: list[str] = []
+            if home_team_pre["games_played"] <= 0:
+                incomplete_reasons.append("missing_home_prior_team_games")
+            if away_team_pre["games_played"] <= 0:
+                incomplete_reasons.append("missing_away_prior_team_games")
+            
+            if home_starter_id is None:
+                incomplete_reasons.append("missing_home_starter_id")
+            elif home_pitcher_pre["starts"] <= 0 and home_pitcher_pre["kbb"] is None:
+                incomplete_reasons.append("missing_home_prior_starter_data")
+                
+            if away_starter_id is None:
+                incomplete_reasons.append("missing_away_starter_id")
+            elif away_pitcher_pre["starts"] <= 0 and away_pitcher_pre["kbb"] is None:
+                incomplete_reasons.append("missing_away_prior_starter_data")
+            
+            if odds_row is None:
+                incomplete_reasons.append(f"missing_odds_snapshot:{odds_policy}")
+
+            features_complete = not any(reason.startswith("missing_home_prior") or reason.startswith("missing_away_prior") or reason.endswith("starter_id") or reason.endswith("starter_data") for reason in incomplete_reasons)
+            odds_complete = odds_row is not None
 
             row_data = dict(
-                game_id=g["game_id"],
-                game_date=date.fromisoformat(g["game_date"]),
+                game_id=fact["game_id"],
+                game_date=date.fromisoformat(fact["game_date"]),
                 season=season,
-                away_team=g["away_team"],
-                away_team_id=g["away_team_id"],
-                home_team=g["home_team"],
-                home_team_id=g["home_team_id"],
-                venue=g["venue"],
-                away_score=g["away_score"],
-                home_score=g["home_score"],
-                home_win=g["home_win"],
-                away_starter_id=g["away_starter_id"],
-                home_starter_id=g["home_starter_id"],
-                away_starter_name=g["away_starter_name"],
-                home_starter_name=g["home_starter_name"],
-                away_starter_era=away_starter["era"] if away_starter else None,
-                home_starter_era=home_starter["era"] if home_starter else None,
-                away_starter_kbb=away_starter.get("kbb") if away_starter else None,
-                home_starter_kbb=home_starter.get("kbb") if home_starter else None,
-                away_team_era=away_stats["era"],
-                home_team_era=home_stats["era"],
-                away_team_ops=away_stats["ops"],
-                home_team_ops=home_stats["ops"],
-                away_team_whip=away_stats["whip"],
-                home_team_whip=home_stats["whip"],
-                away_win_pct=g["away_win_pct"],
-                home_win_pct=g["home_win_pct"],
-                away_run_diff=away_run_diff,
-                home_run_diff=home_run_diff,
-                away_bullpen_era=away_bullpen["era"] if away_bullpen else None,
-                home_bullpen_era=home_bullpen["era"] if home_bullpen else None,
-                away_exit_velo=away_sc["exit_velocity_avg"] if away_sc else None,
-                home_exit_velo=home_sc["exit_velocity_avg"] if home_sc else None,
-                away_barrel_rate=away_sc["barrel_rate"]     if away_sc else None,
-                home_barrel_rate=home_sc["barrel_rate"]     if home_sc else None,
-                away_hard_hit_rate=away_sc["hard_hit_rate"] if away_sc else None,
-                home_hard_hit_rate=home_sc["hard_hit_rate"] if home_sc else None,
-                away_sprint_speed=away_sc["sprint_speed_avg"] if away_sc else None,
-                home_sprint_speed=home_sc["sprint_speed_avg"] if home_sc else None,
+                home_team_id=fact["home_team_id"],
+                away_team_id=fact["away_team_id"],
+                home_team=fact["home_team"],
+                away_team=fact["away_team"],
+                venue=fact["venue"],
+                game_start_time=cutoff_time,
+                feature_cutoff_time=cutoff_time,
+                feature_cutoff_policy="game_start",
+                home_score=fact["home_score"],
+                away_score=fact["away_score"],
+                home_win=fact["home_win"],
+                home_starter_id=fact.get("home_starter_id"),
+                away_starter_id=fact.get("away_starter_id"),
+                home_starter_name=fact.get("home_starter_name"),
+                away_starter_name=fact.get("away_starter_name"),
+                home_starter_era=home_pitcher_pre["era"],
+                away_starter_era=away_pitcher_pre["era"],
+                home_starter_kbb=home_pitcher_pre["kbb"],
+                away_starter_kbb=away_pitcher_pre["kbb"],
+                home_starter_whip=home_pitcher_pre["whip"],
+                away_starter_whip=away_pitcher_pre["whip"],
+                home_starter_starts=home_pitcher_pre["starts"],
+                away_starter_starts=away_pitcher_pre["starts"],
+                home_team_era=home_team_pre["team_era"],
+                away_team_era=away_team_pre["team_era"],
+                home_team_ops=home_team_pre["ops"],
+                away_team_ops=away_team_pre["ops"],
+                home_team_whip=home_team_pre["team_whip"],
+                away_team_whip=away_team_pre["team_whip"],
+                home_win_pct=home_team_pre["win_pct"],
+                away_win_pct=away_team_pre["win_pct"],
+                home_games_played=home_team_pre["games_played"],
+                away_games_played=away_team_pre["games_played"],
+                home_run_diff=home_team_pre["run_diff"],
+                away_run_diff=away_team_pre["run_diff"],
+                home_pythagorean_win_pct=home_team_pre["pythagorean_win_pct"],
+                away_pythagorean_win_pct=away_team_pre["pythagorean_win_pct"],
+                home_bullpen_era=home_team_pre["bullpen_era"],
+                away_bullpen_era=away_team_pre["bullpen_era"],
+                home_exit_velo=None,
+                away_exit_velo=None,
+                home_barrel_rate=None,
+                away_barrel_rate=None,
+                home_hard_hit_rate=None,
+                away_hard_hit_rate=None,
+                home_sprint_speed=None,
+                away_sprint_speed=None,
+                odds_snapshot_type=odds_row.snapshot_type.value if odds_row else None,
+                odds_snapshot_policy=odds_policy,
+                odds_row_id=odds_row.id if odds_row else None,
+                odds_fetched_at=odds_row.fetched_at if odds_row else None,
+                odds_away_ml=odds_row.away_ml if odds_row else None,
+                odds_home_ml=odds_row.home_ml if odds_row else None,
+                odds_total=odds_row.total_line if odds_row else None,
+                features_complete=features_complete,
+                odds_complete=odds_complete,
+                incomplete_reasons_json=json.dumps(incomplete_reasons),
             )
 
             stmt = pg_insert(BacktestGame).values(**row_data)
@@ -250,125 +668,282 @@ def collect_season(db: Session, season: int) -> int:
                 index_elements=["game_id"],
                 set_={k: v for k, v in row_data.items() if k != "game_id"},
             )
+            print(f"[backtest] inserting game {fact['game_id']}", flush=True)
             db.execute(stmt)
+            db.commit()
             processed += 1
+            if fact["game_id"] in existing_game_ids:
+                updated += 1
+            else:
+                inserted += 1
+                existing_game_ids.add(fact["game_id"])
+            if features_complete:
+                features_complete_count += 1
+            if odds_complete:
+                odds_complete_count += 1
+            skip_reason_counts.update(incomplete_reasons)
 
-            # Commit frequently — keeps the Neon connection alive and checkpoints
-            # progress so a later crash doesn't lose everything.
-            if processed % _COMMIT_INTERVAL == 0:
+            team_state.setdefault(fact["home_team_id"], TeamRollingStats())
+            team_state.setdefault(fact["away_team_id"], TeamRollingStats())
+            _update_team_state(
+                team_state[fact["home_team_id"]],
+                fact["home_box"],
+                fact["home_score"],
+                fact["away_score"],
+                bool(fact["home_win"]),
+            )
+            _update_team_state(
+                team_state[fact["away_team_id"]],
+                fact["away_box"],
+                fact["away_score"],
+                fact["home_score"],
+                not bool(fact["home_win"]),
+            )
+
+            if fact.get("home_starter_id") is not None:
+                pitcher_state.setdefault(fact["home_starter_id"], PitcherRollingStats())
+                _update_pitcher_state(pitcher_state[fact["home_starter_id"]], fact["home_box"])
+            if fact.get("away_starter_id") is not None:
+                pitcher_state.setdefault(fact["away_starter_id"], PitcherRollingStats())
+                _update_pitcher_state(pitcher_state[fact["away_starter_id"]], fact["away_box"])
+
+            if processed % 10 == 0:
                 db.commit()
-                print(f"[backtest] Season {season}: {processed}/{len(games)} games committed ({errors} errors so far)", flush=True)
-
+                print(f"[backtest] committed {processed} rows so far", flush=True)
         except Exception:
             errors += 1
-            print(f"[backtest] Season {season} — ERROR on game {g['game_id']} ({idx}/{len(games)}):", flush=True)
+            skip_reason_counts.update(["row_build_or_upsert_error"])
+            print(f"[backtest] Season {season} — ERROR on game {fact['game_id']} ({idx}/{len(facts)}):", flush=True)
             traceback.print_exc()
             db.rollback()
 
     db.commit()
-    print(f"[backtest] Season {season} COMPLETE: {processed}/{len(games)} games stored, {errors} errors", flush=True)
+    print(f"[backtest] Season {season} COMPLETE: {processed}/{len(facts)} games stored, {errors} errors", flush=True)
+    print(
+        (
+            f"[backtest] Season {season} diagnostics: rows_scanned={len(schedule_games)} "
+            f"rows_inserted={inserted} rows_updated={updated} "
+            f"rows_marked_features_complete={features_complete_count} "
+            f"rows_marked_odds_complete={odds_complete_count}"
+        ),
+        flush=True,
+    )
+    print(
+        f"[backtest] Season {season} skip reasons: {json.dumps(dict(sorted(skip_reason_counts.items())), sort_keys=True)}",
+        flush=True,
+    )
     return processed
 
 
-# ── Logistic regression ───────────────────────────────────────────────────────
+def _row_to_feature_vector(row: BacktestGame) -> list[float]:
+    run_diff_home = (row.home_run_diff / row.home_games_played) if row.home_run_diff is not None and row.home_games_played else 0.0
+    run_diff_away = (row.away_run_diff / row.away_games_played) if row.away_run_diff is not None and row.away_games_played else 0.0
+    home_kbb_pct = ((row.home_starter_kbb if row.home_starter_kbb is not None else _DEFAULT_KBB) / 45.0)
+    away_kbb_pct = ((row.away_starter_kbb if row.away_starter_kbb is not None else _DEFAULT_KBB) / 45.0)
+    return [
+        (row.away_team_whip or _DEFAULT_WHIP) - (row.home_team_whip or _DEFAULT_WHIP),
+        (row.home_team_ops or _DEFAULT_OPS) - (row.away_team_ops or _DEFAULT_OPS),
+        run_diff_home - run_diff_away,
+        home_kbb_pct - away_kbb_pct,
+        PARK_FACTORS.get(row.venue or "", 0.0),
+        (row.home_pythagorean_win_pct or _DEFAULT_PYTHAG) - (row.away_pythagorean_win_pct or _DEFAULT_PYTHAG),
+    ]
+
+
+def _fit_logistic_model(rows: list[BacktestGame]) -> tuple[StandardScaler, LogisticRegression]:
+    X = np.array([_row_to_feature_vector(row) for row in rows], dtype=float)
+    y = np.array([int(row.home_win) for row in rows], dtype=int)
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    model = LogisticRegression(max_iter=1000, random_state=42)
+    model.fit(X_scaled, y)
+    return scaler, model
+
+
+def _score_rows(rows: list[BacktestGame], scaler: StandardScaler, model: LogisticRegression) -> list[float]:
+    X = np.array([_row_to_feature_vector(row) for row in rows], dtype=float)
+    return model.predict_proba(scaler.transform(X))[:, 1].tolist()
+
+
+def _fold_metrics(y_true: list[int], probs: list[float]) -> dict:
+    preds = [1 if p >= 0.5 else 0 for p in probs]
+    accuracy = float(sum(int(a == b) for a, b in zip(preds, y_true)) / len(y_true))
+    return {
+        "accuracy": round(accuracy, 4),
+        "log_loss": round(float(sk_log_loss(y_true, probs)), 4),
+        "brier_score": round(float(brier_score_loss(y_true, probs)), 4),
+    }
+
 
 def run_logistic_regression(db: Session, seasons: list[int]) -> BacktestResult:
-    """
-    Pull backtest_games for the given seasons, build feature matrix,
-    fit logistic regression, then fit a Platt scaling calibrator on the
-    2023 season out-of-fold predictions and store results.
-    """
     rows = (
         db.query(BacktestGame)
-        .filter(BacktestGame.season.in_(seasons), BacktestGame.home_win.isnot(None))
+        .filter(
+            BacktestGame.season.in_(seasons),
+            BacktestGame.home_win.isnot(None),
+        )
+        .order_by(BacktestGame.feature_cutoff_time.asc(), BacktestGame.game_id.asc())
         .all()
     )
     if len(rows) < 50:
-        raise ValueError(f"Too few rows for regression ({len(rows)}). Run collect first.")
+        raise ValueError(f"Too few backtest rows ({len(rows)}). Run collect first.")
 
-    X, y = [], []
-    for r in rows:
-        home_era_adv  = (r.away_team_era or 4.2)  - (r.home_team_era or 4.2)
-        home_whip_adv = (r.away_team_whip or 1.3)  - (r.home_team_whip or 1.3)
-        home_ops_adv  = (r.home_team_ops or 0.72) - (r.away_team_ops or 0.72)
-        home_starter_era_adv = (
-            (r.away_starter_era or r.away_team_era or 4.2)
-            - (r.home_starter_era or r.home_team_era or 4.2)
-        )
-        win_pct_adv     = (r.home_win_pct or 0.5) - (r.away_win_pct or 0.5)
-        park_factor_adv = PARK_FACTORS.get(r.venue or "", 0.0)
-        kbb_adv = (
-            (r.home_starter_kbb if r.home_starter_kbb is not None else _DEFAULT_KBB)
-            - (r.away_starter_kbb if r.away_starter_kbb is not None else _DEFAULT_KBB)
-        )
-        X.append([home_era_adv, home_whip_adv, home_ops_adv, home_starter_era_adv,
-                   win_pct_adv, park_factor_adv, kbb_adv])
-        y.append(int(r.home_win))
+    clean_rows = [row for row in rows if row.features_complete]
+    if len(clean_rows) < 50:
+        raise ValueError(f"Too few point-in-time-complete rows ({len(clean_rows)}).")
 
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    final_scaler, final_model = _fit_logistic_model(clean_rows)
+    unique_seasons = sorted({row.season for row in clean_rows})
+    validation_mode = "walk_forward_by_season"
+    folds: list[dict] = []
+    oos_predictions: list[dict] = []
 
-    model = LogisticRegression(max_iter=1000, random_state=42)
-    model.fit(X_scaled, y)
+    if len(unique_seasons) >= 2:
+        for eval_season in unique_seasons[1:]:
+            train_rows = [row for row in clean_rows if row.season < eval_season]
+            test_rows = [row for row in clean_rows if row.season == eval_season]
+            if len(train_rows) < 50 or not test_rows:
+                continue
+            scaler, model = _fit_logistic_model(train_rows)
+            probs = _score_rows(test_rows, scaler, model)
+            y_true = [int(row.home_win) for row in test_rows]
+            metrics = _fold_metrics(y_true, probs)
+            folds.append({
+                "eval_season": eval_season,
+                "train_rows": len(train_rows),
+                "test_rows": len(test_rows),
+                **metrics,
+            })
+            for row, prob, actual in zip(test_rows, probs, y_true):
+                oos_predictions.append({
+                    "game_id": row.game_id,
+                    "season": row.season,
+                    "cutoff_time": row.feature_cutoff_time.isoformat() if row.feature_cutoff_time else None,
+                    "raw_prob": float(prob),
+                    "actual": int(actual),
+                    "odds_complete": bool(row.odds_complete),
+                })
 
-    y_pred_proba = model.predict_proba(X_scaled)[:, 1]
-    y_pred = model.predict(X_scaled)
+        if not oos_predictions:
+            raise ValueError("Walk-forward validation produced no out-of-sample folds.")
 
-    accuracy    = float(sum(a == b for a, b in zip(y_pred, y)) / len(y))
-    loss        = float(sk_log_loss(y, y_pred_proba))
-    brier       = float(brier_score_loss(y, y_pred_proba))
-    cv_scores   = cross_val_score(model, X_scaled, y, cv=5, scoring="accuracy")
-    cv_accuracy = float(cv_scores.mean())
-
-    coefs = dict(zip(FEATURE_NAMES, [round(float(c), 6) for c in model.coef_[0]]))
-    ranked = sorted(coefs.items(), key=lambda x: abs(x[1]), reverse=True)
-
-    # ── Platt scaling calibration on 2023 season ──────────────────────────────
-    # Fit a sigmoid calibrator using the base model's probability outputs on
-    # 2023 games as a held-out calibration set.  Parameters (a, b) are stored
-    # in the DB and applied at prediction time in the live pipeline.
-    calibration_params = None
-    X_arr = np.array(X_scaled)
-    y_arr = np.array(y)
-    idx_2023 = [i for i, r in enumerate(rows) if r.season == 2023]
-    if len(idx_2023) >= 30:
-        X_2023 = X_arr[idx_2023]
-        y_2023 = y_arr[idx_2023]
-        # CalibratedClassifierCV(cv="prefit") was removed in sklearn 1.2.
-        # Equivalent: fit a logistic regression on the base model's raw probs
-        # (standard Platt scaling: sigmoid(a * raw_prob + b) ≈ calibrated prob).
-        from scipy.special import expit
-        raw_probs_2023 = model.predict_proba(X_2023)[:, 1]
-        platt = LogisticRegression(max_iter=1000, random_state=42)
-        platt.fit(raw_probs_2023.reshape(-1, 1), y_2023)
-        a = round(float(platt.coef_[0][0]), 6)
-        b = round(float(platt.intercept_[0]), 6)
-        calibration_params = {"a": a, "b": b}
-        y_cal_proba_2023 = expit(a * raw_probs_2023 + b)
-        cal_brier_2023 = float(brier_score_loss(y_2023, y_cal_proba_2023))
-        print(
-            f"[backtest] Platt calibration fit on {len(idx_2023)} 2023 games: "
-            f"a={calibration_params['a']:.4f}  b={calibration_params['b']:.4f}  "
-            f"raw_brier={brier:.4f}  cal_brier_2023={cal_brier_2023:.4f}",
-            flush=True,
-        )
+        pooled_y = [row["actual"] for row in oos_predictions]
+        pooled_probs = [row["raw_prob"] for row in oos_predictions]
+        pooled_metrics = _fold_metrics(pooled_y, pooled_probs)
+        cv_accuracy = round(float(sum(fold["accuracy"] for fold in folds) / len(folds)), 4)
     else:
-        print(
-            f"[backtest] Skipping Platt calibration — only {len(idx_2023)} 2023 rows "
-            f"(need ≥30). Include season 2023 in the training set to enable calibration.",
-            flush=True,
+        validation_mode = "single_season_in_sample"
+        pooled_probs = _score_rows(clean_rows, final_scaler, final_model)
+        pooled_y = [int(row.home_win) for row in clean_rows]
+        pooled_metrics = _fold_metrics(pooled_y, pooled_probs)
+        cv_accuracy = pooled_metrics["accuracy"]
+
+    coefs = dict(zip(FEATURE_NAMES, [round(float(c), 6) for c in final_model.coef_[0]]))
+    coefs["__intercept__"] = round(float(final_model.intercept_[0]), 6)
+    coefs["__scaler_mean__"] = [round(float(v), 6) for v in final_scaler.mean_]
+    coefs["__scaler_scale__"] = [round(float(v), 6) for v in final_scaler.scale_]
+    ranked = sorted(
+        ((feature, coef) for feature, coef in coefs.items() if not feature.startswith("__")),
+        key=lambda item: abs(item[1]),
+        reverse=True,
+    )
+
+    calibration_params = None
+    calibration_summary = {
+        "out_of_sample": False,
+        "fit_seasons": [],
+        "eval_season": None,
+        "rows_fit": 0,
+        "rows_eval": 0,
+        "raw_brier_eval": None,
+        "calibrated_brier_eval": None,
+        "note": "Need at least two out-of-sample seasons to fit calibration on prior OOS predictions and evaluate on a later OOS season.",
+    }
+    oos_seasons = sorted({row["season"] for row in oos_predictions})
+    if len(oos_seasons) >= 2:
+        calibration_fit_seasons = oos_seasons[:-1]
+        calibration_eval_season = oos_seasons[-1]
+        fit_rows = [row for row in oos_predictions if row["season"] in calibration_fit_seasons]
+        eval_rows = [row for row in oos_predictions if row["season"] == calibration_eval_season]
+        if len(fit_rows) >= 30 and eval_rows:
+            platt = LogisticRegression(max_iter=1000, random_state=42)
+            fit_x = np.array([[row["raw_prob"]] for row in fit_rows], dtype=float)
+            fit_y = np.array([row["actual"] for row in fit_rows], dtype=int)
+            eval_x = np.array([[row["raw_prob"]] for row in eval_rows], dtype=float)
+            eval_y = np.array([row["actual"] for row in eval_rows], dtype=int)
+            platt.fit(fit_x, fit_y)
+            calibration_params = {
+                "a": round(float(platt.coef_[0][0]), 6),
+                "b": round(float(platt.intercept_[0]), 6),
+            }
+            raw_brier_eval = float(brier_score_loss(eval_y, eval_x[:, 0]))
+            cal_probs_eval = platt.predict_proba(eval_x)[:, 1]
+            calibrated_brier_eval = float(brier_score_loss(eval_y, cal_probs_eval))
+            calibration_summary = {
+                "out_of_sample": True,
+                "fit_seasons": calibration_fit_seasons,
+                "eval_season": calibration_eval_season,
+                "rows_fit": len(fit_rows),
+                "rows_eval": len(eval_rows),
+                "raw_brier_eval": round(raw_brier_eval, 4),
+                "calibrated_brier_eval": round(calibrated_brier_eval, 4),
+                "note": "Calibration is fit only on prior out-of-sample logistic probabilities and evaluated on a later out-of-sample season.",
+            }
+
+    incomplete_reason_counts: dict[str, int] = {}
+    for row in rows:
+        reasons = json.loads(row.incomplete_reasons_json) if row.incomplete_reasons_json else []
+        for reason in reasons:
+            incomplete_reason_counts[reason] = incomplete_reason_counts.get(reason, 0) + 1
+
+    dataset_summary = {
+        "point_in_time_policy": "game_start",
+        "odds_snapshot_policy": _DEFAULT_ODDS_POLICY,
+        "validation_mode": validation_mode,
+        "date_range": {
+            "start": min(row.game_date for row in rows).isoformat(),
+            "end": max(row.game_date for row in rows).isoformat(),
+        },
+        "feature_set": FEATURE_NAMES,
+        "rows_total": len(rows),
+        "rows_features_complete": len(clean_rows),
+        "rows_missing_features": len(rows) - len(clean_rows),
+        "rows_with_historical_odds": sum(1 for row in rows if row.odds_complete),
+        "rows_missing_historical_odds": sum(1 for row in rows if not row.odds_complete),
+        "rows_skipped_for_training": len(rows) - len(clean_rows),
+        "incomplete_reason_counts": incomplete_reason_counts,
+    }
+    validation_summary = {
+        "method": validation_mode,
+        "folds": folds,
+        "pooled_out_of_sample_metrics": pooled_metrics,
+        "cv_accuracy_mean": cv_accuracy,
+        "calibration": calibration_summary,
+    }
+    limitations = [
+        "Historical odds linkage only uses explicit pregame/open snapshots already stored locally in game_odds before each game start.",
+        "Rows without reliable prior team or starter history are flagged and excluded from model training instead of being backfilled with season-end aggregates.",
+        "Statcast-derived team sprint-speed and pitcher xERA features are excluded from the point-in-time model because the repo does not have a trustworthy historical pregame source for them.",
+        "Final live coefficients are refit on all point-in-time-complete rows; calibration parameters are learned from prior out-of-sample logistic predictions only.",
+    ]
+    if validation_mode == "single_season_in_sample":
+        limitations.append(
+            "This run used a single-season in-sample fit because only one season was requested; accuracy/CV fields are not walk-forward estimates and no new calibration parameters were fit."
         )
 
     result = BacktestResult(
-        seasons=",".join(str(s) for s in sorted(seasons)),
-        n_games=len(rows),
-        accuracy=round(accuracy, 4),
-        cv_accuracy=round(cv_accuracy, 4),
-        log_loss=round(loss, 4),
-        brier_score=round(brier, 4),
+        seasons=",".join(str(season) for season in sorted(seasons)),
+        n_games=len(clean_rows),
+        accuracy=pooled_metrics["accuracy"],
+        cv_accuracy=cv_accuracy,
+        log_loss=pooled_metrics["log_loss"],
+        brier_score=pooled_metrics["brier_score"],
         calibration_params_json=json.dumps(calibration_params) if calibration_params else None,
         coefficients_json=json.dumps(coefs),
-        feature_ranks_json=json.dumps([{"feature": f, "coef": c} for f, c in ranked]),
+        feature_ranks_json=json.dumps([{"feature": feature, "coef": coef} for feature, coef in ranked]),
+        dataset_summary_json=json.dumps(dataset_summary),
+        validation_summary_json=json.dumps(validation_summary),
+        limitations_json=json.dumps(limitations),
     )
     db.add(result)
     db.commit()
@@ -378,312 +953,63 @@ def run_logistic_regression(db: Session, seasons: list[int]) -> BacktestResult:
 
 
 def run_analysis(db: Session, seasons: list[int]) -> dict:
-    """
-    Correlation analysis on backtest_games data.
-    Returns feature correlations with home_win, venue effects, season breakdown,
-    and model recommendations.
-    """
-    import numpy as np
-    import pandas as pd
-
     rows = (
         db.query(BacktestGame)
-        .filter(BacktestGame.season.in_(seasons), BacktestGame.home_win.isnot(None))
+        .filter(
+            BacktestGame.season.in_(seasons),
+            BacktestGame.home_win.isnot(None),
+            BacktestGame.features_complete == True,  # noqa: E712
+        )
+        .order_by(BacktestGame.feature_cutoff_time.asc(), BacktestGame.game_id.asc())
         .all()
     )
     if not rows:
-        return {"error": "No backtest_games data found. Run /api/backtest/collect first."}
+        return {"error": "No point-in-time-complete backtest rows found. Run /api/backtest/collect first."}
 
-    # ── Build flat records ────────────────────────────────────────────────────
     records = []
-    for r in rows:
-        h_era    = r.home_team_era  or 4.20
-        a_era    = r.away_team_era  or 4.20
-        h_whip   = r.home_team_whip or 1.30
-        a_whip   = r.away_team_whip or 1.30
-        h_ops    = r.home_team_ops  or 0.720
-        a_ops    = r.away_team_ops  or 0.720
-        h_sp_era = r.home_starter_era or h_era
-        a_sp_era = r.away_starter_era or a_era
-        h_wp     = r.home_win_pct   or 0.500
-        a_wp     = r.away_win_pct   or 0.500
-        h_rd     = r.home_run_diff  or 0
-        a_rd     = r.away_run_diff  or 0
+    for row in rows:
+        vector = dict(zip(FEATURE_NAMES, _row_to_feature_vector(row)))
+        vector["home_win"] = int(row.home_win)
+        vector["season"] = row.season
+        vector["odds_complete"] = bool(row.odds_complete)
+        records.append(vector)
 
-        h_bp = r.home_bullpen_era if r.home_bullpen_era is not None else h_era
-        a_bp = r.away_bullpen_era if r.away_bullpen_era is not None else a_era
-
-        # Statcast team metrics — default to league averages when NULL
-        h_ev  = r.home_exit_velo     or 88.5
-        a_ev  = r.away_exit_velo     or 88.5
-        h_br  = r.home_barrel_rate   or 8.0
-        a_br  = r.away_barrel_rate   or 8.0
-        h_hh  = r.home_hard_hit_rate or 38.0
-        a_hh  = r.away_hard_hit_rate or 38.0
-        h_ss  = r.home_sprint_speed  or 27.0
-        a_ss  = r.away_sprint_speed  or 27.0
-
-        records.append({
-            "home_win":            int(r.home_win),
-            "season":              r.season,
-            "venue":               r.venue or "Unknown",
-            # raw team metrics
-            "home_team_era":       h_era,
-            "away_team_era":       a_era,
-            "home_team_ops":       h_ops,
-            "away_team_ops":       a_ops,
-            # advantage features (all sign-normalised: positive = home team better)
-            "home_era_adv":        a_era  - h_era,
-            "home_whip_adv":       a_whip - h_whip,
-            "home_ops_adv":        h_ops  - a_ops,
-            "home_starter_era_adv": a_sp_era - h_sp_era,
-            "home_win_pct":        h_wp,
-            "away_win_pct":        a_wp,
-            "win_pct_adv":         h_wp   - a_wp,
-            "home_run_diff":       h_rd,
-            "away_run_diff":       a_rd,
-            "run_diff_adv":        h_rd   - a_rd,
-            "bullpen_era_adv":     a_bp   - h_bp,
-            # Statcast team batting/speed advantages (home minus away)
-            "exit_velo_adv":       h_ev   - a_ev,
-            "barrel_rate_adv":     h_br   - a_br,
-            "hard_hit_rate_adv":   h_hh   - a_hh,
-            "sprint_speed_adv":    h_ss   - a_ss,
+    feature_correlations = []
+    y = np.array([record["home_win"] for record in records], dtype=float)
+    for feature_name in FEATURE_NAMES:
+        x = np.array([record[feature_name] for record in records], dtype=float)
+        corr = float(np.corrcoef(x, y)[0, 1]) if np.std(x) > 0 else 0.0
+        if math.isnan(corr):
+            corr = 0.0
+        feature_correlations.append({
+            "feature": feature_name,
+            "pearson_r": round(corr, 4),
+            "abs_r": round(abs(corr), 4),
         })
+    feature_correlations.sort(key=lambda row: row["abs_r"], reverse=True)
 
-    df = pd.DataFrame(records)
-
-    # ── 1. Pearson correlations with home_win ─────────────────────────────────
-    FEATURE_COLS = [
-        "home_era_adv",
-        "home_whip_adv",
-        "home_ops_adv",
-        "home_starter_era_adv",
-        "home_win_pct",
-        "away_win_pct",
-        "win_pct_adv",
-        "home_run_diff",
-        "away_run_diff",
-        "run_diff_adv",
-        "bullpen_era_adv",
-        # Statcast team metrics — candidate features pending data collection
-        "exit_velo_adv",
-        "barrel_rate_adv",
-        "hard_hit_rate_adv",
-        "sprint_speed_adv",
-    ]
-    correlations = []
-    for col in FEATURE_COLS:
-        # Zero-variance columns (e.g. Statcast fields all NULL → all defaulted to
-        # the same value) produce NaN from .corr(). Treat them as r=0.
-        if df[col].std() == 0:
-            r_val = 0.0
-        else:
-            r_val = float(df[col].corr(df["home_win"]))
-            if r_val != r_val:  # NaN check
-                r_val = 0.0
-        correlations.append({
-            "feature":   col,
-            "pearson_r": round(r_val, 4),
-            "abs_r":     round(abs(r_val), 4),
-            "in_current_model": col in set(FEATURE_NAMES),
-        })
-    correlations.sort(key=lambda x: x["abs_r"], reverse=True)
-
-    # ── 2. Overall home-field baseline ───────────────────────────────────────
-    overall_hwr = float(df["home_win"].mean())
-
-    # ── 3. Venue analysis ─────────────────────────────────────────────────────
-    venue_agg = (
-        df.groupby("venue")["home_win"]
-        .agg(home_win_rate="mean", games="count")
-        .reset_index()
-    )
-    venue_agg = venue_agg[venue_agg["games"] >= 50].copy()
-    venue_agg["home_win_rate"] = venue_agg["home_win_rate"].round(4)
-    venue_agg["vs_baseline"]   = (venue_agg["home_win_rate"] - overall_hwr).round(4)
-    venue_agg = venue_agg.sort_values("home_win_rate", ascending=False)
-
-    # flag known extreme parks
-    HITTER_PARKS  = {"Coors Field", "Great American Ball Park", "Globe Life Field",
-                     "American Family Field", "Fenway Park"}
-    PITCHER_PARKS = {"Oracle Park", "Petco Park", "Dodger Stadium",
-                     "Tropicana Field", "Guaranteed Rate Field"}
-
-    def _park_tag(name):
-        if name in HITTER_PARKS:  return "hitter-friendly"
-        if name in PITCHER_PARKS: return "pitcher-friendly"
-        return "neutral"
-
-    venue_rows = venue_agg.to_dict("records")
-    for v in venue_rows:
-        v["park_type"] = _park_tag(v["venue"])
-
-    # ── 4. Season-by-season breakdown ────────────────────────────────────────
     season_breakdown = []
-    for s, grp in df.groupby("season"):
+    for season in sorted({row.season for row in rows}):
+        season_rows = [row for row in rows if row.season == season]
         season_breakdown.append({
-            "season":           int(s),
-            "games":            int(len(grp)),
-            "home_win_rate":    round(float(grp["home_win"].mean()), 4),
-            "avg_run_diff_adv": round(float(grp["run_diff_adv"].mean()), 2),
-            "avg_win_pct_adv":  round(float(grp["win_pct_adv"].mean()), 4),
+            "season": season,
+            "games": len(season_rows),
+            "home_win_rate": round(float(sum(int(row.home_win) for row in season_rows) / len(season_rows)), 4),
+            "odds_complete_rate": round(float(sum(int(bool(row.odds_complete)) for row in season_rows) / len(season_rows)), 4),
         })
 
-    # ── 5. Run-diff analysis ─────────────────────────────────────────────────
-    rd_corr     = float(df["run_diff_adv"].corr(df["home_win"]))
-    wp_adv_corr = float(df["win_pct_adv"].corr(df["home_win"]))
-    era_corr    = float(df["home_era_adv"].corr(df["home_win"]))
-
-    # Quintile lift: does top run-diff-adv quintile win more?
-    df["rd_quintile"] = pd.qcut(df["run_diff_adv"], 5, labels=False, duplicates="drop")
-    quintile_lifts = (
-        df.groupby("rd_quintile")["home_win"]
-        .agg(home_win_rate="mean", games="count")
-        .reset_index()
-        .rename(columns={"rd_quintile": "quintile"})
-    )
-    quintile_lifts["quintile"]     = quintile_lifts["quintile"].astype(int)
-    quintile_lifts["home_win_rate"] = quintile_lifts["home_win_rate"].round(4)
-
-    # ── 6. Recommendations ───────────────────────────────────────────────────
-    corr_map = {c["feature"]: c["pearson_r"] for c in correlations}
-
-    recommendations = []
-
-    # run_diff_adv vs era_adv
-    if abs(rd_corr) > abs(era_corr):
-        recommendations.append({
-            "priority": "HIGH",
-            "category": "feature_addition",
-            "feature":  "run_diff_adv",
-            "finding":  (
-                f"run_diff_adv has r={rd_corr:.4f} vs home_era_adv r={era_corr:.4f}. "
-                f"Run differential captures team quality more holistically than ERA alone."
-            ),
-            "action": (
-                "Add home_run_diff - away_run_diff as a feature in the logistic regression. "
-                "Normalise by games played once games_played is collected in backtest_games."
-            ),
-        })
-
-    # win_pct_adv vs raw win_pcts
-    if abs(wp_adv_corr) > max(
-        abs(corr_map.get("home_win_pct", 0)),
-        abs(corr_map.get("away_win_pct", 0)),
-    ):
-        recommendations.append({
-            "priority": "MEDIUM",
-            "category": "feature_simplification",
-            "feature":  "win_pct_adv",
-            "finding":  (
-                f"win_pct_adv (home - away) r={wp_adv_corr:.4f} is stronger than "
-                f"home_win_pct alone r={corr_map.get('home_win_pct',0):.4f}. "
-                f"The model currently treats them as two separate features."
-            ),
-            "action": (
-                "Replace home_win_pct + away_win_pct with a single win_pct_adv feature "
-                "to reduce multicollinearity and simplify the feature space."
-            ),
-        })
-
-    # weak features
-    for feat in correlations[-3:]:
-        if feat["abs_r"] < 0.04 and feat["in_current_model"]:
-            recommendations.append({
-                "priority": "LOW",
-                "category": "feature_removal",
-                "feature":  feat["feature"],
-                "finding":  f"{feat['feature']} has near-zero correlation r={feat['pearson_r']:.4f}.",
-                "action":   f"Consider dropping {feat['feature']} — it adds noise without predictive signal.",
-            })
-
-    # venue / park factor
-    extreme_venues = [v for v in venue_rows if abs(v["vs_baseline"]) > 0.04]
-    if extreme_venues:
-        recommendations.append({
-            "priority": "MEDIUM",
-            "category": "park_factor",
-            "feature":  "venue_park_factor",
-            "finding":  (
-                f"{len(extreme_venues)} venues deviate >4pp from the "
-                f"{overall_hwr:.1%} baseline home win rate."
-            ),
-            "action": (
-                "Add a park_factor feature: venues like Coors Field systematically "
-                "inflate totals and home win rates; pitcher-friendly parks do the opposite. "
-                "A binary or ordinal park factor would improve calibration."
-            ),
-        })
-
-    # missing features
-    recommendations.append({
-        "priority": "MEDIUM",
-        "category": "data_collection",
-        "feature":  "rest_days",
-        "finding":  "Rest days (days since last game) are not currently collected.",
-        "action": (
-            "Teams on 0 rest (back-to-back) historically underperform by ~2-3% win rate. "
-            "Add rest_days_home and rest_days_away to backtest_games and the live feature builder."
-        ),
-    })
-    recommendations.append({
-        "priority": "LOW",
-        "category": "data_collection",
-        "feature":  "game_type",
-        "finding":  "Division/interleague splits are not stored.",
-        "action": (
-            "Add game_type (division / interleague / non-division) to backtest_games. "
-            "Division familiarity tends to compress win-probability spreads."
-        ),
-    })
-
-    def _json_safe(obj):
-        """Recursively replace NaN/Inf floats with None so FastAPI can serialise."""
-        if isinstance(obj, float):
-            return None if (obj != obj or obj == float("inf") or obj == float("-inf")) else obj
-        if isinstance(obj, dict):
-            return {k: _json_safe(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [_json_safe(v) for v in obj]
-        return obj
-
-    return _json_safe({
-        "generated_at":        __import__("datetime").datetime.utcnow().isoformat() + "Z",
-        "seasons":             ",".join(str(s) for s in sorted(seasons)),
-        "n_games":             len(df),
-        "overall_home_win_rate": round(overall_hwr, 4),
-        "feature_correlations": correlations,
-        "run_diff_analysis": {
-            "run_diff_adv_r":  round(rd_corr, 4),
-            "win_pct_adv_r":   round(wp_adv_corr, 4),
-            "home_era_adv_r":  round(era_corr, 4),
-            "run_diff_stronger_than_era": abs(rd_corr) > abs(era_corr),
-            "quintile_lifts":  quintile_lifts.to_dict("records"),
-            "note": (
-                "run_diff stored as raw season total. Normalising by games_played "
-                "(not yet collected) would further strengthen this signal."
-            ),
-        },
-        "venue_analysis": {
-            "most_home_friendly":  venue_rows[:8],
-            "least_home_friendly": venue_rows[-8:],
-            "extreme_venues":      extreme_venues,
-            "total_venues_analysed": len(venue_rows),
-        },
-        "season_breakdown":    season_breakdown,
-        "recommendations":     sorted(
-            recommendations,
-            key=lambda x: {"HIGH": 0, "MEDIUM": 1, "LOW": 2}[x["priority"]],
-        ),
-    })
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "point_in_time_policy": "game_start",
+        "odds_snapshot_policy": _DEFAULT_ODDS_POLICY,
+        "n_games": len(rows),
+        "feature_correlations": feature_correlations,
+        "season_breakdown": season_breakdown,
+        "rows_missing_odds": sum(1 for row in rows if not row.odds_complete),
+    }
 
 
 def get_latest_calibration_params(db: Session) -> dict | None:
-    """
-    Return the Platt calibration parameters {"a": float, "b": float} from the
-    most recent BacktestResult that has a calibration, or None if unavailable.
-    """
     result = (
         db.query(BacktestResult)
         .filter(BacktestResult.calibration_params_json.isnot(None))
@@ -695,15 +1021,19 @@ def get_latest_calibration_params(db: Session) -> dict | None:
     return None
 
 
+def get_latest_calibration_result(db: Session) -> BacktestResult | None:
+    return (
+        db.query(BacktestResult)
+        .filter(BacktestResult.calibration_params_json.isnot(None))
+        .order_by(BacktestResult.run_at.desc())
+        .first()
+    )
+
+
 def apply_calibration(raw_home: float, raw_away: float, params: dict) -> tuple[float, float]:
-    """
-    Apply Platt sigmoid calibration to a (home, away) win probability pair.
-    Formula: calibrated = 1 / (1 + exp(a * raw + b))
-    Returns (calibrated_home, calibrated_away) renormalized to sum to 1.
-    """
     a, b = params["a"], params["b"]
-    cal_home = 1.0 / (1.0 + math.exp(a * raw_home + b))
-    cal_away = 1.0 / (1.0 + math.exp(a * raw_away + b))
+    cal_home = 1.0 / (1.0 + math.exp(-(a * raw_home + b)))
+    cal_away = 1.0 / (1.0 + math.exp(-(a * raw_away + b)))
     total = cal_home + cal_away
     if total == 0:
         return raw_home, raw_away
@@ -711,20 +1041,19 @@ def apply_calibration(raw_home: float, raw_away: float, params: dict) -> tuple[f
 
 
 def apply_backtest_weights(result: BacktestResult) -> None:
-    """
-    Extract ERA/WHIP/OPS coefficients from a backtest result and push them
-    into the simulator as updated feature weights.
-    """
     from app.services.simulator import set_weights
 
     coefs = json.loads(result.coefficients_json)
-    era_abs  = abs(coefs.get("home_era_adv", 0.42))
-    whip_abs = abs(coefs.get("home_whip_adv", 0.36))
-    ops_abs  = abs(coefs.get("home_ops_adv", 0.15))
+    ops_abs = abs(coefs.get("home_ops_adv", 0.32))
+    run_diff_abs = abs(coefs.get("run_diff_adv", 0.26))
+    pythag_proxy_abs = abs(coefs.get("pythagorean_win_pct_adv", 0.22))
 
-    # Guard against all-zero coefficients (degenerate regression)
-    if era_abs + whip_abs + ops_abs == 0:
+    if ops_abs + run_diff_abs + pythag_proxy_abs == 0:
         return
 
-    set_weights(era_abs, whip_abs, ops_abs)
-    print(f"[backtest] Simulator weights updated — ERA: {era_abs:.4f}  WHIP: {whip_abs:.4f}  OPS: {ops_abs:.4f}", flush=True)
+    set_weights(ops_abs, run_diff_abs, pythag_proxy_abs)
+    print(
+        f"[backtest] Simulator weights updated — OPS: {ops_abs:.4f}  "
+        f"RUN_DIFF: {run_diff_abs:.4f}  PYTHAG: {pythag_proxy_abs:.4f}",
+        flush=True,
+    )

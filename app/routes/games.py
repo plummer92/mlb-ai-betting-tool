@@ -1,4 +1,5 @@
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -8,11 +9,12 @@ from app.models.pydantic_models import GameOut
 from app.services.mlb_api import fetch_schedule_for_date
 
 router = APIRouter(prefix="/api/games", tags=["games"])
+ET = ZoneInfo("America/New_York")
 
 
 @router.post("/sync-today")
 def sync_today_games(db: Session = Depends(get_db)):
-    today = date.today().isoformat()
+    today = datetime.now(ET).date().isoformat()
     games = fetch_schedule_for_date(today)
 
     for g in games:
@@ -23,7 +25,9 @@ def sync_today_games(db: Session = Depends(get_db)):
             existing.start_time = g["start_time"]
             existing.venue = g["venue"]
             existing.away_probable_pitcher = g["away_probable_pitcher"]
+            existing.away_pitcher_id = g["away_pitcher_id"]
             existing.home_probable_pitcher = g["home_probable_pitcher"]
+            existing.home_pitcher_id = g["home_pitcher_id"]
             existing.final_away_score = g["final_away_score"]
             existing.final_home_score = g["final_home_score"]
         else:
@@ -40,7 +44,9 @@ def sync_today_games(db: Session = Depends(get_db)):
                     status=g["status"],
                     start_time=g["start_time"],
                     away_probable_pitcher=g["away_probable_pitcher"],
+                    away_pitcher_id=g["away_pitcher_id"],
                     home_probable_pitcher=g["home_probable_pitcher"],
+                    home_pitcher_id=g["home_pitcher_id"],
                     final_away_score=g["final_away_score"],
                     final_home_score=g["final_home_score"],
                 )
@@ -52,7 +58,7 @@ def sync_today_games(db: Session = Depends(get_db)):
 
 @router.get("/today", response_model=list[GameOut])
 def get_today_games(db: Session = Depends(get_db)):
-    today = date.today()
+    today = datetime.now(ET).date()
     games = db.query(Game).filter(Game.game_date == today).all()
     return games
 

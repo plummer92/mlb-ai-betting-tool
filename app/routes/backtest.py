@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal, get_db
 from app.models.schema import BacktestResult
-from app.services.backtest_service import collect_season, run_analysis, run_logistic_regression
+from app.services.backtest_service import POINT_IN_TIME_WARNING, collect_season, run_analysis, run_logistic_regression
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
@@ -68,13 +68,19 @@ def run_backtest_route(
     result = run_logistic_regression(db, season_list)
     return {
         "status": "model trained",
+        "warning": POINT_IN_TIME_WARNING,
         "seasons": result.seasons,
         "n_games": result.n_games,
         "accuracy": result.accuracy,
         "cv_accuracy": result.cv_accuracy,
         "log_loss": result.log_loss,
+        "brier_score": result.brier_score,
+        "calibration_params": json.loads(result.calibration_params_json) if result.calibration_params_json else None,
         "feature_ranks": json.loads(result.feature_ranks_json),
         "coefficients": json.loads(result.coefficients_json),
+        "dataset_summary": json.loads(result.dataset_summary_json) if result.dataset_summary_json else None,
+        "validation_summary": json.loads(result.validation_summary_json) if result.validation_summary_json else None,
+        "limitations": json.loads(result.limitations_json) if result.limitations_json else None,
     }
 
 
@@ -113,5 +119,10 @@ def get_latest_backtest(db: Session = Depends(get_db)):
         "accuracy": result.accuracy,
         "cv_accuracy": result.cv_accuracy,
         "log_loss": result.log_loss,
+        "brier_score": result.brier_score,
+        "calibrated": result.calibration_params_json is not None,
         "feature_ranks": json.loads(result.feature_ranks_json),
+        "dataset_summary": json.loads(result.dataset_summary_json) if result.dataset_summary_json else None,
+        "validation_summary": json.loads(result.validation_summary_json) if result.validation_summary_json else None,
+        "limitations": json.loads(result.limitations_json) if result.limitations_json else None,
     }

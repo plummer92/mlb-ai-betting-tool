@@ -54,7 +54,10 @@ class Prediction(Base):
     game_id = Column(Integer, nullable=False, index=True)
 
     model_version = Column(String, nullable=False, default="v0.1")
+    run_stage = Column(String(32), nullable=False, default="legacy")
+    is_active = Column(Boolean, nullable=False, default=True)
     sim_count = Column(Integer, nullable=False, default=1000)
+    calibration_result_id = Column(Integer, ForeignKey("backtest_results.id"), nullable=True)
 
     away_win_pct = Column(Float, nullable=False)
     home_win_pct = Column(Float, nullable=False)
@@ -69,6 +72,10 @@ class Prediction(Base):
     home_starter_xera = Column(Float, nullable=True)
     away_starter_xera = Column(Float, nullable=True)
     using_xera = Column(Boolean, nullable=False, default=False)
+
+    # Platt-calibrated win probabilities (null until calibration model exists)
+    calibrated_home_win_pct = Column(Float, nullable=True)
+    calibrated_away_win_pct = Column(Float, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -140,6 +147,9 @@ class BacktestGame(Base):
     home_team = Column(String, nullable=False)
     away_team = Column(String, nullable=False)
     venue = Column(String, nullable=True)
+    game_start_time = Column(DateTime(timezone=True), nullable=True)
+    feature_cutoff_time = Column(DateTime(timezone=True), nullable=True)
+    feature_cutoff_policy = Column(String, nullable=True)
     home_score = Column(Integer, nullable=True)
     away_score = Column(Integer, nullable=True)
     home_win = Column(Boolean, nullable=True)
@@ -157,8 +167,12 @@ class BacktestGame(Base):
     away_team_whip = Column(Float, nullable=True)
     home_win_pct = Column(Float, nullable=True)
     away_win_pct = Column(Float, nullable=True)
+    home_games_played = Column(Integer, nullable=True)
+    away_games_played = Column(Integer, nullable=True)
     home_run_diff = Column(Integer, nullable=True)
     away_run_diff = Column(Integer, nullable=True)
+    home_pythagorean_win_pct = Column(Float, nullable=True)
+    away_pythagorean_win_pct = Column(Float, nullable=True)
     home_bullpen_era = Column(Float, nullable=True)
     away_bullpen_era = Column(Float, nullable=True)
     # Statcast team batting / speed metrics (Phase 3 — collected separately)
@@ -170,6 +184,23 @@ class BacktestGame(Base):
     away_hard_hit_rate = Column(Float, nullable=True)
     home_sprint_speed  = Column(Float, nullable=True)
     away_sprint_speed  = Column(Float, nullable=True)
+    # K-BB differential per 9 innings for each starter (k9 − bb9)
+    home_starter_kbb   = Column(Float, nullable=True)
+    away_starter_kbb   = Column(Float, nullable=True)
+    home_starter_whip = Column(Float, nullable=True)
+    away_starter_whip = Column(Float, nullable=True)
+    home_starter_starts = Column(Integer, nullable=True)
+    away_starter_starts = Column(Integer, nullable=True)
+    odds_snapshot_type = Column(String, nullable=True)
+    odds_snapshot_policy = Column(String, nullable=True)
+    odds_row_id = Column(Integer, nullable=True)
+    odds_fetched_at = Column(DateTime(timezone=True), nullable=True)
+    odds_away_ml = Column(Integer, nullable=True)
+    odds_home_ml = Column(Integer, nullable=True)
+    odds_total = Column(Numeric(4, 1), nullable=True)
+    features_complete = Column(Boolean, nullable=False, default=False)
+    odds_complete = Column(Boolean, nullable=False, default=False)
+    incomplete_reasons_json = Column(Text, nullable=True)
     collected_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -183,8 +214,13 @@ class BacktestResult(Base):
     accuracy = Column(Float, nullable=False)
     cv_accuracy = Column(Float, nullable=False)
     log_loss = Column(Float, nullable=True)
+    brier_score = Column(Float, nullable=True)
+    calibration_params_json = Column(String, nullable=True)  # JSON {"a": float, "b": float}
     coefficients_json = Column(String, nullable=False)
     feature_ranks_json = Column(String, nullable=False)
+    dataset_summary_json = Column(Text, nullable=True)
+    validation_summary_json = Column(Text, nullable=True)
+    limitations_json = Column(Text, nullable=True)
 
 
 class EdgeResult(Base):
@@ -194,6 +230,8 @@ class EdgeResult(Base):
     game_id = Column(Integer, ForeignKey("games.game_id"), nullable=False, index=True)
     prediction_id = Column(Integer, ForeignKey("predictions.prediction_id"), nullable=False)
     odds_id = Column(Integer, ForeignKey("game_odds.id"), nullable=False)
+    run_stage = Column(String(32), nullable=False, default="legacy")
+    is_active = Column(Boolean, nullable=False, default=True)
     movement_id = Column(Integer, ForeignKey("line_movement.id"), nullable=True)
     calculated_at = Column(DateTime(timezone=True), default=func.now())
 
@@ -220,6 +258,7 @@ class EdgeResult(Base):
     confidence_tier = Column(String(10))
     edge_pct = Column(Numeric(5, 4))
     movement_direction = Column(String(20), nullable=True)
+    pitching_edge_score = Column(Float, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("game_id", "prediction_id", name="uq_edge_game_prediction"),

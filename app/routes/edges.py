@@ -2,11 +2,10 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models.schema import EdgeResult, Game
+from app.services.edge_service import get_trustworthy_active_edges
 
 ET = ZoneInfo("America/New_York")
 
@@ -16,29 +15,25 @@ router = APIRouter(prefix="/api/edges", tags=["edges"])
 @router.get("/top")
 def get_top_edges(
     limit: int = Query(default=10, le=100),
+    include_all_dates: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
-    # Latest edge row per game only
-    subq = (
-        db.query(
-            EdgeResult.game_id,
-            func.max(EdgeResult.calculated_at).label("latest_time"),
-        )
-        .group_by(EdgeResult.game_id)
-        .subquery()
+    today = datetime.now(ET).date()
+    rows = get_trustworthy_active_edges(
+        db,
+        game_date=None if include_all_dates else today,
     )
 
-    rows = (
-        db.query(EdgeResult)
-        .join(
-            subq,
-            (EdgeResult.game_id == subq.c.game_id)
-            & (EdgeResult.calculated_at == subq.c.latest_time),
-        )
-        .order_by(EdgeResult.edge_pct.desc())
-        .limit(limit)
-        .all()
-    )
+    latest_by_game = {}
+    for edge, _game, _prediction, _odds in rows:
+        if edge.game_id not in latest_by_game:
+            latest_by_game[edge.game_id] = edge
+
+    top_rows = sorted(
+        latest_by_game.values(),
+        key=lambda edge: float(edge.edge_pct or 0),
+        reverse=True,
+    )[:limit]
 
     return [
         {
@@ -51,34 +46,27 @@ def get_top_edges(
             "pitching_edge_score": float(r.pitching_edge_score) if getattr(r, "pitching_edge_score", None) is not None else None,
             "calculated_at": r.calculated_at.isoformat() if r.calculated_at else None,
         }
-        for r in rows
+        for r in top_rows
     ]
+
+
+@router.get("/history/top")
+def get_top_edges_history(
+    limit: int = Query(default=10, le=100),
+    db: Session = Depends(get_db),
+):
+    return get_top_edges(limit=limit, include_all_dates=True, db=db)
 
 
 @router.get("/today")
 def get_today_edges(db: Session = Depends(get_db)):
     today = datetime.now(ET).date()
-
-    subq = (
-        db.query(
-            EdgeResult.game_id,
-            func.max(EdgeResult.calculated_at).label("latest_time"),
-        )
-        .join(Game, EdgeResult.game_id == Game.game_id)
-        .filter(Game.game_date == today)
-        .group_by(EdgeResult.game_id)
-        .subquery()
-    )
-
-    rows = (
-        db.query(EdgeResult)
-        .join(
-            subq,
-            (EdgeResult.game_id == subq.c.game_id)
-            & (EdgeResult.calculated_at == subq.c.latest_time),
-        )
-        .all()
-    )
+    trusted_rows = get_trustworthy_active_edges(db, game_date=today)
+    latest_by_game = {}
+    for edge, _game, _prediction, _odds in trusted_rows:
+        if edge.game_id not in latest_by_game:
+            latest_by_game[edge.game_id] = edge
+    rows = list(latest_by_game.values())
 
     return [
         {

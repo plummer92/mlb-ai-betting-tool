@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.config import ALERT_CONFIDENCE_LEVELS, ALERT_DESTINATION, ALERT_MIN_EDGE, ALERT_MIN_EV
 from app.models.schema import BetAlert, EdgeResult, Game, Prediction
+from app.services.edge_service import get_trustworthy_active_edges
 from app.services.notification_service import send_alert_message
 from app.services.synopsis_service import build_edge_synopsis
 
@@ -66,15 +67,8 @@ def qualifies_for_alert(edge: EdgeResult) -> bool:
 
 def create_and_send_alerts_for_today(db: Session) -> dict:
     today = datetime.now(ET).date()
-
-    rows = (
-        db.query(EdgeResult, Game, Prediction)
-        .join(Game, Game.game_id == EdgeResult.game_id)
-        .join(Prediction, Prediction.prediction_id == EdgeResult.prediction_id)
-        .filter(Game.game_date == today)
-        .order_by(Game.game_id, EdgeResult.calculated_at.desc())
-        .all()
-    )
+    trusted_rows = get_trustworthy_active_edges(db, game_date=today)
+    rows = [(edge, game, prediction) for edge, game, prediction, _odds in trusted_rows]
 
     # keep only latest edge per game
     latest_by_game = {}
@@ -167,13 +161,14 @@ def create_and_send_alert_for_game(db: Session, game_id: int) -> dict:
     """
     today = datetime.now(ET).date()
 
-    row = (
-        db.query(EdgeResult, Game, Prediction)
-        .join(Game, Game.game_id == EdgeResult.game_id)
-        .join(Prediction, Prediction.prediction_id == EdgeResult.prediction_id)
-        .filter(Game.game_id == game_id, Game.game_date == today)
-        .order_by(EdgeResult.calculated_at.desc())
-        .first()
+    trusted_rows = get_trustworthy_active_edges(db, game_date=today)
+    row = next(
+        (
+            (edge, game, prediction)
+            for edge, game, prediction, _odds in trusted_rows
+            if game.game_id == game_id
+        ),
+        None,
     )
 
     if not row:

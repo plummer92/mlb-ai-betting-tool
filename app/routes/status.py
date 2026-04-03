@@ -5,10 +5,9 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models.schema import BacktestResult, GameOutcomeReview, Prediction
 from app.scheduler import scheduler
+from app.services.simulator import MODEL_VERSION
 
 router = APIRouter(prefix="/api", tags=["status"])
-
-MODEL_VERSION = "v0.2-backtest-weighted"
 
 
 @router.get("/status")

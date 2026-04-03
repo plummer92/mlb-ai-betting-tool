@@ -132,11 +132,14 @@ def fetch_pitcher_stats(
         split = (stats_list[0].get("splits") or [{}])[0].get("stat", {})
         if not split:
             return None
+        k9  = _safe_float(split.get("strikeOutsPer9Inn"), 8.5)
+        bb9 = _safe_float(split.get("walksPer9Inn"),      3.2)
         return {
-            "era":  _safe_float(split.get("era"),                 4.20),
-            "whip": _safe_float(split.get("whip"),                1.30),
-            "k9":   _safe_float(split.get("strikeoutsPer9Inn"),   8.5),
-            "bb9":  _safe_float(split.get("walksPer9Inn"),        3.2),
+            "era":  _safe_float(split.get("era"),  4.20),
+            "whip": _safe_float(split.get("whip"), 1.30),
+            "k9":   k9,
+            "bb9":  bb9,
+            "kbb":  round(k9 - bb9, 4),  # K/9 − BB/9 differential; higher = better command
         }
 
     result = _fetch(pitcher_id, season) or _fetch(pitcher_id, season - 1)
@@ -149,6 +152,10 @@ def fetch_pitcher_stats(
             xera_data = fetch_pitcher_xera(pitcher_id, season)
             if xera_data:
                 result = {**result, **xera_data}
+                k_percent = result.get("k_percent")
+                bb_percent = result.get("bb_percent")
+                if k_percent is not None and bb_percent is not None:
+                    result["kbb_percent"] = round((k_percent - bb_percent) / 100.0, 4)
         except Exception as e:
             pass  # Statcast unavailable — caller gets plain MLB Stats API data
 

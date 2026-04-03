@@ -2,7 +2,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.config import APP_NAME, APP_VERSION
-from app.db import Base, engine
 
 from app.routes.games import router as games_router
 from app.routes.model import router as model_router
@@ -17,9 +16,6 @@ from app.routes.status import router as status_router
 from app.routes.dashboard import router as dashboard_router
 
 from app.scheduler import scheduler
-
-
-Base.metadata.create_all(bind=engine)
 
 
 @asynccontextmanager
