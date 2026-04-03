@@ -629,6 +629,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
       <div class="section-rule"></div>
       <div class="section-badge" id="debrief-badge">—</div>
     </div>
+    <div id="market-performance"></div>
     <div id="debrief-summary"></div>
     <div class="card" style="padding:0;margin-top:12px">
       <div class="tbl-wrap" id="debrief-table">
@@ -755,6 +756,41 @@ function nextRunHtml(iso) {
     if (diffMin < 60) return `<span class="t-soon">${ts} (${diffMin}m)</span>`;
     return `<span class="t-time">${ts}</span>`;
   } catch { return `<span class="t-time">${iso}</span>`; }
+}
+
+async function loadAccuracy() {
+  try {
+    const res = await fetch('/api/reviews/accuracy');
+    const data = await res.json();
+    
+    const mkStat = (label, stats) => {
+      if (!stats || stats.bets === 0) {
+        return `<div class="s-stat">
+          <div class="s-stat-val muted">0%</div>
+          <div class="s-stat-lbl">${label} (0)</div>
+        </div>`;
+      }
+      const val = stats.win_rate * 100;
+      const cls = colorClass(val, 55, 48);
+      return `<div class="s-stat">
+        <div class="s-stat-val ${cls}">${val.toFixed(1)}%</div>
+        <div class="s-stat-lbl">${label} (${stats.bets})</div>
+      </div>`;
+    };
+
+    $('market-performance').innerHTML = `
+      <div class="summary-bar" style="border-left-color: var(--purple); background: var(--surface3); margin-bottom: 24px;">
+        <div style="font-family: monospace; font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; width: 100%; margin-bottom: 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px;">
+          Lifetime Market Performance — Model: ${data.current_model}
+        </div>
+        ${mkStat('Moneyline', data.moneyline)}
+        ${mkStat('Totals', data.totals)}
+        ${mkStat('Run Line', data.run_line)}
+        <div style="margin-left:auto"></div>
+        ${mkStat('Overall', data.overall)}
+      </div>
+    `;
+  } catch(e) { console.error("Error loading accuracy", e); }
 }
 
 // ── SECTION 1: YESTERDAY'S DEBRIEF ──────────────────────────────────────────
@@ -1074,7 +1110,7 @@ async function loadStatus() {
 
 // ── Orchestration ─────────────────────────────────────────────────────────────
 async function loadAll() {
-  await Promise.all([loadDebrief(), loadIntel(), loadStatus()]);
+  await Promise.all([loadAccuracy(), loadDebrief(), loadIntel(), loadStatus()]);
 }
 
 // ── Countdown ─────────────────────────────────────────────────────────────────

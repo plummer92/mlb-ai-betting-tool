@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
+from app.config import POSTGAME_LOOKBACK_HOURS
 from app.models.schema import BetAlert, EdgeResult, Game, GameOutcomeReview, Prediction
 from app.services.mlb_api import fetch_schedule_for_date
 
@@ -101,14 +102,14 @@ def resolve_completed_games(db: Session) -> dict:
     # Remove any previously-created reviews that had no real scores yet
     purged = _purge_scoreless_reviews(db)
 
-    yesterday = datetime.now(ET).date() - timedelta(days=1)
+    cutoff_date = (datetime.now(ET) - timedelta(hours=POSTGAME_LOOKBACK_HOURS)).date()
 
     # Pull all predictions for games from yesterday / today
     def _query_rows():
         return (
             db.query(Prediction, Game)
             .join(Game, Game.game_id == Prediction.game_id)
-            .filter(Game.game_date >= yesterday)
+            .filter(Game.game_date >= cutoff_date)
             .all()
         )
 
@@ -239,3 +240,57 @@ def resolve_completed_games(db: Session) -> dict:
 
     db.commit()
     return {"resolved": resolved, "skipped": skipped, "purged_scoreless": purged}
+
+
+def get_accuracy_segmented(db: Session, model_version: str | None = None) -> dict:
+    """
+    Calculate overall and segmented accuracy/betting performance.
+    """
+    query = db.query(GameOutcomeReview, Prediction).join(
+        Prediction, Prediction.prediction_id == GameOutcomeReview.prediction_id
+    )
+    if model_version:
+        query = query.filter(Prediction.model_version == model_version)
+
+    pairs = query.all()
+
+    def calc_stats(reviews: list[GameOutcomeReview]):
+        # We only count rows that were actually graded as a win/loss/push
+        bets = [r for r in reviews if r.bet_result in ("win", "loss", "push")]
+        wins = sum(1 for r in bets if r.bet_result == "win")
+        losses = sum(1 for r in bets if r.bet_result == "loss")
+        pushes = sum(1 for r in bets if r.bet_result == "push")
+        
+        total_decisions = wins + losses
+        win_rate = round(wins / total_decisions, 3) if total_decisions > 0 else 0.0
+        
+        return {
+            "win_rate": win_rate,
+            "bets": len(bets),
+            "wins": wins,
+            "losses": losses,
+            "pushes": pushes,
+        }
+
+    # Categorization
+    ml_reviews = []
+    total_reviews = []
+    rl_reviews = []
+
+    for r, p in pairs:
+        play = (r.recommended_play or "").upper()
+        if "ML" in play:
+            ml_reviews.append(r)
+        elif any(x in play for x in ("OVER", "UNDER")):
+            total_reviews.append(r)
+        elif any(x in play for x in ("RL", "+1.5", "-1.5")):
+            rl_reviews.append(r)
+
+    all_reviews = [r for r, p in pairs]
+
+    return {
+        "overall": calc_stats(all_reviews),
+        "moneyline": calc_stats(ml_reviews),
+        "totals": calc_stats(total_reviews),
+        "run_line": calc_stats(rl_reviews),
+    }
