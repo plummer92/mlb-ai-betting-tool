@@ -827,7 +827,7 @@ function movementHtml(dir) {{
 }}
 
 function edgeChip(confidence, edgePct) {{
-  const pctStr = edgePct != null ? ` ${(edgePct*100).toFixed(1)}%` : '';
+  const pctStr = edgePct != null ? ` ${{ (edgePct*100).toFixed(1) }}%` : '';
   if (!confidence || confidence === 'weak') {{
     return `<span class="chip c-weak">WEAK${{pctStr}}</span>`;
   }}
