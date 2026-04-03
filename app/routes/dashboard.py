@@ -630,6 +630,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
       <div class="section-badge" id="debrief-badge">—</div>
     </div>
     <div id="market-performance"></div>
+    <div id="confidence-performance"></div>
     <div id="debrief-summary"></div>
     <div class="card" style="padding:0;margin-top:12px">
       <div class="tbl-wrap" id="debrief-table">
@@ -779,7 +780,7 @@ async function loadAccuracy() {
     };
 
     $('market-performance').innerHTML = `
-      <div class="summary-bar" style="border-left-color: var(--purple); background: var(--surface3); margin-bottom: 24px;">
+      <div class="summary-bar" style="border-left-color: var(--purple); background: var(--surface3); margin-bottom: 12px;">
         <div style="font-family: monospace; font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; width: 100%; margin-bottom: 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px;">
           Lifetime Market Performance — Model: ${data.current_model}
         </div>
@@ -790,6 +791,33 @@ async function loadAccuracy() {
         ${mkStat('Overall', data.overall)}
       </div>
     `;
+
+    if (data.confidence_bins) {
+      const bins = data.confidence_bins;
+      const binNames = ["50-59%", "60-69%", "70-79%", "80%+"];
+      
+      const mkBin = (name) => {
+        const stats = bins[name];
+        if (!stats || stats.bets === 0) return '';
+        const val = stats.win_rate * 100;
+        const cls = colorClass(val, 55, 48);
+        return `
+          <div class="s-stat" style="min-width: 200px;">
+            <div class="s-stat-val ${cls}">${val.toFixed(1)}%</div>
+            <div class="s-stat-lbl">${name} Confidence: ${stats.wins}W - ${stats.losses}L</div>
+          </div>
+        `;
+      };
+
+      $('confidence-performance').innerHTML = `
+        <div class="summary-bar" style="border-left-color: var(--orange); background: var(--surface2); margin-bottom: 24px;">
+          <div style="font-family: monospace; font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; width: 100%; margin-bottom: 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px;">
+            Win Rate by Model Confidence
+          </div>
+          ${binNames.map(name => mkBin(name)).join('')}
+        </div>
+      `;
+    }
   } catch(e) { console.error("Error loading accuracy", e); }
 }
 

@@ -242,6 +242,11 @@ def resolve_completed_games(db: Session) -> dict:
     return {"resolved": resolved, "skipped": skipped, "purged_scoreless": purged}
 
 
+from scipy.stats import norm
+
+TOTAL_STD_DEV = 2.5
+
+
 def get_accuracy_segmented(db: Session, model_version: str | None = None) -> dict:
     """
     Calculate overall and segmented accuracy/betting performance.
@@ -277,14 +282,49 @@ def get_accuracy_segmented(db: Session, model_version: str | None = None) -> dic
     total_reviews = []
     rl_reviews = []
 
+    # Confidence Buckets
+    bins = {
+        "50-59%": [],
+        "60-69%": [],
+        "70-79%": [],
+        "80%+": [],
+    }
+
     for r, p in pairs:
         play = (r.recommended_play or "").upper()
+        if not play:
+            continue
+
+        # Market Segmentation
         if "ML" in play:
             ml_reviews.append(r)
         elif any(x in play for x in ("OVER", "UNDER")):
             total_reviews.append(r)
         elif any(x in play for x in ("RL", "+1.5", "-1.5")):
             rl_reviews.append(r)
+
+        # Confidence Binning
+        model_prob = 0.0
+        if play == "AWAY_ML":
+            model_prob = float(r.model_away_win_pct or 0)
+        elif play == "HOME_ML":
+            model_prob = float(r.model_home_win_pct or 0)
+        elif play == "OVER":
+            if r.model_total is not None and r.book_total is not None:
+                model_prob = float(1 - norm.cdf(float(r.book_total), loc=float(r.model_total), scale=TOTAL_STD_DEV))
+        elif play == "UNDER":
+            if r.model_total is not None and r.book_total is not None:
+                model_prob = float(norm.cdf(float(r.book_total), loc=float(r.model_total), scale=TOTAL_STD_DEV))
+        
+        # Determine bin
+        if model_prob >= 0.80:
+            bins["80%+"].append(r)
+        elif model_prob >= 0.70:
+            bins["70-79%"].append(r)
+        elif model_prob >= 0.60:
+            bins["60-69%"].append(r)
+        elif model_prob >= 0.50:
+            bins["50-59%"].append(r)
 
     all_reviews = [r for r, p in pairs]
 
@@ -293,4 +333,8 @@ def get_accuracy_segmented(db: Session, model_version: str | None = None) -> dic
         "moneyline": calc_stats(ml_reviews),
         "totals": calc_stats(total_reviews),
         "run_line": calc_stats(rl_reviews),
+        "confidence_bins": {
+            bin_name: calc_stats(reviews)
+            for bin_name, reviews in bins.items()
+        }
     }

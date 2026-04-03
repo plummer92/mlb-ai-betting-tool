@@ -121,6 +121,7 @@ def reviews_accuracy(db: Session = Depends(get_db)):
         "moneyline": segmented["moneyline"],
         "totals": segmented["totals"],
         "run_line": segmented["run_line"],
+        "confidence_bins": segmented["confidence_bins"],
         "current_model": CURRENT_MODEL,
         "last_10": last_10,
     }
