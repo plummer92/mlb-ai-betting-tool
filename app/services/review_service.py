@@ -277,33 +277,30 @@ def get_accuracy_segmented(db: Session, model_version: str | None = None) -> dic
             "pushes": pushes,
         }
 
-    # Categorization
+    def get_bin_name(prob: float) -> str | None:
+        if prob >= 0.80: return "80%+"
+        if prob >= 0.70: return "70-79%"
+        if prob >= 0.60: return "60-69%"
+        if prob >= 0.50: return "50-59%"
+        return None
+
+    # Categories
     ml_reviews = []
     total_reviews = []
     rl_reviews = []
 
-    # Confidence Buckets
-    bins = {
-        "50-59%": [],
-        "60-69%": [],
-        "70-79%": [],
-        "80%+": [],
-    }
+    # Market-specific bins
+    ml_bins = {"50-59%": [], "60-69%": [], "70-79%": [], "80%+": []}
+    total_bins = {"50-59%": [], "60-69%": [], "70-79%": [], "80%+": []}
+    rl_bins = {"50-59%": [], "60-69%": [], "70-79%": [], "80%+": []}
+    overall_bins = {"50-59%": [], "60-69%": [], "70-79%": [], "80%+": []}
 
     for r, p in pairs:
         play = (r.recommended_play or "").upper()
         if not play:
             continue
 
-        # Market Segmentation
-        if "ML" in play:
-            ml_reviews.append(r)
-        elif any(x in play for x in ("OVER", "UNDER")):
-            total_reviews.append(r)
-        elif any(x in play for x in ("RL", "+1.5", "-1.5")):
-            rl_reviews.append(r)
-
-        # Confidence Binning
+        # Confidence Calculation
         model_prob = 0.0
         if play == "AWAY_ML":
             model_prob = float(r.model_away_win_pct or 0)
@@ -316,25 +313,39 @@ def get_accuracy_segmented(db: Session, model_version: str | None = None) -> dic
             if r.model_total is not None and r.book_total is not None:
                 model_prob = float(norm.cdf(float(r.book_total), loc=float(r.model_total), scale=TOTAL_STD_DEV))
         
-        # Determine bin
-        if model_prob >= 0.80:
-            bins["80%+"].append(r)
-        elif model_prob >= 0.70:
-            bins["70-79%"].append(r)
-        elif model_prob >= 0.60:
-            bins["60-69%"].append(r)
-        elif model_prob >= 0.50:
-            bins["50-59%"].append(r)
+        bin_name = get_bin_name(model_prob)
+        if bin_name:
+            overall_bins[bin_name].append(r)
+
+        # Market Segmentation
+        if "ML" in play:
+            ml_reviews.append(r)
+            if bin_name: ml_bins[bin_name].append(r)
+        elif any(x in play for x in ("OVER", "UNDER")):
+            total_reviews.append(r)
+            if bin_name: total_bins[bin_name].append(r)
+        elif any(x in play for x in ("RL", "+1.5", "-1.5")):
+            rl_reviews.append(r)
+            if bin_name: rl_bins[bin_name].append(r)
 
     all_reviews = [r for r, p in pairs]
 
     return {
-        "overall": calc_stats(all_reviews),
-        "moneyline": calc_stats(ml_reviews),
-        "totals": calc_stats(total_reviews),
-        "run_line": calc_stats(rl_reviews),
-        "confidence_bins": {
-            bin_name: calc_stats(reviews)
-            for bin_name, reviews in bins.items()
-        }
+        "overall": {
+            **calc_stats(all_reviews),
+            "confidence_bins": {k: calc_stats(v) for k, v in overall_bins.items()}
+        },
+        "moneyline": {
+            **calc_stats(ml_reviews),
+            "confidence_bins": {k: calc_stats(v) for k, v in ml_bins.items()}
+        },
+        "totals": {
+            **calc_stats(total_reviews),
+            "confidence_bins": {k: calc_stats(v) for k, v in total_bins.items()}
+        },
+        "run_line": {
+            **calc_stats(rl_reviews),
+            "confidence_bins": {k: calc_stats(v) for k, v in rl_bins.items()}
+        },
+        "confidence_bins": {k: calc_stats(v) for k, v in overall_bins.items()}
     }

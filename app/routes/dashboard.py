@@ -873,11 +873,14 @@ async function loadAccuracy() {{
       </div>
     `;
 
-    if (data.confidence_bins) {{
-      const bins = data.confidence_bins;
+    const renderConfRow = (label, marketData, color) => {{
+      if (!marketData || !marketData.confidence_bins) return '';
+      const bins = marketData.confidence_bins;
       const binNames = ["50-59%", "60-69%", "70-79%", "80%+"];
-      
-      const mkBin = (name) => {{
+      const hasBets = binNames.some(n => bins[n] && bins[n].bets > 0);
+      if (!hasBets) return '';
+
+      const binsHtml = binNames.map(name => {{
         const stats = bins[name];
         if (!stats || stats.bets === 0) return '';
         const val = stats.win_rate * 100;
@@ -888,17 +891,23 @@ async function loadAccuracy() {{
             <div class="s-stat-lbl">${{name}} Confidence: ${{stats.wins}}W - ${{stats.losses}}L</div>
           </div>
         `;
-      }};
+      }}).join('');
 
-      $('confidence-performance').innerHTML = `
-        <div class="summary-bar" style="border-left-color: var(--orange); background: var(--surface2); margin-bottom: 24px;">
+      return `
+        <div class="summary-bar" style="border-left-color: ${{color}}; background: var(--surface2); margin-bottom: 12px;">
           <div style="font-family: monospace; font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; width: 100%; margin-bottom: 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px;">
-            Win Rate by Model Confidence
+            ${{label}} Win Rate by Model Confidence
           </div>
-          ${{binNames.map(name => mkBin(name)).join('')}}
+          ${{binsHtml}}
         </div>
       `;
-    }}
+    }};
+
+    $('confidence-performance').innerHTML = `
+      ${{renderConfRow('Moneyline', data.moneyline, 'var(--cyan)')}}
+      ${{renderConfRow('Totals', data.totals, 'var(--purple)')}}
+      ${{renderConfRow('Run Line', data.run_line, 'var(--orange)')}}
+    `;
   }} catch(e) {{ console.error("Error loading accuracy", e); }}
 }}
 
