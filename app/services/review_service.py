@@ -6,8 +6,9 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from app.config import POSTGAME_LOOKBACK_HOURS
-from app.models.schema import BetAlert, EdgeResult, Game, GameOutcomeReview, Prediction
+from app.models.schema import BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, Prediction
 from app.services.mlb_api import fetch_schedule_for_date
+from app.services.ev_math import american_to_decimal
 
 ET = ZoneInfo("America/New_York")
 
@@ -251,30 +252,57 @@ def get_accuracy_segmented(db: Session, model_version: str | None = None) -> dic
     """
     Calculate overall and segmented accuracy/betting performance.
     """
-    query = db.query(GameOutcomeReview, Prediction).join(
+    query = db.query(GameOutcomeReview, Prediction, GameOdds).join(
         Prediction, Prediction.prediction_id == GameOutcomeReview.prediction_id
+    ).outerjoin(
+        EdgeResult, EdgeResult.id == GameOutcomeReview.edge_result_id
+    ).outerjoin(
+        GameOdds, GameOdds.id == EdgeResult.odds_id
     )
     if model_version:
         query = query.filter(Prediction.model_version == model_version)
 
     pairs = query.all()
 
-    def calc_stats(reviews: list[GameOutcomeReview]):
+    def calc_stats(triplets: list[tuple[GameOutcomeReview, Prediction, GameOdds]]):
         # We only count rows that were actually graded as a win/loss/push
-        bets = [r for r in reviews if r.bet_result in ("win", "loss", "push")]
-        wins = sum(1 for r in bets if r.bet_result == "win")
-        losses = sum(1 for r in bets if r.bet_result == "loss")
-        pushes = sum(1 for r in bets if r.bet_result == "push")
+        bets = [t for t in triplets if t[0].bet_result in ("win", "loss", "push")]
+        wins = sum(1 for t in bets if t[0].bet_result == "win")
+        losses = sum(1 for t in bets if t[0].bet_result == "loss")
+        pushes = sum(1 for t in bets if t[0].bet_result == "push")
         
         total_decisions = wins + losses
         win_rate = round(wins / total_decisions, 3) if total_decisions > 0 else 0.0
         
+        # Avg Odds and Edge
+        total_odds = 0.0
+        total_edge = 0.0
+        counted_odds = 0
+        for r, p, o in bets:
+            play = (r.recommended_play or "").upper()
+            odds_val = None
+            if o:
+                if play == "AWAY_ML": odds_val = o.away_ml
+                elif play == "HOME_ML": odds_val = o.home_ml
+                elif play == "OVER": odds_val = o.over_odds
+                elif play == "UNDER": odds_val = o.under_odds
+            
+            if odds_val is not None:
+                total_odds += american_to_decimal(odds_val)
+                total_edge += float(r.edge_pct or 0)
+                counted_odds += 1
+        
+        avg_odds = round(total_odds / counted_odds, 3) if counted_odds > 0 else 0.0
+        avg_edge = round(total_edge / counted_odds, 4) if counted_odds > 0 else 0.0
+
         return {
             "win_rate": win_rate,
             "bets": len(bets),
             "wins": wins,
             "losses": losses,
             "pushes": pushes,
+            "avg_odds": avg_odds,
+            "avg_edge": avg_edge,
         }
 
     def get_bin_name(prob: float) -> str | None:
@@ -295,7 +323,7 @@ def get_accuracy_segmented(db: Session, model_version: str | None = None) -> dic
     rl_bins = {"50-59%": [], "60-69%": [], "70-79%": [], "80%+": []}
     overall_bins = {"50-59%": [], "60-69%": [], "70-79%": [], "80%+": []}
 
-    for r, p in pairs:
+    for r, p, o in pairs:
         play = (r.recommended_play or "").upper()
         if not play:
             continue
@@ -314,21 +342,22 @@ def get_accuracy_segmented(db: Session, model_version: str | None = None) -> dic
                 model_prob = float(norm.cdf(float(r.book_total), loc=float(r.model_total), scale=TOTAL_STD_DEV))
         
         bin_name = get_bin_name(model_prob)
+        triplet = (r, p, o)
         if bin_name:
-            overall_bins[bin_name].append(r)
+            overall_bins[bin_name].append(triplet)
 
         # Market Segmentation
         if "ML" in play:
-            ml_reviews.append(r)
-            if bin_name: ml_bins[bin_name].append(r)
+            ml_reviews.append(triplet)
+            if bin_name: ml_bins[bin_name].append(triplet)
         elif any(x in play for x in ("OVER", "UNDER")):
-            total_reviews.append(r)
-            if bin_name: total_bins[bin_name].append(r)
+            total_reviews.append(triplet)
+            if bin_name: total_bins[bin_name].append(triplet)
         elif any(x in play for x in ("RL", "+1.5", "-1.5")):
-            rl_reviews.append(r)
-            if bin_name: rl_bins[bin_name].append(r)
+            rl_reviews.append(triplet)
+            if bin_name: rl_bins[bin_name].append(triplet)
 
-    all_reviews = [r for r, p in pairs]
+    all_reviews = pairs
 
     return {
         "overall": {

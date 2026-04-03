@@ -854,9 +854,13 @@ async function loadAccuracy() {{
       }}
       const val = stats.win_rate * 100;
       const cls = colorClass(val, 55, 48);
+      const odds = stats.avg_odds ? `Odds: ${{stats.avg_odds.toFixed(2)}}` : '';
+      const edge = stats.avg_edge ? `Edge: ${{ (stats.avg_edge*100).toFixed(1) }}%` : '';
+
       return `<div class="s-stat">
         <div class="s-stat-val ${{cls}}">${{val.toFixed(1)}}%</div>
         <div class="s-stat-lbl">${{label}} (${{stats.bets}})</div>
+        <div style="font-size:9px;color:var(--muted)">${{odds}} | ${{edge}}</div>
       </div>`;
     }};
 
@@ -885,10 +889,13 @@ async function loadAccuracy() {{
         if (!stats || stats.bets === 0) return '';
         const val = stats.win_rate * 100;
         const cls = colorClass(val, 55, 48);
+        const odds = stats.avg_odds ? `Odds: ${{stats.avg_odds.toFixed(2)}}` : '';
+        const edge = stats.avg_edge ? `Edge: ${{ (stats.avg_edge*100).toFixed(1) }}%` : '';
         return `
           <div class="s-stat" style="min-width: 200px;">
             <div class="s-stat-val ${{cls}}">${{val.toFixed(1)}}%</div>
             <div class="s-stat-lbl">${{name}} Confidence: ${{stats.wins}}W - ${{stats.losses}}L</div>
+            <div style="font-size:9px;color:var(--muted)">${{odds}} | ${{edge}}</div>
           </div>
         `;
       }}).join('');
@@ -1129,6 +1136,13 @@ async function loadIntel() {{
             ${{mvHtml}}
           </div>
         </div>
+        ${{edge ? `
+        <div style="margin-top:8px; padding-top:4px; border-top:1px solid var(--border); display:flex; justify-content:space-between; font-size:9px; font-family:monospace; color:var(--muted);">
+          <span>KBB: ${{ (edge.kbb_adv*100).toFixed(1) }}%</span>
+          <span>PYTH: ${{ (edge.pythagorean_win_pct_adv*100).toFixed(1) }}%</span>
+          <span>PARK: ${{ (edge.park_factor_adv*100).toFixed(1) }}%</span>
+        </div>
+        ` : ''}}
       </div>`;
     }}).join('');
 
