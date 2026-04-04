@@ -10,7 +10,6 @@ from app.services.mlb_api import (
     fetch_team_stats, 
     fetch_pitcher_stats, 
     fetch_bullpen_stats, 
-    fetch_team_statcast
 )
 from app.services.feature_builder import build_team_features
 from app.services.backtest_service import build_live_feature_vector
@@ -84,21 +83,19 @@ def get_today_edges(db: Session = Depends(get_db)):
         home_starter = fetch_pitcher_stats(game.home_pitcher_id, game.season, include_xera=True) if game.home_pitcher_id else None
         away_bullpen = fetch_bullpen_stats(game.away_team_id, game.season)
         home_bullpen = fetch_bullpen_stats(game.home_team_id, game.season)
-        away_statcast = fetch_team_statcast(game.away_team_id, game.season)
-        home_statcast = fetch_team_statcast(game.home_team_id, game.season)
 
         away_features = build_team_features(
             away_raw,
             starter_stats=away_starter,
             bullpen_stats=away_bullpen,
-            statcast_team=away_statcast,
+            statcast_team={},
         )
         home_features = build_team_features(
             home_raw,
             starter_stats=home_starter,
             venue=game.venue,
             bullpen_stats=home_bullpen,
-            statcast_team=home_statcast,
+            statcast_team={},
         )
         
         features = build_live_feature_vector(home_features, away_features)
