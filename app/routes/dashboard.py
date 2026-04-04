@@ -1466,13 +1466,7 @@ async function runSimulation() {{
                 const losses = stats.losses;
                 const avgOdds = stats.avg_odds;
                 
-                let profitPerWin = 0;
-                if (avgOdds < 0) {{
-                    profitPerWin = unit / (Math.abs(avgOdds) / 100);
-                }} else {{
-                    profitPerWin = unit * (avgOdds / 100);
-                }}
-                
+                const profitPerWin = unit * (avgOdds - 1);
                 const profit = (wins * profitPerWin) - (losses * unit);
                 totalMarketProfit += profit;
                 totalMarketBets += stats.bets;
