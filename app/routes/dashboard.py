@@ -1104,7 +1104,11 @@ async function loadIntel() {{
       if (projT != null) totLines.push(`Proj: <strong>${{fmt(projT,1)}}</strong>`);
       if (edge?.book_total != null) totLines.push(`Line: <strong>${{fmt(edge.book_total,1)}}</strong>`);
 
-      const echip = edge ? edgeChip(edge.confidence, edge.edge_pct) : '<span class="chip c-none">NO DATA</span>';
+      const echip = (edge && edge.confidence) ? edgeChip(edge.confidence, edge.edge_pct) : `
+        <div style="font-size: 9px; font-family: monospace; white-space: nowrap;">
+          <span style="color: var(--cyan)">K-BB Adv: ${{((edge?.kbb_adv || 0) * 100).toFixed(1)}}%</span> | 
+          <span style="color: var(--purple)">Pythag: ${{((edge?.pythagorean_win_pct_adv || 0) * 100).toFixed(1)}}%</span>
+        </div>`;
       let playHtml = '';
       if (edge?.play) {{
         const pl = edge.play.replace('_',' ').toUpperCase();
