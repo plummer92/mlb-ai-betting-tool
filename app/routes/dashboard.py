@@ -729,6 +729,7 @@ function colorClass(val, good, warn) {
 def get_header(active_page: str):
     war_room_active = "active" if active_page == "dashboard" else ""
     system_active = "active" if active_page == "system" else ""
+    simulator_active = "active" if active_page == "simulator" else ""
     return f"""
 <header class="header">
   <div class="header-brand">
@@ -737,6 +738,8 @@ def get_header(active_page: str):
       <a href="/dashboard" class="nav-link {war_room_active}">[ WAR ROOM ]</a>
       <span class="nav-sep">|</span>
       <a href="/system" class="nav-link {system_active}">[ SYSTEM STATUS ]</a>
+      <span class="nav-sep">|</span>
+      <a href="/simulator" class="nav-link {simulator_active}">[ SIMULATOR ]</a>
     </nav>
   </div>
   <div class="header-meta">
@@ -1392,6 +1395,164 @@ document.addEventListener('DOMContentLoaded', () => {{
 </html>
 """
 
+SIMULATOR_HTML = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BANKROLL SIMULATOR | MLB AI</title>
+<style>{SHARED_STYLE}</style>
+</head>
+<body>
+
+{get_header("simulator")}
+
+<div class="container">
+
+  <!-- ═══════════════ BANKROLL SIMULATOR ═══════════════ -->
+  <div class="section">
+    <div class="section-head">
+      <div class="section-label">Bankroll Simulator</div>
+      <div class="section-rule"></div>
+      <div class="section-badge">Historical Backtest</div>
+    </div>
+    
+    <div class="summary-bar" style="border-left-color: var(--orange); background: var(--surface2); padding: 24px;">
+      <div style="display: flex; gap: 32px; align-items: flex-end; flex-wrap: wrap;">
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <label style="font-family: monospace; font-size: 11px; color: var(--muted); text-transform: uppercase;">Starting Bankroll ($)</label>
+          <input type="number" id="bankroll-input" value="10000" style="background: var(--bg); border: 1px solid var(--border); color: var(--cyan); padding: 8px 12px; border-radius: 4px; font-family: monospace; font-size: 16px; width: 150px;">
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <label style="font-family: monospace; font-size: 11px; color: var(--muted); text-transform: uppercase;">Base Unit Size ($)</label>
+          <input type="number" id="unit-input" value="100" style="background: var(--bg); border: 1px solid var(--border); color: var(--cyan); padding: 8px 12px; border-radius: 4px; font-family: monospace; font-size: 16px; width: 150px;">
+        </div>
+        <button class="refresh-btn" style="height: 40px; padding: 0 24px;" onclick="runSimulation()">⚡ CALCULATE PROFIT</button>
+      </div>
+    </div>
+
+    <div id="simulator-results">
+        <div class="loading">Enter values and click calculate to see historical performance.</div>
+    </div>
+
+  </div>
+
+</div>
+
+<script>
+{SHARED_JS_HELPERS}
+
+async function runSimulation() {{
+    const bankroll = parseFloat($('bankroll-input').value) || 0;
+    const unit = parseFloat($('unit-input').value) || 0;
+
+    try {{
+        const res = await fetch('/api/reviews/accuracy');
+        const data = await res.json();
+        
+        const renderSimulatorTable = (label, marketData, color) => {{
+            if (!marketData || !marketData.confidence_bins) return '';
+            const bins = marketData.confidence_bins;
+            const binNames = ["50-59%", "60-69%", "70-79%", "80%+"];
+
+            let totalMarketProfit = 0;
+            let totalMarketBets = 0;
+
+            const rowsHtml = binNames.map(name => {{
+                const stats = bins[name];
+                if (!stats || stats.bets === 0) return '';
+                
+                const wins = stats.wins;
+                const losses = stats.losses;
+                const avgOdds = stats.avg_odds;
+                
+                let profitPerWin = 0;
+                if (avgOdds < 0) {{
+                    profitPerWin = unit / (Math.abs(avgOdds) / 100);
+                }} else {{
+                    profitPerWin = unit * (avgOdds / 100);
+                }}
+                
+                const profit = (wins * profitPerWin) - (losses * unit);
+                totalMarketProfit += profit;
+                totalMarketBets += stats.bets;
+
+                return `
+                    <tr>
+                        <td class="mono" style="font-weight: 700; color: var(--text)">${{name}}</td>
+                        <td class="mono">${{stats.bets}}</td>
+                        <td class="mono">${{wins}}W - ${{losses}}L</td>
+                        <td class="mono">${{avgOdds.toFixed(1)}}</td>
+                        <td class="mono ${{profit >= 0 ? 'green' : 'red'}}" style="font-weight: 700;">
+                            $${{profit.toFixed(2)}}
+                        </td>
+                    </tr>
+                `;
+            }}).filter(row => row !== '').join('');
+
+            if (totalMarketBets === 0) return '';
+
+            const roi = (totalMarketProfit / (totalMarketBets * unit)) * 100;
+
+            return `
+                <div class="card" style="margin-bottom: 24px; border-left: 4px solid ${{color}};">
+                    <div class="section-head">
+                        <div class="section-label" style="color: ${{color}}">${{label}} Simulator</div>
+                        <div class="section-rule" style="background: linear-gradient(90deg, ${{color}}, transparent)"></div>
+                        <div class="section-badge" style="color: ${{totalMarketProfit >= 0 ? 'var(--green)' : 'var(--red)'}}">
+                            Profit: $${{totalMarketProfit.toFixed(2)}} | ROI: ${{roi.toFixed(2)}}%
+                        </div>
+                    </div>
+                    <div class="tbl-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Confidence Bin</th>
+                                    <th>Total Bets</th>
+                                    <th>Record (W-L)</th>
+                                    <th>Avg Odds</th>
+                                    <th>Net Profit</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${{rowsHtml}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+        }};
+
+        $('simulator-results').innerHTML = `
+            ${{renderSimulatorTable('Moneyline', data.moneyline, 'var(--cyan)')}}
+            ${{renderSimulatorTable('Totals', data.totals, 'var(--purple)')}}
+            ${{renderSimulatorTable('Run Line', data.run_line, 'var(--orange)')}}
+            <div style="margin-top: 32px; font-family: monospace; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 16px;">
+                * Backtest results based on fixed unit size bet on every game in the bucket.
+                * Total profit is calculated using historical average odds for each confidence bin.
+            </div>
+        `;
+    }} catch(e) {{
+        $('simulator-results').innerHTML = `<div class="empty">Error: ${{esc(e.message)}}</div>`;
+    }}
+}}
+
+function loadAll() {{
+    // Required by shared header
+}}
+
+document.addEventListener('DOMContentLoaded', () => {{
+  $('hdr-date').textContent = new Date().toLocaleDateString('en-US', {{
+    weekday:'short', month:'short', day:'numeric', year:'numeric',
+  }}).toUpperCase();
+  
+  $('cdown').parentElement.style.display = 'none';
+}});
+</script>
+</body>
+</html>
+"""
+
 
 @router.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
@@ -1400,3 +1561,7 @@ def dashboard():
 @router.get("/system", response_class=HTMLResponse)
 def system_dashboard():
     return HTMLResponse(content=SYSTEM_HTML)
+
+@router.get("/simulator", response_class=HTMLResponse)
+def simulator():
+    return HTMLResponse(content=SIMULATOR_HTML)
