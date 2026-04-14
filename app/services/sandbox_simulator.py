@@ -208,6 +208,13 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
                 v3_v4_agreement=v3_v4_agreement,
             ))
         db.commit()
+        print(
+            f"[v4 sandbox] game_id={game_id} "
+            f"v3_total={v3_total:.1f} "
+            f"v4_total={v4_total:.1f} "
+            f"agreement={v3_v4_agreement}",
+            flush=True,
+        )
 
         return {
             "game_id": game_id,

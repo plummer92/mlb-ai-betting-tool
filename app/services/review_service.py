@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.config import POSTGAME_LOOKBACK_HOURS
@@ -47,20 +48,28 @@ def _bet_result(play: str | None, away_score: int, home_score: int, book_total: 
 FINAL_STATUSES = {"Final", "Game Over", "Completed Early"}
 
 
-def _purge_scoreless_reviews(db: Session) -> int:
+def _purge_stale_reviews(db: Session) -> int:
     """
-    Delete any GameOutcomeReview rows where both final scores are 0 —
-    these were created before scores were available and contain bad data.
+    Delete any GameOutcomeReview rows created before a game was truly final,
+    or whose stored final score no longer matches the current game row.
     Also resets the corresponding BetAlert stamps so they can be re-graded.
     """
-    bad_reviews = (
-        db.query(GameOutcomeReview)
+    stale_pairs = (
+        db.query(GameOutcomeReview, Game)
+        .join(Game, Game.game_id == GameOutcomeReview.game_id)
         .filter(
-            GameOutcomeReview.final_away_score == 0,
-            GameOutcomeReview.final_home_score == 0,
+            or_(
+                Game.status.is_(None),
+                ~Game.status.in_(FINAL_STATUSES),
+                Game.final_away_score.is_(None),
+                Game.final_home_score.is_(None),
+                GameOutcomeReview.final_away_score != Game.final_away_score,
+                GameOutcomeReview.final_home_score != Game.final_home_score,
+            )
         )
         .all()
     )
+    bad_reviews = [review for review, _ in stale_pairs]
     if not bad_reviews:
         return 0
 
@@ -100,8 +109,9 @@ def resolve_completed_games(db: Session) -> dict:
     returned the real score yet (true 0-0 MLB finals are essentially
     non-existent).
     """
-    # Remove any previously-created reviews that had no real scores yet
-    purged = _purge_scoreless_reviews(db)
+    # Remove any previously-created reviews that were stamped before a game
+    # was truly final, or whose stored scores are now stale.
+    purged = _purge_stale_reviews(db)
 
     cutoff_date = (datetime.now(ET) - timedelta(hours=POSTGAME_LOOKBACK_HOURS)).date()
 
@@ -124,6 +134,11 @@ def resolve_completed_games(db: Session) -> dict:
     skipped = 0
 
     for prediction, game in rows:
+        game_is_final = (game.status or "").strip() in FINAL_STATUSES
+        if not game_is_final:
+            skipped += 1
+            continue
+
         away_score = game.final_away_score
         home_score = game.final_home_score
 
@@ -131,11 +146,8 @@ def resolve_completed_games(db: Session) -> dict:
             skipped += 1
             continue
 
-        # Guard against grading a game before scores are actually available.
-        # A combined score of 0 almost certainly means the final score hasn't
-        # been fetched yet — only allow it through if the status is unambiguous.
-        game_is_final = (game.status or "").strip() in FINAL_STATUSES
-        if (away_score + home_score) == 0 and not game_is_final:
+        # Guard against grading placeholder zero-score rows that slipped through.
+        if (away_score + home_score) == 0:
             skipped += 1
             continue
 
