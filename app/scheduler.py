@@ -190,6 +190,25 @@ def run_monte_carlo_and_schedule_pregame():
                 )
                 ok.append(game.game_id)
                 probability_results.append(result)
+                # ── v0.4 sandbox (shadow mode, never raises) ──────────────
+                try:
+                    from app.services.sandbox_simulator import run_v4_sandbox
+                    v4 = run_v4_sandbox(game.game_id, db)
+                    if v4:
+                        print(
+                            f"[v4 sandbox] game {game.game_id}: "
+                            f"v3={v4['v3_total']:.1f} v4={v4['v4_total']:.1f} "
+                            f"agreement={v4['v3_v4_agreement']}",
+                            flush=True,
+                        )
+                    try:
+                        from app.services.sandbox_alerts import send_sandbox_alert
+                        if v4 and v4.get("v4_confidence", 0) > 0.05:
+                            send_sandbox_alert(v4, game, db)
+                    except Exception as _ae:
+                        print(f"[v4 alert] non-fatal: {_ae}", flush=True)
+                except Exception as e:
+                    print(f"[v4 sandbox] non-fatal error game {game.game_id}: {e}", flush=True)
             except Exception as e:
                 db.rollback()
                 err.append({"game_id": game.game_id, "error": str(e)})

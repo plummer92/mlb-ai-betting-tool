@@ -21,6 +21,19 @@ from app.scheduler import scheduler
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler.start()
+    # ── v0.4 seed data (non-fatal) ────────────────────────────────────────
+    try:
+        from app.db import SessionLocal
+        from app.services.bullpen_calc import seed_manager_tendencies
+        from app.services.umpire_service import seed_known_umpires
+        _db = SessionLocal()
+        try:
+            seed_manager_tendencies(_db)
+            seed_known_umpires(_db)
+        finally:
+            _db.close()
+    except Exception as e:
+        print(f"[v4 startup] seed error (non-fatal): {e}", flush=True)
     yield
     scheduler.shutdown()
 
