@@ -14,6 +14,7 @@ from app.routes.alerts import router as alerts_router
 from app.routes.reviews import router as reviews_router
 from app.routes.status import router as status_router
 from app.routes.dashboard import router as dashboard_router
+from app.routes.sandbox import router as sandbox_router
 
 from app.scheduler import scheduler
 
@@ -56,6 +57,7 @@ app.include_router(debug_router)
 app.include_router(reviews_router)
 app.include_router(status_router)
 app.include_router(dashboard_router)
+app.include_router(sandbox_router)
 
 
 @app.get("/")

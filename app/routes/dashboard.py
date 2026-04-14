@@ -1279,8 +1279,51 @@ SYSTEM_HTML = f"""<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- ═══════════════ v0.4 SANDBOX ═══════════════ -->
+  <div class="section" style="border-left: 3px solid var(--purple);">
+    <div class="section-head">
+      <div class="section-label" style="color: var(--purple);">🧪 v0.4 SANDBOX — Paper Trading</div>
+      <div class="section-rule" style="background: linear-gradient(90deg, var(--purple), transparent)"></div>
+      <div class="section-badge" id="sandbox-badge">—</div>
+    </div>
+
+    <!-- Stat tiles -->
+    <div class="summary-bar" id="sandbox-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px;"></div>
+
+    <!-- Chart: rolling 7-day win rate -->
+    <div class="card" style="margin-bottom:20px;">
+      <div style="font-family:monospace;font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:12px;">
+        Rolling 7-Day Win Rate
+      </div>
+      <canvas id="sandbox-chart" height="80"></canvas>
+    </div>
+
+    <!-- High Conviction plays -->
+    <div class="card" style="margin-bottom:20px;">
+      <div class="section-head" style="margin-bottom:12px;">
+        <div class="section-label" style="color:var(--yellow);">⚡ High Conviction Plays</div>
+        <div class="section-rule" style="background:linear-gradient(90deg,var(--yellow),transparent)"></div>
+      </div>
+      <div id="sandbox-conviction" class="tbl-wrap">
+        <div class="loading">Loading…</div>
+      </div>
+    </div>
+
+    <!-- Umpire table -->
+    <div class="card">
+      <div class="section-head" style="margin-bottom:12px;">
+        <div class="section-label">Umpire Run Impact</div>
+        <div class="section-rule"></div>
+      </div>
+      <div id="sandbox-umpires" class="tbl-wrap">
+        <div class="loading">Loading…</div>
+      </div>
+    </div>
+  </div>
+
 </div><!-- /container -->
 
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script>
 {SHARED_JS_HELPERS}
 
@@ -1372,8 +1415,116 @@ async function loadStatus() {{
   }}
 }}
 
+async function loadSandbox() {{
+  try {{
+    const [perfRes, convRes, umpiresRes, todayRes] = await Promise.all([
+      fetch('/api/sandbox/performance'),
+      fetch('/api/sandbox/convergence/today'),
+      fetch('/api/sandbox/umpires'),
+      fetch('/api/sandbox/predictions/today'),
+    ]);
+    const perf    = await perfRes.json();
+    const conv    = await convRes.json();
+    const umpires = await umpiresRes.json();
+    const today   = await todayRes.json();
+
+    $('sandbox-badge').textContent = `${{today.length}} GAMES TODAY`;
+
+    // ── Stat tiles ──
+    const tiles = [
+      {{ label:'F5 Record',          val: perf.f5_record       || '0W-0L',   color:'var(--cyan)' }},
+      {{ label:'F5 Win Rate',         val: perf.f5_win_rate != null ? (perf.f5_win_rate*100).toFixed(1)+'%' : '—', color:'var(--green)' }},
+      {{ label:'Full Game Record',    val: perf.full_game_record || '0W-0L', color:'var(--cyan)' }},
+      {{ label:'Full Game Win Rate',  val: perf.full_game_win_rate != null ? (perf.full_game_win_rate*100).toFixed(1)+'%' : '—', color:'var(--green)' }},
+      {{ label:'Convergence Win Rate',val: perf.convergence_win_rate != null ? (perf.convergence_win_rate*100).toFixed(1)+'%' : '—', color:'var(--purple)' }},
+      {{ label:'v3/v4 Agreement Rate',val: perf.v3_agreement_win_rate != null ? (perf.v3_agreement_win_rate*100).toFixed(1)+'%' : '—', color:'var(--yellow)' }},
+    ];
+    $('sandbox-stats').innerHTML = tiles.map(t => `
+      <div class="card" style="padding:16px;border-left:3px solid ${{t.color}}">
+        <div style="font-size:11px;font-family:monospace;color:var(--muted);text-transform:uppercase;margin-bottom:6px;">${{esc(t.label)}}</div>
+        <div style="font-size:22px;font-weight:700;color:${{t.color}};font-family:monospace;">${{esc(t.val)}}</div>
+      </div>
+    `).join('');
+
+    // ── Rolling 7-day chart ──
+    const weekly = perf.weekly_roi || [];
+    const labels = weekly.map(w => w.date);
+    const f5Data  = weekly.map(w => w.f5_win_rate != null ? +(w.f5_win_rate*100).toFixed(1) : null);
+    const fgData  = weekly.map(w => w.full_game_win_rate != null ? +(w.full_game_win_rate*100).toFixed(1) : null);
+    const ctx = document.getElementById('sandbox-chart').getContext('2d');
+    if (window._sandboxChart) window._sandboxChart.destroy();
+    window._sandboxChart = new Chart(ctx, {{
+      type: 'line',
+      data: {{
+        labels,
+        datasets: [
+          {{ label:'F5 Win %', data:f5Data, borderColor:'#06b6d4', tension:0.3, pointRadius:4, fill:false }},
+          {{ label:'Full Game Win %', data:fgData, borderColor:'#a855f7', tension:0.3, pointRadius:4, fill:false }},
+        ],
+      }},
+      options: {{
+        responsive:true, maintainAspectRatio:false,
+        plugins:{{ legend:{{ labels:{{ color:'#e2e8f0', font:{{ family:'monospace' }} }} }} }},
+        scales:{{
+          x:{{ ticks:{{ color:'#5a7a9c' }}, grid:{{ color:'#1e3050' }} }},
+          y:{{ ticks:{{ color:'#5a7a9c', callback: v => v+'%' }}, grid:{{ color:'#1e3050' }}, min:0, max:100 }},
+        }},
+      }},
+    }});
+
+    // ── High Conviction plays ──
+    if (!conv.length) {{
+      $('sandbox-conviction').innerHTML = '<div class="empty">No high conviction plays today</div>';
+    }} else {{
+      $('sandbox-conviction').innerHTML = `
+        <table>
+          <thead><tr>
+            <th>Matchup</th><th>F5 Pick</th><th>F5 Proj</th>
+            <th>v4 Total</th><th>Umpire</th><th>Conviction</th>
+          </tr></thead>
+          <tbody>${{conv.map(r => `
+            <tr>
+              <td class="mono">${{esc(r.away_team)}} @ ${{esc(r.home_team)}}</td>
+              <td class="mono" style="color:var(--cyan)">${{esc(r.f5_pick||'—')}} ${{r.f5_line||''}}</td>
+              <td class="mono">${{r.f5_projected_total?.toFixed(1)||'—'}}</td>
+              <td class="mono">${{r.full_game_projected_total?.toFixed(1)||'—'}}</td>
+              <td class="mono">${{esc(r.umpire_name||'—')}}</td>
+              <td><span style="color:var(--yellow);font-weight:700;">⚡ HIGH CONVICTION</span></td>
+            </tr>
+          `).join('')}}</tbody>
+        </table>
+      `;
+    }}
+
+    // ── Umpire table ──
+    const topUmpires = umpires.filter(u => u.game_id !== 0).slice(0, 10);
+    if (!topUmpires.length) {{
+      $('sandbox-umpires').innerHTML = '<div class="empty">No umpire assignments yet today</div>';
+    }} else {{
+      $('sandbox-umpires').innerHTML = `
+        <table>
+          <thead><tr><th>Umpire</th><th>Run Impact</th><th>K Rate Delta</th><th>Season</th></tr></thead>
+          <tbody>${{topUmpires.map(u => {{
+            const imp = u.run_expectancy_impact || 0;
+            const cls = imp > 0.1 ? 'red' : imp < -0.1 ? 'green' : '';
+            return `<tr>
+              <td class="mono">${{esc(u.umpire_name)}}</td>
+              <td class="mono ${{cls}}" style="font-weight:700;">${{imp >= 0 ? '+' : ''}}${{imp.toFixed(2)}}</td>
+              <td class="mono">${{u.historical_k_rate_delta >= 0 ? '+' : ''}}${{(u.historical_k_rate_delta||0).toFixed(3)}}</td>
+              <td class="mono">${{u.season||'—'}}</td>
+            </tr>`;
+          }}).join('')}}</tbody>
+        </table>
+      `;
+    }}
+  }} catch(e) {{
+    $('sandbox-badge').textContent = 'ERROR';
+    console.error('[sandbox]', e);
+  }}
+}}
+
 async function loadAll() {{
-  await loadStatus();
+  await Promise.all([loadStatus(), loadSandbox()]);
 }}
 
 let countdown = 60;
