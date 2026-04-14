@@ -41,31 +41,39 @@ _KNOWN_UMPIRES: list[tuple[str, float, float]] = [
 def seed_known_umpires(db: Session) -> None:
     """
     Seed umpire_assignments_v4 with known historical umpire profiles.
-    Uses game_id=0, season=2025 for seed rows. Never duplicates by name.
+    Uses NULL game_id, season=2025 for seed rows. Never duplicates by name.
     """
     existing_names = {
         row.umpire_name
         for row in db.query(UmpireAssignmentV4.umpire_name)
-        .filter(UmpireAssignmentV4.game_id == 0)
+        .filter(UmpireAssignmentV4.game_id.is_(None))
         .all()
     }
     seeded = 0
-    for name, run_impact, k_delta in _KNOWN_UMPIRES:
-        if name in existing_names:
-            continue
-        db.add(UmpireAssignmentV4(
-            game_id=0,
-            umpire_name=name,
-            run_expectancy_impact=run_impact,
-            historical_k_rate_delta=k_delta,
-            season=2025,
-        ))
-        seeded += 1
+    pending_rows: list[UmpireAssignmentV4] = []
     try:
-        db.commit()
-    except Exception:
+        for name, run_impact, k_delta in _KNOWN_UMPIRES:
+            if name in existing_names:
+                continue
+            pending_rows.append(UmpireAssignmentV4(
+                game_id=None,
+                umpire_name=name,
+                run_expectancy_impact=run_impact,
+                historical_k_rate_delta=k_delta,
+                season=2025,
+            ))
+            seeded += 1
+        if pending_rows:
+            db.add_all(pending_rows)
+    except Exception as e:
         db.rollback()
-    print(f"[v4 umpire] Seeded {seeded} umpires")
+        print(f"[v4 umpire] seed_known_umpires insert error: {e}", flush=True)
+        return
+
+    db.commit()
+    count = db.query(UmpireAssignmentV4).count()
+    print(f"[v4 umpire] Seeded {seeded} umpires", flush=True)
+    print(f"[v4 umpire] rows after seed: {count}", flush=True)
 
 
 def fetch_umpire_assignment(game_id: int) -> Optional[str]:
@@ -123,27 +131,30 @@ def collect_umpire_for_game(game_id: int, season: int, db: Session) -> Optional[
     try:
         umpire_name = fetch_umpire_assignment(game_id)
         if not umpire_name:
-            return None
+            umpire_name = "Unknown"
+            run_impact = 0.0
+        else:
+            run_impact = get_umpire_run_impact(umpire_name, db)
 
-        run_impact = get_umpire_run_impact(umpire_name, db)
-
-        # Check if we already have a real (non-seed) row for this game
+        # Check if we already have a row for this game
         existing = (
             db.query(UmpireAssignmentV4)
             .filter(
                 UmpireAssignmentV4.game_id == game_id,
-                UmpireAssignmentV4.umpire_name == umpire_name,
             )
             .first()
         )
         if existing:
+            existing.umpire_name = umpire_name
             existing.run_expectancy_impact = run_impact
+            existing.historical_k_rate_delta = existing.historical_k_rate_delta or 0.0
             existing.season = season
         else:
             db.add(UmpireAssignmentV4(
                 game_id=game_id,
                 umpire_name=umpire_name,
                 run_expectancy_impact=run_impact,
+                historical_k_rate_delta=0.0,
                 season=season,
             ))
         db.commit()
