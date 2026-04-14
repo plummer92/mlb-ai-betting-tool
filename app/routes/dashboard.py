@@ -921,10 +921,12 @@ async function loadDebrief() {{
   try {{
     const res = await fetch('/api/reviews/recent?limit=100');
     const all = await res.json();
+    const reviewDateOf = r => r.date || (r.created_at ? String(r.created_at).slice(0,10) : null);
     const latestDate = all.reduce((max, r) => {{
-      if (!r.date) return max;
-      if (!max) return r.date;
-      return r.date > max ? r.date : max;
+      const reviewDate = reviewDateOf(r);
+      if (!reviewDate) return max;
+      if (!max) return reviewDate;
+      return reviewDate > max ? reviewDate : max;
     }}, null);
 
     $('debrief-title').textContent = latestDate
@@ -932,7 +934,7 @@ async function loadDebrief() {{
       : 'Debrief';
     $('debrief-badge').textContent = latestDate ? friendlyDate(latestDate) : '—';
 
-    const rows = latestDate ? all.filter(r => r.date === latestDate) : [];
+    const rows = latestDate ? all.filter(r => reviewDateOf(r) === latestDate) : [];
 
     if (!rows.length) {{
       $('debrief-summary').innerHTML = '<div class="empty">No graded games available.</div>';
@@ -940,7 +942,7 @@ async function loadDebrief() {{
       return;
     }}
 
-    const correct   = rows.filter(r => r.model_correct).length;
+    const correct   = rows.filter(r => (r.model_correct ?? r.was_model_correct)).length;
     const wins      = rows.filter(r => r.bet_result === 'win').length;
     const losses    = rows.filter(r => r.bet_result === 'loss').length;
     const pushes    = rows.filter(r => r.bet_result === 'push').length;
@@ -985,31 +987,42 @@ async function loadDebrief() {{
       </div>`;
 
     const trows = rows.map(r => {{
-      const away = r.away_team || (r.matchup || '').split(' @ ')[0] || '?';
-      const home = r.home_team || (r.matchup || '').split(' @ ')[1] || '?';
-      const predicted = resolveTeam(r.predicted_side, away, home);
-      const actual    = r.actual_winner === 'away' ? away
-                      : r.actual_winner === 'home' ? home
-                      : (r.actual_winner || '—');
-      const ci = r.model_correct ? '<span class="ok">✓</span>' : '<span class="fail">✗</span>';
+      const summary = r.actual_outcome_summary || '';
+      const finalTeams = summary.match(/^Final:\s(.+?)\s\d+,\s(.+?)\s\d+\./);
+      const away = r.away_team || (r.matchup || '').split(' @ ')[0] || finalTeams?.[1] || '?';
+      const home = r.home_team || (r.matchup || '').split(' @ ')[1] || finalTeams?.[2] || '?';
+      const matchup = r.matchup || `${{away}} @ ${{home}}`;
+      const predicted = resolveTeam(r.predicted_side || r.recommended_play, away, home);
+      const actualWinner = r.actual_winner || ((summary.match(/Winner:\s([^\.]+)\./) || [])[1]) || null;
+      const actual = actualWinner === 'away' ? away
+                   : actualWinner === 'home' ? home
+                   : (actualWinner || '—');
+      const modelCorrect = Boolean(r.model_correct ?? r.was_model_correct);
+      const ci = modelCorrect ? '<span class="ok">✓</span>' : '<span class="fail">✗</span>';
 
       let proj = '—';
       if (r.model_total != null)                                    proj = fmt(r.model_total,1);
       else if (r.projected_away_score != null && r.projected_home_score != null)
         proj = fmt(r.projected_away_score + r.projected_home_score, 1);
-      const act = (r.actual_total != null && r.actual_total > 0) ? r.actual_total : '—';
+      const actualTotal = r.actual_total != null
+        ? r.actual_total
+        : ((r.final_away_score != null && r.final_home_score != null)
+            ? (r.final_away_score + r.final_home_score)
+            : null);
+      const act = (actualTotal != null && actualTotal > 0) ? actualTotal : '—';
       const totStr = proj === '—' ? '—' : `${{proj}} → ${{act}}`;
 
       const epStr   = r.edge_pct != null ? (r.edge_pct*100).toFixed(1)+'%' : '—';
       const epCls   = r.edge_pct != null && r.edge_pct > 0 ? 'green' : 'muted';
-      const noteRaw = (r.actual_outcome_summary || '').slice(0, 120);
-      const note    = noteRaw ? `<div class="outcome-note" title="${{esc(r.actual_outcome_summary)}}">${{esc(noteRaw)}}</div>` : '';
+      const noteRaw = summary.slice(0, 120);
+      const note    = noteRaw ? `<div class="outcome-note" title="${{esc(summary)}}">${{esc(noteRaw)}}</div>` : '';
 
-      const hasRealScore = r.actual_total != null && r.actual_total > 0;
-      const scoreDisplay = hasRealScore ? (r.final_score || '—') : '—';
+      const scoreDisplay = r.final_score
+        || ((r.final_away_score != null && r.final_home_score != null) ? `${{r.final_away_score}}-${{r.final_home_score}}` : '—');
+      const hasRealScore = scoreDisplay !== '—';
 
       return `<tr>
-        <td style="font-weight:600;white-space:nowrap">${{esc(r.matchup||'—')}}</td>
+        <td style="font-weight:600;white-space:nowrap">${{esc(matchup||'—')}}</td>
         <td class="mono" style="font-size:12px">${{esc(predicted)}}</td>
         <td class="mono" style="font-size:12px">${{esc(actual)}}</td>
         <td style="text-align:center">${{ci}}</td>
