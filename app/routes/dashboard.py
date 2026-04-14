@@ -703,10 +703,6 @@ function todayStr() {
   const d = new Date();
   return [d.getFullYear(), String(d.getMonth()+1).padStart(2,'0'), String(d.getDate()).padStart(2,'0')].join('-');
 }
-function yesterdayStr() {
-  const d = new Date(); d.setDate(d.getDate()-1);
-  return [d.getFullYear(), String(d.getMonth()+1).padStart(2,'0'), String(d.getDate()).padStart(2,'0')].join('-');
-}
 function friendlyDate(yyyymmdd) {
   if (!yyyymmdd) return '';
   const p = yyyymmdd.split('-');
@@ -767,7 +763,7 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
   <!-- ═══════════════ 1. YESTERDAY'S DEBRIEF ═══════════════ -->
   <div class="section">
     <div class="section-head">
-      <div class="section-label">Yesterday's Debrief</div>
+      <div class="section-label" id="debrief-title">Debrief</div>
       <div class="section-rule"></div>
       <div class="section-badge" id="debrief-badge">—</div>
     </div>
@@ -922,16 +918,24 @@ async function loadAccuracy() {{
 }}
 
 async function loadDebrief() {{
-  const yest = yesterdayStr();
-  $('debrief-badge').textContent = friendlyDate(yest);
-
   try {{
     const res = await fetch('/api/reviews/recent?limit=100');
     const all = await res.json();
-    const rows = all.filter(r => r.date === yest);
+    const latestDate = all.reduce((max, r) => {{
+      if (!r.date) return max;
+      if (!max) return r.date;
+      return r.date > max ? r.date : max;
+    }}, null);
+
+    $('debrief-title').textContent = latestDate
+      ? `Debrief — ${{friendlyDate(latestDate)}}`
+      : 'Debrief';
+    $('debrief-badge').textContent = latestDate ? friendlyDate(latestDate) : '—';
+
+    const rows = latestDate ? all.filter(r => r.date === latestDate) : [];
 
     if (!rows.length) {{
-      $('debrief-summary').innerHTML = '<div class="empty">No graded games for yesterday.</div>';
+      $('debrief-summary').innerHTML = '<div class="empty">No graded games available.</div>';
       $('debrief-table').innerHTML = '';
       return;
     }}
