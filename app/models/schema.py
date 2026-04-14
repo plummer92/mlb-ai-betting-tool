@@ -339,3 +339,94 @@ class GameOutcomeReview(Base):
     __table_args__ = (
         UniqueConstraint("game_id", "prediction_id", name="uq_outcome_review_prediction"),
     )
+
+
+# ── v0.4 Sandbox Tables ──────────────────────────────────────────────────────
+
+class UmpireAssignmentV4(Base):
+    __tablename__ = "umpire_assignments_v4"
+
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, ForeignKey("games.game_id"), nullable=True)
+    umpire_name = Column(String(100), nullable=False)
+    historical_k_rate_delta = Column(Float, default=0.0)
+    run_expectancy_impact = Column(Float, default=0.0)
+    season = Column(Integer, nullable=True)
+    collected_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class F5LineV4(Base):
+    __tablename__ = "f5_lines_v4"
+
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, ForeignKey("games.game_id"), nullable=True)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+    f5_over_under_line = Column(Float, nullable=True)
+    f5_over_odds = Column(Integer, default=-110)
+    f5_under_odds = Column(Integer, default=-110)
+
+
+class RelieverWorkload(Base):
+    __tablename__ = "reliever_workload"
+
+    id = Column(Integer, primary_key=True)
+    player_id = Column(Integer, nullable=True)
+    team_id = Column(Integer, nullable=True)
+    date = Column(Date, nullable=False)
+    pitches_thrown = Column(Integer, default=0)
+    days_rest = Column(Integer, default=99)
+    appearances_last_3_days = Column(Integer, default=0)
+    player_name = Column(String(100), nullable=True)
+    collected_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("player_id", "date", name="uq_reliever_workload_player_date"),
+    )
+
+
+class ManagerTendency(Base):
+    __tablename__ = "manager_tendencies"
+
+    team_id = Column(Integer, primary_key=True)
+    manager_name = Column(String(100), nullable=True)
+    b2b_usage_rate = Column(Float, default=0.3)
+    strict_pitch_cap = Column(Integer, default=30)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class SandboxPredictionV4(Base):
+    __tablename__ = "sandbox_predictions_v4"
+
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, ForeignKey("games.game_id"), nullable=True)
+    game_date = Column(Date, nullable=True)
+    season = Column(Integer, default=2026)
+    away_team = Column(String(100), nullable=True)
+    home_team = Column(String(100), nullable=True)
+
+    f5_projected_total = Column(Float, nullable=True)
+    f5_line = Column(Float, nullable=True)
+    f5_pick = Column(String(10), nullable=True)
+    f5_edge_pct = Column(Float, nullable=True)
+
+    umpire_name = Column(String(100), nullable=True)
+    umpire_run_impact = Column(Float, default=0.0)
+
+    home_bullpen_strength = Column(Float, default=1.0)
+    away_bullpen_strength = Column(Float, default=1.0)
+    bullpen_convergence = Column(Boolean, default=False)
+
+    full_game_projected_total = Column(Float, nullable=True)
+
+    v3_projected_total = Column(Float, nullable=True)
+    v3_home_win_pct = Column(Float, nullable=True)
+    v4_home_win_pct = Column(Float, nullable=True)
+    v4_confidence = Column(Float, nullable=True)
+    v3_v4_agreement = Column(Boolean, default=False)
+
+    f5_result = Column(String(10), nullable=True)
+    full_game_result = Column(String(10), nullable=True)
+    f5_graded_at = Column(DateTime(timezone=True), nullable=True)
+    full_game_graded_at = Column(DateTime(timezone=True), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
