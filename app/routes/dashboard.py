@@ -1307,12 +1307,14 @@ SYSTEM_HTML = f"""<!DOCTYPE html>
     <!-- Stat tiles -->
     <div class="summary-bar" id="sandbox-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px;"></div>
 
-    <!-- Chart: rolling 7-day win rate -->
+    <!-- Chart: rolling 7-day win rate (canvas only rendered if data exists) -->
     <div class="card" style="margin-bottom:20px;">
       <div style="font-family:monospace;font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:12px;">
         Rolling 7-Day Win Rate
       </div>
-      <canvas id="sandbox-chart" height="80"></canvas>
+      <div id="sandbox-chart-wrap">
+        <div class="empty" style="padding:24px 0;text-align:center;color:var(--muted);">No data yet</div>
+      </div>
     </div>
 
     <!-- High Conviction plays -->
@@ -1463,31 +1465,37 @@ async function loadSandbox() {{
       </div>
     `).join('');
 
-    // ── Rolling 7-day chart ──
+    // ── Rolling 7-day chart (only init if data exists) ──
     const weekly = perf.weekly_roi || [];
-    const labels = weekly.map(w => w.date);
-    const f5Data  = weekly.map(w => w.f5_win_rate != null ? +(w.f5_win_rate*100).toFixed(1) : null);
-    const fgData  = weekly.map(w => w.full_game_win_rate != null ? +(w.full_game_win_rate*100).toFixed(1) : null);
-    const ctx = document.getElementById('sandbox-chart').getContext('2d');
-    if (window._sandboxChart) window._sandboxChart.destroy();
-    window._sandboxChart = new Chart(ctx, {{
-      type: 'line',
-      data: {{
-        labels,
-        datasets: [
-          {{ label:'F5 Win %', data:f5Data, borderColor:'#06b6d4', tension:0.3, pointRadius:4, fill:false }},
-          {{ label:'Full Game Win %', data:fgData, borderColor:'#a855f7', tension:0.3, pointRadius:4, fill:false }},
-        ],
-      }},
-      options: {{
-        responsive:true, maintainAspectRatio:false,
-        plugins:{{ legend:{{ labels:{{ color:'#e2e8f0', font:{{ family:'monospace' }} }} }} }},
-        scales:{{
-          x:{{ ticks:{{ color:'#5a7a9c' }}, grid:{{ color:'#1e3050' }} }},
-          y:{{ ticks:{{ color:'#5a7a9c', callback: v => v+'%' }}, grid:{{ color:'#1e3050' }}, min:0, max:100 }},
+    const wrap = document.getElementById('sandbox-chart-wrap');
+    if (weekly.length === 0) {{
+      wrap.innerHTML = '<div class="empty" style="padding:24px 0;text-align:center;color:var(--muted);">No data yet</div>';
+    }} else {{
+      const labels = weekly.map(w => w.date);
+      const f5Data  = weekly.map(w => w.f5_win_rate != null ? +(w.f5_win_rate*100).toFixed(1) : null);
+      const fgData  = weekly.map(w => w.full_game_win_rate != null ? +(w.full_game_win_rate*100).toFixed(1) : null);
+      wrap.innerHTML = '<canvas id="sandbox-chart" height="80"></canvas>';
+      const ctx = document.getElementById('sandbox-chart').getContext('2d');
+      if (window._sandboxChart) window._sandboxChart.destroy();
+      window._sandboxChart = new Chart(ctx, {{
+        type: 'line',
+        data: {{
+          labels,
+          datasets: [
+            {{ label:'F5 Win %', data:f5Data, borderColor:'#06b6d4', tension:0.3, pointRadius:4, fill:false }},
+            {{ label:'Full Game Win %', data:fgData, borderColor:'#a855f7', tension:0.3, pointRadius:4, fill:false }},
+          ],
         }},
-      }},
-    }});
+        options: {{
+          responsive:true, maintainAspectRatio:false,
+          plugins:{{ legend:{{ labels:{{ color:'#e2e8f0', font:{{ family:'monospace' }} }} }} }},
+          scales:{{
+            x:{{ ticks:{{ color:'#5a7a9c' }}, grid:{{ color:'#1e3050' }} }},
+            y:{{ ticks:{{ color:'#5a7a9c', callback: v => v+'%' }}, grid:{{ color:'#1e3050' }}, min:0, max:100 }},
+          }},
+        }},
+      }});
+    }}
 
     // ── High Conviction plays ──
     if (!conv.length) {{
@@ -1541,7 +1549,10 @@ async function loadSandbox() {{
 }}
 
 async function loadAll() {{
-  await Promise.all([loadStatus(), loadSandbox()]);
+  await loadStatus();
+  // Sandbox makes 4 separate API calls — defer it so the critical status
+  // section renders first and the browser doesn't block on parallel fetches.
+  setTimeout(loadSandbox, 500);
 }}
 
 let countdown = 60;

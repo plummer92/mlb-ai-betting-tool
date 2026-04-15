@@ -523,7 +523,65 @@ def calculate_edge_for_game(
             else:
                 movement_direction = "neutral"
 
-    row = dict(
+    # Upsert: if an EdgeResult already exists for this (game_id, prediction_id)
+    # pair — which happens when store_prediction reuses the same prediction_id
+    # via its own upsert — UPDATE it in place to avoid violating the
+    # uq_edge_game_prediction unique constraint.
+    existing_edge = (
+        db.query(EdgeResult)
+        .filter(
+            EdgeResult.game_id == game_id,
+            EdgeResult.prediction_id == prediction.prediction_id,
+        )
+        .first()
+    )
+
+    if existing_edge:
+        existing_edge.odds_id = odds.id
+        existing_edge.run_stage = run_stage
+        existing_edge.is_active = True
+        existing_edge.movement_id = movement_id
+        existing_edge.calculated_at = datetime.now(timezone.utc)
+        existing_edge.model_away_win_pct = round(model_away, 4)
+        existing_edge.model_home_win_pct = round(model_home, 4)
+        existing_edge.implied_away_pct = round(imp_away, 4)
+        existing_edge.implied_home_pct = round(imp_home, 4)
+        existing_edge.edge_away = round(edge_away, 4)
+        existing_edge.edge_home = round(edge_home, 4)
+        existing_edge.ev_away = round(ev_away_final, 4)
+        existing_edge.ev_home = round(ev_home_final, 4)
+        existing_edge.movement_boost = round(net_boost, 4)
+        existing_edge.model_total = prediction.projected_total
+        existing_edge.book_total = odds.total_line
+        existing_edge.total_edge = round(total_edge, 4) if total_edge is not None else None
+        existing_edge.ev_over = round(ev_over, 4) if ev_over is not None else None
+        existing_edge.ev_under = round(ev_under, 4) if ev_under is not None else None
+        existing_edge.recommended_play = play
+        existing_edge.confidence_tier = tier
+        existing_edge.edge_pct = round(max_edge, 4)
+        existing_edge.movement_direction = movement_direction
+        db.commit()
+        db.refresh(existing_edge)
+        return {
+            "status": "created",
+            "game_id": game_id,
+            "run_stage": run_stage,
+            "edge": existing_edge,
+            "odds_id": odds.id,
+        }
+
+    # No existing edge for this prediction — deactivate any stale active edges
+    # for this game+stage (from a different prediction_id), then insert fresh.
+    (
+        db.query(EdgeResult)
+        .filter(
+            EdgeResult.game_id == game_id,
+            EdgeResult.run_stage == run_stage,
+            EdgeResult.is_active == True,  # noqa: E712
+        )
+        .update({"is_active": False}, synchronize_session=False)
+    )
+    edge = EdgeResult(
         game_id=game_id,
         prediction_id=prediction.prediction_id,
         odds_id=odds.id,
@@ -550,17 +608,6 @@ def calculate_edge_for_game(
         edge_pct=round(max_edge, 4),
         movement_direction=movement_direction,
     )
-
-    (
-        db.query(EdgeResult)
-        .filter(
-            EdgeResult.game_id == game_id,
-            EdgeResult.run_stage == run_stage,
-            EdgeResult.is_active == True,  # noqa: E712
-        )
-        .update({"is_active": False}, synchronize_session=False)
-    )
-    edge = EdgeResult(**row)
     db.add(edge)
     db.commit()
     db.refresh(edge)
