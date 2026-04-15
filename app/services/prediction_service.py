@@ -52,26 +52,49 @@ def store_prediction(
     using_xera: bool,
     calibration_result_id: int | None,
 ) -> Prediction:
-    # Preserve history, but deactivate stale active lineage before inserting
-    # the replacement row. Non-legacy writers also retire legacy rows for the
-    # same game so the active set reflects the newest staged pipeline.
-    active_query = (
+    # Upsert: if an active prediction already exists for this game+stage today,
+    # update it in place to avoid duplicate rows from the pipeline running twice.
+    existing = (
+        db.query(Prediction)
+        .filter(
+            Prediction.game_id == game_id,
+            Prediction.run_stage == run_stage,
+            Prediction.is_active == True,  # noqa: E712
+        )
+        .order_by(Prediction.created_at.desc())
+        .first()
+    )
+    if existing:
+        existing.model_version = model_version
+        existing.sim_count = sim_count
+        existing.calibration_result_id = calibration_result_id
+        existing.away_win_pct = away_win_pct
+        existing.home_win_pct = home_win_pct
+        existing.calibrated_home_win_pct = calibrated_home_win_pct
+        existing.calibrated_away_win_pct = calibrated_away_win_pct
+        existing.projected_away_score = projected_away_score
+        existing.projected_home_score = projected_home_score
+        existing.projected_total = projected_total
+        existing.confidence_score = confidence_score
+        existing.recommended_side = recommended_side
+        existing.home_starter_xera = home_starter_xera
+        existing.away_starter_xera = away_starter_xera
+        existing.using_xera = using_xera
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    # No active prediction yet — retire any legacy rows, then insert a fresh one.
+    legacy_query = (
         db.query(Prediction)
         .filter(
             Prediction.game_id == game_id,
             Prediction.is_active == True,  # noqa: E712
         )
     )
-    if run_stage == "legacy":
-        active_query = active_query.filter(Prediction.run_stage == run_stage)
-    else:
-        active_query = active_query.filter(
-            or_(
-                Prediction.run_stage == run_stage,
-                Prediction.run_stage == "legacy",
-            )
-        )
-    active_query.update({"is_active": False}, synchronize_session=False)
+    if run_stage != "legacy":
+        legacy_query = legacy_query.filter(Prediction.run_stage == "legacy")
+        legacy_query.update({"is_active": False}, synchronize_session=False)
 
     prediction = Prediction(
         game_id=game_id,

@@ -112,12 +112,20 @@ def build_sniper_alert_message(game: Game, edge: EdgeResult, db: Session) -> str
     confidence = get_sniper_confidence(edge)
     avg_odds = get_average_odds(db, game.game_id, play or "")
 
+    # Format odds line: "Line: X.X | Odds: -YYY" for totals, "Odds: +YYY" for ML
+    if play in ["over", "under"] and " (" in avg_odds:
+        line_val, odds_val = avg_odds.split(" (", 1)
+        odds_val = odds_val.rstrip(")")
+        odds_field = f"**Line:** {line_val} | **Odds:** {odds_val}"
+    else:
+        odds_field = f"**Odds:** {avg_odds}"
+
     return (
         f"🎯 **SNIPER ALERT** 🎯\n\n"
         f"**Game:** {away} @ {home}\n"
         f"**Recommended Pick:** {pick}\n"
         f"**Confidence:** {confidence:.1f}%\n"
-        f"**Average Odds:** {avg_odds}"
+        f"{odds_field}"
     )
 
 

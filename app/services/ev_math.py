@@ -96,10 +96,17 @@ def recommended_play(
     edge_under: float,
     ev_under: float,
     min_edge: float = 0.02,
+    model_away: float | None = None,
+    model_home: float | None = None,
 ) -> str | None:
     """
     Pick the single best play across all four markets.
     Returns None if nothing clears minimum edge threshold.
+
+    When model_away/model_home are provided, the moneyline recommendation
+    is restricted to whichever side the model gives higher win probability.
+    This prevents recommending the opposite side of the model's predicted
+    winner (e.g. model calls home but alert fires away_ml).
     """
     candidates = [
         ("away_ml", edge_away, ev_away),
@@ -107,6 +114,16 @@ def recommended_play(
         ("over", edge_over, ev_over),
         ("under", edge_under, ev_under),
     ]
+
+    # Only recommend the moneyline side the model believes is more likely to win
+    if model_away is not None and model_home is not None:
+        model_preferred_ml = "away_ml" if model_away >= model_home else "home_ml"
+        candidates = [
+            (name, edge, ev)
+            for name, edge, ev in candidates
+            if name not in ("away_ml", "home_ml") or name == model_preferred_ml
+        ]
+
     plays = [
         (name, edge, ev)
         for name, edge, ev in candidates

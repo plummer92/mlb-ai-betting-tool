@@ -495,6 +495,8 @@ def calculate_edge_for_game(
         edge_home, ev_home_final,
         edge_over or 0.0, ev_over or 0.0,
         edge_under or 0.0, ev_under or 0.0,
+        model_away=model_away,
+        model_home=model_home,
     )
     max_edge = max(abs(edge_away), abs(edge_home), abs(edge_over or 0.0), abs(edge_under or 0.0))
     max_ev = max(ev_away_final, ev_home_final, ev_over or 0.0, ev_under or 0.0)

@@ -105,6 +105,22 @@ def run_monte_carlo(
     away_lambda = _expected_runs(away_team, home_team, park_run_factor=park_run_factor, is_home=False)
     home_lambda = _expected_runs(home_team, away_team, park_run_factor=park_run_factor, is_home=True)
 
+    print(
+        f"[simulator] total_inputs "
+        f"park_run_factor={park_run_factor:.4f} "
+        f"away_starter_run_prevention={away_team.get('starter_run_prevention')} "
+        f"home_starter_run_prevention={home_team.get('starter_run_prevention')} "
+        f"away_starter_whip={away_team.get('starter_whip')} "
+        f"home_starter_whip={home_team.get('starter_whip')} "
+        f"away_starter_kbb_pct={away_team.get('starter_kbb_percent')} "
+        f"home_starter_kbb_pct={home_team.get('starter_kbb_percent')} "
+        f"away_bullpen_rp={away_team.get('bullpen_run_prevention')} "
+        f"home_bullpen_rp={home_team.get('bullpen_run_prevention')} "
+        f"away_lambda={away_lambda:.3f} home_lambda={home_lambda:.3f} "
+        f"projected_total={away_lambda + home_lambda:.2f}",
+        flush=True,
+    )
+
     away_runs = np.random.poisson(away_lambda, size=sim_count)
     home_runs = np.random.poisson(home_lambda, size=sim_count)
     away_scores.extend(int(x) for x in away_runs.tolist())
