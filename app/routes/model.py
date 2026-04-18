@@ -68,8 +68,9 @@ def run_model(game_id: int, db: Session = Depends(get_db)):
 
     cal_result = get_latest_calibration_result(db)
     cal_params = json.loads(cal_result.calibration_params_json) if cal_result and cal_result.calibration_params_json else None
+    live_features = build_live_feature_vector(home_features, away_features)
     logistic_home_prob = score_logistic_home_probability(
-        build_live_feature_vector(home_features, away_features),
+        live_features,
         cal_result,
     )
     result = run_monte_carlo(
@@ -106,6 +107,9 @@ def run_model(game_id: int, db: Session = Depends(get_db)):
         home_starter_xera=home_features.get("starter_xera"),
         away_starter_xera=away_features.get("starter_xera"),
         using_xera=bool(home_features.get("using_xera") or away_features.get("using_xera")),
+        kbb_adv=live_features.get("kbb_adv"),
+        park_factor_adv=live_features.get("park_factor_adv"),
+        pythagorean_win_pct_adv=live_features.get("pythagorean_win_pct_adv"),
         calibration_result_id=cal_result.id if cal_result else None,
     )
 
@@ -144,6 +148,9 @@ def get_today_predictions(db: Session = Depends(get_db)):
             "projected_total": r.projected_total,
             "confidence_score": r.confidence_score,
             "recommended_side": r.recommended_side,
+            "kbb_adv": r.kbb_adv,
+            "park_factor_adv": r.park_factor_adv,
+            "pythagorean_win_pct_adv": r.pythagorean_win_pct_adv,
         }
         for r in rows
     ]

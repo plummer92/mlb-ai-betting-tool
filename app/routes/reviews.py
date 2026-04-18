@@ -4,9 +4,10 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.schema import Game, GameOutcomeReview
-from app.services.review_service import resolve_completed_games
+from app.services.review_service import get_accuracy_segmented, resolve_completed_games
 
 router = APIRouter(prefix="/api/reviews", tags=["reviews"])
+CURRENT_MODEL = "v0.2-backtest-weighted"
 
 
 @router.post("/resolve")
@@ -103,4 +104,47 @@ def get_review_summary(db: Session = Depends(get_db)):
         "no_bet": no_bet,
         "win_rate": win_rate,
         "roi_flat_110": roi,
+    }
+
+
+@router.get("/accuracy")
+def reviews_accuracy(db: Session = Depends(get_db)):
+    segmented = get_accuracy_segmented(db, CURRENT_MODEL)
+    last_10_rows = (
+        db.query(GameOutcomeReview)
+        .order_by(GameOutcomeReview.created_at.desc())
+        .limit(10)
+        .all()
+    )
+
+    last_10 = [
+        {
+            "game_id": r.game_id,
+            "game_date": str(r.game_date),
+            "predicted_winner": (
+                "away" if (r.model_away_win_pct or 0) >= (r.model_home_win_pct or 0) else "home"
+            ),
+            "actual_winner": r.winning_side,
+            "was_correct": r.was_model_correct,
+            "projected_away": float(r.projected_away_score) if r.projected_away_score is not None else None,
+            "projected_home": float(r.projected_home_score) if r.projected_home_score is not None else None,
+            "actual_away": r.final_away_score,
+            "actual_home": r.final_home_score,
+            "model_total": float(r.model_total) if r.model_total is not None else None,
+            "actual_total": (r.final_away_score or 0) + (r.final_home_score or 0),
+            "total_correct": r.total_correct,
+            "recommended_play": r.recommended_play,
+            "bet_result": r.bet_result,
+        }
+        for r in last_10_rows
+    ]
+
+    return {
+        "overall": segmented["overall"],
+        "moneyline": segmented["moneyline"],
+        "totals": segmented["totals"],
+        "run_line": segmented["run_line"],
+        "confidence_bins": segmented["confidence_bins"],
+        "current_model": CURRENT_MODEL,
+        "last_10": last_10,
     }

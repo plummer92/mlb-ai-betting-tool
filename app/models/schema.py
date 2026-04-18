@@ -72,6 +72,9 @@ class Prediction(Base):
     home_starter_xera = Column(Float, nullable=True)
     away_starter_xera = Column(Float, nullable=True)
     using_xera = Column(Boolean, nullable=False, default=False)
+    kbb_adv = Column(Float, nullable=True)
+    park_factor_adv = Column(Float, nullable=True)
+    pythagorean_win_pct_adv = Column(Float, nullable=True)
 
     # Platt-calibrated win probabilities (null until calibration model exists)
     calibrated_home_win_pct = Column(Float, nullable=True)

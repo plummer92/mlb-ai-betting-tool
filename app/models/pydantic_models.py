@@ -40,6 +40,9 @@ class PredictionOut(BaseModel):
     home_starter_xera: Optional[float] = None
     away_starter_xera: Optional[float] = None
     using_xera: bool = False
+    kbb_adv: Optional[float] = None
+    park_factor_adv: Optional[float] = None
+    pythagorean_win_pct_adv: Optional[float] = None
 
     class Config:
         from_attributes = True

@@ -50,6 +50,9 @@ def store_prediction(
     home_starter_xera: float | None,
     away_starter_xera: float | None,
     using_xera: bool,
+    kbb_adv: float | None,
+    park_factor_adv: float | None,
+    pythagorean_win_pct_adv: float | None,
     calibration_result_id: int | None,
 ) -> Prediction:
     # Upsert: if an active prediction already exists for this game+stage today,
@@ -80,6 +83,9 @@ def store_prediction(
         existing.home_starter_xera = home_starter_xera
         existing.away_starter_xera = away_starter_xera
         existing.using_xera = using_xera
+        existing.kbb_adv = kbb_adv
+        existing.park_factor_adv = park_factor_adv
+        existing.pythagorean_win_pct_adv = pythagorean_win_pct_adv
         db.commit()
         db.refresh(existing)
         return existing
@@ -115,6 +121,9 @@ def store_prediction(
         home_starter_xera=home_starter_xera,
         away_starter_xera=away_starter_xera,
         using_xera=using_xera,
+        kbb_adv=kbb_adv,
+        park_factor_adv=park_factor_adv,
+        pythagorean_win_pct_adv=pythagorean_win_pct_adv,
     )
     db.add(prediction)
     db.commit()
