@@ -7,7 +7,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
 from app.db import SessionLocal
-from app.models.schema import Game
+from app.models.schema import Game, GameOdds
 from app.services.alert_service import create_and_send_alert_for_game, create_and_send_alerts_for_today
 from app.services.backtest_service import (
     apply_calibration,
@@ -37,6 +37,7 @@ from app.services.statcast_service import fetch_team_statcast
 scheduler = AsyncIOScheduler(timezone="America/New_York")
 ET = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
+PREGAME_REUSE_WINDOW_MINUTES = 15
 
 
 # ── 9:00 AM ET: resolve any unresolved games from yesterday ─────────────────
@@ -251,7 +252,18 @@ def run_monte_carlo_and_schedule_pregame():
 async def calculate_edges_job():
     db = SessionLocal()
     try:
-        stored = await fetch_and_store_odds(db, snapshot_type=SnapshotType.open)
+        games = db.query(Game).filter(Game.game_date == datetime.now(ET).date()).all()
+        stored = []
+        for game in games:
+            latest_open = get_latest_odds_snapshot(
+                db,
+                game_id=game.game_id,
+                snapshot_type=SnapshotType.open,
+            )
+            if latest_open is not None and is_odds_snapshot_fresh(latest_open):
+                stored.append(latest_open)
+        if len(stored) != len(games):
+            stored = await fetch_and_store_odds(db, snapshot_type=SnapshotType.open)
         results = calculate_all_edges_today(
             db,
             run_stage="daily_open",
@@ -289,8 +301,30 @@ def send_morning_alerts_job():
 async def run_pregame_snapshot(game_id: int):
     db = SessionLocal()
     try:
-        stored = await fetch_and_store_odds(db, snapshot_type=SnapshotType.pregame)
-        print(f"[scheduler] Pregame snapshot stored: {len(stored)} rows")
+        latest_existing = get_latest_odds_snapshot(
+            db,
+            game_id=game_id,
+            snapshot_type=SnapshotType.pregame,
+        )
+        if latest_existing is not None and is_odds_snapshot_fresh(
+            latest_existing,
+            max_age_minutes=PREGAME_REUSE_WINDOW_MINUTES,
+        ):
+            stored = (
+                db.query(GameOdds)
+                .filter(
+                    GameOdds.snapshot_type == SnapshotType.pregame,
+                    GameOdds.fetched_at == latest_existing.fetched_at,
+                )
+                .all()
+            )
+            print(
+                f"[scheduler] Pregame snapshot reused for game {game_id}: "
+                f"rows={len(stored)} fetched_at={latest_existing.fetched_at}"
+            )
+        else:
+            stored = await fetch_and_store_odds(db, snapshot_type=SnapshotType.pregame)
+            print(f"[scheduler] Pregame snapshot fetched: {len(stored)} rows")
         movement = compute_line_movement(db, game_id)
         if movement:
             print(
