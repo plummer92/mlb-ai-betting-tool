@@ -305,6 +305,61 @@ tr:hover td { background: rgba(6,182,212,0.025); }
 @media (max-width: 1200px) { .game-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 768px)  { .game-grid { grid-template-columns: 1fr; } }
 
+.commentary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+@media (max-width: 1100px) { .commentary-grid { grid-template-columns: 1fr; } }
+
+.commentary-card {
+  background: linear-gradient(180deg, var(--surface) 0%, var(--surface2) 100%);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 18px;
+}
+
+.commentary-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.commentary-matchup {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.commentary-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.commentary-text {
+  color: #c9d6e6;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.commentary-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(30,48,80,0.7);
+  font-family: monospace;
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
 /* ── Game card ── */
 .game-card {
   background: var(--surface);
@@ -780,6 +835,18 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
   <!-- ═══════════════ 2. TODAY'S ACTIVE INTEL ═══════════════ -->
   <div class="section">
     <div class="section-head">
+      <div class="section-label">AI Commentary</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="commentary-badge">—</div>
+    </div>
+    <div class="commentary-grid" id="commentary-grid">
+      <div class="loading">Loading commentary</div>
+    </div>
+  </div>
+
+  <!-- ═══════════════ 3. TODAY'S ACTIVE INTEL ═══════════════ -->
+  <div class="section">
+    <div class="section-head">
       <div class="section-label">Today's Active Intel</div>
       <div class="section-rule"></div>
       <div class="section-badge" id="intel-badge">—</div>
@@ -837,6 +904,54 @@ function edgeChip(confidence, edgePct) {{
 function betChip(result) {{
   if (!result || result === 'no_bet') return '<span class="chip c-no_bet">NO BET</span>';
   return `<span class="chip c-${{result}}">${{result.toUpperCase()}}</span>`;
+}}
+
+async function loadCommentary() {{
+  try {{
+    const res = await fetch('/api/commentary/today');
+    const data = await res.json();
+    const items = data.items || [];
+    const source = data.source || 'alerts';
+
+    $('commentary-badge').textContent = items.length
+      ? `${{items.length}} NOTE${{items.length !== 1 ? 'S' : ''}}`
+      : 'STANDBY';
+
+    if (!items.length) {{
+      $('commentary-grid').innerHTML = `
+        <div class="card">
+          <div class="empty">No commentary yet. This panel will populate from today’s alerts or live edge reads as the board develops.</div>
+        </div>`;
+      return;
+    }}
+
+    const sourceLabel = source === 'alerts' ? 'alert-backed' : 'live edge read';
+    const cards = items.map(item => {{
+      const edgeLabel = item.edge_pct != null ? `${{(item.edge_pct * 100).toFixed(1)}}% edge` : 'watchlist';
+      const timeLabel = item.alert_time ? gameTime(item.alert_time) : 'latest';
+      return `
+        <div class="commentary-card">
+          <div class="commentary-head">
+            <div class="commentary-matchup">${{esc(item.matchup || `${{item.away_team}} @ ${{item.home_team}}`)}}</div>
+            ${{edgeChip(item.confidence, item.edge_pct)}}
+          </div>
+          <div class="commentary-meta">
+            <span class="chip c-none">${{esc((item.play || 'watch').replace('_', ' '))}}</span>
+            <span class="chip c-none">${{esc(sourceLabel)}}</span>
+            ${{item.status ? `<span class="chip c-none">${{esc(item.status)}}</span>` : ''}}
+          </div>
+          <div class="commentary-text">${{esc(item.synopsis || 'No commentary available.')}}</div>
+          <div class="commentary-foot">
+            <span>${{esc(edgeLabel)}}</span>
+            <span>${{esc(timeLabel)}}</span>
+          </div>
+        </div>`;
+    }}).join('');
+
+    $('commentary-grid').innerHTML = cards;
+  }} catch(e) {{
+    $('commentary-grid').innerHTML = `<div class="card"><div class="empty">Error: ${{esc(e.message)}}</div></div>`;
+  }}
 }}
 
 async function loadAccuracy() {{
@@ -1234,7 +1349,7 @@ function closeModal(e) {{
 }}
 
 async function loadAll() {{
-  await Promise.all([loadAccuracy(), loadDebrief(), loadIntel()]);
+  await Promise.all([loadAccuracy(), loadDebrief(), loadCommentary(), loadIntel()]);
 }}
 
 let countdown = 60;
