@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.schema import EdgeResult, Game, GameOdds
+from app.services.betting_policy import qualifies_for_bet_policy
 
 router = APIRouter(prefix="/api/ranked", tags=["ranked"])
 
@@ -76,6 +77,12 @@ def _build_ranked_rows(
                 "snapshot_type": odds.snapshot_type.value if odds and odds.snapshot_type else None,
                 "movement_direction": edge.movement_direction,
                 "calculated_at": edge.calculated_at.isoformat() if edge.calculated_at else None,
+                "policy_qualified": qualifies_for_bet_policy(
+                    play=edge.recommended_play,
+                    edge_pct=float(edge.edge_pct or 0),
+                    ev=ev,
+                    confidence=edge.confidence_tier,
+                ),
             }
         )
 

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.services.betting_policy import BETTING_PROFILES
 from app.services.execution_service import (
     create_candidate_bets_for_today,
     execute_paper_bets_for_today,
@@ -36,7 +37,7 @@ def list_candidates(db: Session = Depends(get_db)):
     candidates = create_candidate_bets_for_today(db)
     return {
         "count": len(candidates),
-        "thresholds": {"min_ev": 0.10, "min_edge": 0.10, "confidence": "strong"},
+        "thresholds": BETTING_PROFILES,
         "candidates": candidates,
     }
 

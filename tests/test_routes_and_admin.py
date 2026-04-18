@@ -12,7 +12,8 @@ from app.models.schema import BetAlert, EdgeResult, Game, GameOdds, GameOutcomeR
 from app.routes.commentary import commentary_today
 from app.routes.admin import admin_backfill_prediction_dashboard_metrics, admin_freshness
 from app.routes.model import get_today_predictions, run_model
-from app.routes.reviews import get_review_summary
+from app.routes.reviews import get_review_summary, profitability_report
+from app.services.betting_policy import qualifies_for_bet_policy
 
 
 class RouteAndAdminTests(unittest.TestCase):
@@ -251,6 +252,85 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(payload["source"], "alerts")
         self.assertEqual(len(payload["items"]), 1)
         self.assertEqual(payload["items"][0]["matchup"], "Away @ Home")
+
+    def test_profitability_report_surfaces_market_segments(self) -> None:
+        game = self._game(5)
+        prediction = self._prediction(game.game_id)
+        odds = self._odds(game.game_id)
+        edge = EdgeResult(
+            game_id=game.game_id,
+            prediction_id=prediction.prediction_id,
+            odds_id=odds.id,
+            run_stage="daily_open",
+            is_active=True,
+            calculated_at=datetime.now(timezone.utc),
+            model_away_win_pct=0.46,
+            model_home_win_pct=0.54,
+            implied_away_pct=0.45,
+            implied_home_pct=0.55,
+            edge_away=0.01,
+            edge_home=-0.01,
+            ev_away=0.02,
+            ev_home=0.12,
+            recommended_play="home_ml",
+            confidence_tier="strong",
+            edge_pct=0.08,
+        )
+        self.db.add(edge)
+        self.db.flush()
+
+        for idx, result in enumerate(["win", "win", "loss", "win", "win"], start=1):
+            self.db.add(
+                GameOutcomeReview(
+                    game_id=game.game_id + idx,
+                    prediction_id=prediction.prediction_id,
+                    edge_result_id=edge.id,
+                    game_date=game.game_date,
+                    actual_outcome_summary="summary",
+                    recommended_play="home_ml",
+                    confidence_tier="strong",
+                    edge_pct=0.08,
+                    ev=0.12,
+                    final_away_score=3,
+                    final_home_score=5,
+                    winning_side="home",
+                    bet_result=result,
+                    was_model_correct=result == "win",
+                )
+            )
+        self.db.commit()
+
+        report = profitability_report(db=self.db, min_sample=3)
+
+        self.assertEqual(report["summary"]["total"], 5)
+        self.assertTrue(any(row["play"] == "home_ml" for row in report["by_play"]))
+        self.assertIn("profiles", report["policy_backtest"])
+
+    def test_betting_policy_tightens_high_edge_tails(self) -> None:
+        self.assertTrue(
+            qualifies_for_bet_policy(
+                play="home_ml",
+                edge_pct=0.08,
+                ev=0.12,
+                confidence="strong",
+            )
+        )
+        self.assertFalse(
+            qualifies_for_bet_policy(
+                play="away_ml",
+                edge_pct=0.14,
+                ev=0.18,
+                confidence="strong",
+            )
+        )
+        self.assertFalse(
+            qualifies_for_bet_policy(
+                play="under",
+                edge_pct=0.07,
+                ev=0.11,
+                confidence="strong",
+            )
+        )
 
 
 class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):

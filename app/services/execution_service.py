@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.models.betting import BetExecution, BetOrder, BankrollSnapshot
 from app.models.schema import EdgeResult, Game, GameOdds
+from app.services.betting_policy import BETTING_PROFILES, qualifies_for_bet_policy
 from app.services.books.base import BetRequest
 from app.services.books.factory import get_provider
 from app.services.risk import evaluate_bet_for_execution
@@ -25,10 +26,11 @@ from app.services.staking import compute_stake
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 
-# Elite bet thresholds (mirrors dashboard isBettable logic)
-_MIN_EV = 0.10
-_MIN_EDGE = 0.10
-_REQ_CONF = "strong"
+# Legacy log placeholders retained until the candidate logging message is fully
+# cleaned up; actual qualification now comes from betting_policy.py.
+_MIN_EV = 0.0
+_MIN_EDGE = 0.0
+_REQ_CONF = "profiled"
 
 FINAL_STATUSES = {"Final", "Completed Early", "Cancelled"}
 
@@ -52,10 +54,11 @@ def create_candidate_bets_for_today(db: Session) -> list[dict]:
 
 
 def _is_elite(bet: dict) -> bool:
-    return (
-        float(bet.get("ev") or 0) >= _MIN_EV
-        and float(bet.get("edge_pct") or 0) >= _MIN_EDGE
-        and (bet.get("confidence") or "").lower().strip() == _REQ_CONF
+    return qualifies_for_bet_policy(
+        play=bet.get("play"),
+        edge_pct=bet.get("edge_pct"),
+        ev=bet.get("ev"),
+        confidence=bet.get("confidence"),
     )
 
 

@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.schema import Game, GameOutcomeReview
+from app.services.profitability_report_service import get_profitability_report
 from app.services.review_service import get_accuracy_segmented, resolve_completed_games
 
 router = APIRouter(prefix="/api/reviews", tags=["reviews"])
@@ -148,3 +149,11 @@ def reviews_accuracy(db: Session = Depends(get_db)):
         "current_model": CURRENT_MODEL,
         "last_10": last_10,
     }
+
+
+@router.get("/profitability-report")
+def profitability_report(
+    min_sample: int = Query(default=5, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    return get_profitability_report(db, min_sample=min_sample)

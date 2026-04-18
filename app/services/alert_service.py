@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import ALERT_DESTINATION
 from app.models.schema import BetAlert, EdgeResult, Game, Prediction, GameOdds
+from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.edge_service import get_trustworthy_active_edges, TOTAL_STD_DEV
 from app.services.notification_service import send_alert_message
 from app.services.odds_service import is_odds_snapshot_fresh
@@ -78,6 +79,24 @@ def qualifies_for_alert(edge: EdgeResult) -> bool:
     """
     play = edge.recommended_play
     if not play:
+        return False
+
+    ev = 0.0
+    if play == "away_ml":
+        ev = float(edge.ev_away or 0)
+    elif play == "home_ml":
+        ev = float(edge.ev_home or 0)
+    elif play == "under":
+        ev = float(edge.ev_under or 0)
+    elif play == "over":
+        ev = float(edge.ev_over or 0)
+
+    if not qualifies_for_bet_policy(
+        play=play,
+        edge_pct=float(edge.edge_pct or 0),
+        ev=ev,
+        confidence=edge.confidence_tier,
+    ):
         return False
 
     confidence = get_sniper_confidence(edge)
