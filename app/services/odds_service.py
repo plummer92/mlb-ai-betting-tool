@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -45,8 +46,11 @@ async def fetch_and_store_odds(
     }
 
     async with httpx.AsyncClient() as client:
-        resp = await client.get(THE_ODDS_API_URL, params=params, timeout=10)
-        resp.raise_for_status()
+        try:
+            resp = await client.get(THE_ODDS_API_URL, params=params, timeout=10)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise RuntimeError(_sanitize_http_error(exc)) from exc
         raw_events = resp.json()
         raw_size_bytes = len(resp.content or b"")
 
@@ -356,12 +360,42 @@ _ODDS_TO_MLB: dict[str, str] = {
     "Athletics (Sacramento)":  "Oakland Athletics",
 }
 
+_TEAM_CANONICAL_NAMES: dict[str, str] = {
+    "oakland athletics": "athletics",
+    "athletics": "athletics",
+    "sacramento athletics": "athletics",
+    "athletics sacramento": "athletics",
+}
+
+
+def _sanitize_url(url: str) -> str:
+    parts = urlsplit(url)
+    query = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        if key.lower() == "apikey":
+            value = "[redacted]"
+        query.append((key, value))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def _sanitize_http_error(exc: httpx.HTTPError) -> str:
+    request = getattr(exc, "request", None)
+    response = getattr(exc, "response", None)
+    sanitized_url = _sanitize_url(str(request.url)) if request is not None else None
+    status_code = response.status_code if response is not None else None
+    if status_code is not None and sanitized_url is not None:
+        return f"Odds API request failed with status {status_code} for {sanitized_url}"
+    if sanitized_url is not None:
+        return f"Odds API request failed for {sanitized_url}"
+    return "Odds API request failed"
+
 
 def _normalize_team_name(value: str | None) -> str:
     if not value:
         return ""
     normalized = "".join(ch.lower() if ch.isalnum() else " " for ch in value)
-    return " ".join(normalized.split())
+    compact = " ".join(normalized.split())
+    return _TEAM_CANONICAL_NAMES.get(compact, compact)
 
 
 def _games_on_dates(db: Session, game_dates: list[date]) -> list[Game]:
