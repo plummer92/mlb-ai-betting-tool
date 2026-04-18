@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TOP BETS | MLB AI</title>
+<link rel="stylesheet" href="/static/bets.css">
+</head>
+<body>
+<header class="header">
+  <div class="header-brand">
+    <div class="war-room-title">MLB AI WAR ROOM</div>
+    <nav class="header-nav">
+      <a href="/dashboard" class="nav-link">[ WAR ROOM ]</a>
+      <span class="nav-sep">|</span>
+      <a href="/bets" class="nav-link active">[ TOP BETS ]</a>
+      <span class="nav-sep">|</span>
+      <a href="/system" class="nav-link">[ SYSTEM STATUS ]</a>
+      <span class="nav-sep">|</span>
+      <a href="/simulator" class="nav-link">[ SIMULATOR ]</a>
+      <span class="nav-sep">|</span>
+      <a href="/admin" class="nav-link">[ ADMIN ]</a>
+    </nav>
+  </div>
+  <div class="mono muted" id="hdr-date"></div>
+</header>
+
+<div class="container">
+  <div class="section">
+    <div class="section-head">
+      <div class="section-label">Flagged Bet Record</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="record-badge">—</div>
+    </div>
+    <div id="record-summary"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <div class="section-label">Today's Top 10 Bets</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="bets-badge">—</div>
+    </div>
+    <div class="card" style="padding:0;">
+      <div class="tbl-wrap" id="bets-table"><div class="loading">Loading ranked bets</div></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <div class="section-label">Paper Execution Summary</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="paper-badge">—</div>
+    </div>
+    <div id="paper-summary"></div>
+  </div>
+</div>
+
+<script src="/static/bets.js"></script>
+</body>
+</html>

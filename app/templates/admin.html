@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MLB AI Admin</title>
+<link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+  <header class="header">
+    <div class="header-brand">
+      <div class="title">MLB AI ADMIN</div>
+      <nav class="nav">
+        <a href="/dashboard">War Room</a>
+        <a href="/bets">Top Bets</a>
+        <a href="/system">System</a>
+        <a href="/admin" class="active">Admin</a>
+      </nav>
+    </div>
+    <div class="stamp" id="stamp">Loading…</div>
+  </header>
+
+  <main class="container">
+    <section class="panel">
+      <div class="panel-head">
+        <h1>Pipeline Freshness</h1>
+        <button id="refresh-btn" type="button">Refresh</button>
+      </div>
+      <div class="panel-copy">This page is a lightweight operator view for the latest sync, prediction, odds, edge, and alert timestamps.</div>
+      <div id="freshness-grid" class="grid">
+        <div class="loading">Loading freshness…</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Backfill Dashboard Metrics</h2>
+        <button id="backfill-btn" type="button">Run Backfill</button>
+      </div>
+      <div class="panel-copy">Repopulates persisted dashboard fields like K-BB advantage, park factor advantage, and pythagorean advantage without running the manual script.</div>
+      <pre id="backfill-result" class="result">Waiting for action…</pre>
+    </section>
+  </main>
+
+  <script src="/static/admin.js"></script>
+</body>
+</html>

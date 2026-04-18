@@ -9,7 +9,7 @@ router = APIRouter(tags=["dashboard"])
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
 
 
-@lru_cache(maxsize=3)
+@lru_cache(maxsize=4)
 def _load_template(name: str) -> str:
     return (TEMPLATE_DIR / name).read_text(encoding="utf-8")
 
@@ -27,3 +27,13 @@ def system_dashboard():
 @router.get("/simulator", response_class=HTMLResponse)
 def simulator():
     return HTMLResponse(content=_load_template("simulator.html"))
+
+
+@router.get("/bets", response_class=HTMLResponse)
+def bets_dashboard():
+    return HTMLResponse(content=_load_template("bets.html"))
+
+
+@router.get("/admin", response_class=HTMLResponse)
+def admin_dashboard():
+    return HTMLResponse(content=_load_template("admin.html"))

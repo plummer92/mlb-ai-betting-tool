@@ -1,9 +1,11 @@
+import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.db import SessionLocal
 from app.models.schema import Game, GameOdds
@@ -30,6 +32,7 @@ scheduler = AsyncIOScheduler(timezone="America/New_York")
 ET = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
 PREGAME_REUSE_WINDOW_MINUTES = 15
+logger = logging.getLogger(__name__)
 
 
 @scheduler.scheduled_job(CronTrigger(hour=9, minute=0, timezone="America/New_York"))
@@ -38,8 +41,8 @@ def resolve_yesterday_job():
     try:
         result = resolve_completed_games(db)
         print(f"[scheduler] 9am resolve: {result}")
-    except Exception as e:
-        print(f"[scheduler] Resolve error: {e}")
+    except (SQLAlchemyError, RuntimeError, ValueError):
+        logger.exception("[scheduler] Resolve error")
     finally:
         db.close()
 
@@ -51,9 +54,9 @@ def sync_today_games_job():
         today = datetime.now(ET).date()
         result = sync_games_for_date(db, today)
         print(f"[scheduler] Game sync: {result['total']} total, {result['new']} new")
-    except Exception as e:
+    except (SQLAlchemyError, RuntimeError, ValueError):
         db.rollback()
-        print(f"[scheduler] Game sync error: {e}")
+        logger.exception("[scheduler] Game sync error")
     finally:
         db.close()
 
@@ -64,8 +67,8 @@ async def morning_odds_snapshot():
     try:
         stored = await fetch_and_store_odds(db, snapshot_type=SnapshotType.open)
         print(f"[scheduler] Morning snapshot: {len(stored)} odds rows stored")
-    except Exception as e:
-        print(f"[scheduler] Morning odds error: {e}")
+    except (SQLAlchemyError, RuntimeError, ValueError):
+        logger.exception("[scheduler] Morning odds error")
     finally:
         db.close()
 
@@ -97,7 +100,11 @@ def run_monte_carlo_and_schedule_pregame():
                 if game_dt.tzinfo is None:
                     game_dt = game_dt.replace(tzinfo=UTC)
             except ValueError:
-                print(f"[scheduler] Could not parse start_time for game {game.game_id}: {game.start_time}")
+                logger.warning(
+                    "[scheduler] Could not parse start_time for game %s: %s",
+                    game.game_id,
+                    game.start_time,
+                )
                 continue
 
             pregame_trigger_time = game_dt - timedelta(minutes=45)
@@ -115,9 +122,13 @@ def run_monte_carlo_and_schedule_pregame():
                 id=job_id,
                 replace_existing=True,
             )
-            print(f"[scheduler] Pregame job scheduled for game {game.game_id} at {pregame_trigger_time}")
-    except Exception as e:
-        print(f"[scheduler] Monte Carlo job error: {e}")
+            logger.info(
+                "[scheduler] Pregame job scheduled for game %s at %s",
+                game.game_id,
+                pregame_trigger_time,
+            )
+    except (SQLAlchemyError, RuntimeError, ValueError):
+        logger.exception("[scheduler] Monte Carlo job error")
     finally:
         db.close()
 
@@ -147,8 +158,8 @@ async def calculate_edges_job():
             diagnostic_label="scheduler-daily-open",
         )
         print(f"[scheduler] Edges calculated: {result}")
-    except Exception as e:
-        print(f"[scheduler] Edge calculation error: {e}")
+    except (SQLAlchemyError, RuntimeError, ValueError):
+        logger.exception("[scheduler] Edge calculation error")
     finally:
         db.close()
 
@@ -159,8 +170,8 @@ def send_morning_alerts_job():
     try:
         result = create_and_send_alerts_for_today(db)
         print(f"[scheduler] Morning alerts: {result}")
-    except Exception as e:
-        print(f"[scheduler] Alert error: {e}")
+    except (SQLAlchemyError, RuntimeError, ValueError):
+        logger.exception("[scheduler] Alert error")
     finally:
         db.close()
 
@@ -217,8 +228,8 @@ async def run_pregame_snapshot(game_id: int):
 
         alert_result = create_and_send_alert_for_game(db, game_id)
         print(f"[scheduler] Pregame alert for game {game_id}: {alert_result}")
-    except Exception as e:
-        print(f"[scheduler] Pregame snapshot error for game {game_id}: {e}")
+    except (SQLAlchemyError, RuntimeError, ValueError):
+        logger.exception("[scheduler] Pregame snapshot error for game %s", game_id)
     finally:
         db.close()
 
@@ -229,8 +240,8 @@ def resolve_completed_games_job():
     try:
         result = resolve_completed_games(db)
         print(f"[scheduler] Postgame resolver: {result}")
-    except Exception as e:
-        print(f"[scheduler] Postgame resolve error: {e}")
+    except (SQLAlchemyError, RuntimeError, ValueError):
+        logger.exception("[scheduler] Postgame resolve error")
     finally:
         db.close()
 
@@ -246,8 +257,8 @@ def weekly_backtest_job():
             f"cv={result.cv_accuracy:.4f}, brier={result.brier_score:.4f}, "
             f"calibrated={result.calibration_params_json is not None}"
         )
-    except Exception as e:
-        print(f"[scheduler] Weekly backtest failed: {e}")
+    except (SQLAlchemyError, RuntimeError, ValueError):
+        logger.exception("[scheduler] Weekly backtest failed")
     finally:
         db.close()
 
@@ -257,5 +268,5 @@ def ranked_bets_discord_job():
     try:
         result = send_ranked_bets_to_discord_job(limit=10, active_only=True)
         print(f"[scheduler] Discord summary: {result}")
-    except Exception as e:
-        print(f"[scheduler] Discord summary error: {e}")
+    except (RuntimeError, ValueError):
+        logger.exception("[scheduler] Discord summary error")

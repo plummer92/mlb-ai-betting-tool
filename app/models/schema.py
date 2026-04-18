@@ -262,6 +262,12 @@ class EdgeResult(Base):
     edge_pct = Column(Numeric(5, 4))
     movement_direction = Column(String(20), nullable=True)
     pitching_edge_score = Column(Float, nullable=True)
+    sportsbook = Column(String(50), nullable=True)
+    odds_snapshot_type = Column(String(20), nullable=True)
+    away_ml = Column(Integer, nullable=True)
+    home_ml = Column(Integer, nullable=True)
+    over_odds = Column(Integer, nullable=True)
+    under_odds = Column(Integer, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("game_id", "prediction_id", name="uq_edge_game_prediction"),

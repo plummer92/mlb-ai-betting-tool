@@ -560,6 +560,12 @@ def calculate_edge_for_game(
         existing_edge.confidence_tier = tier
         existing_edge.edge_pct = round(max_edge, 4)
         existing_edge.movement_direction = movement_direction
+        existing_edge.sportsbook = odds.sportsbook
+        existing_edge.odds_snapshot_type = odds.snapshot_type.value if odds.snapshot_type else None
+        existing_edge.away_ml = odds.away_ml
+        existing_edge.home_ml = odds.home_ml
+        existing_edge.over_odds = odds.over_odds
+        existing_edge.under_odds = odds.under_odds
         db.commit()
         db.refresh(existing_edge)
         return {
@@ -607,6 +613,12 @@ def calculate_edge_for_game(
         confidence_tier=tier,
         edge_pct=round(max_edge, 4),
         movement_direction=movement_direction,
+        sportsbook=odds.sportsbook,
+        odds_snapshot_type=odds.snapshot_type.value if odds.snapshot_type else None,
+        away_ml=odds.away_ml,
+        home_ml=odds.home_ml,
+        over_odds=odds.over_odds,
+        under_odds=odds.under_odds,
     )
     db.add(edge)
     db.commit()

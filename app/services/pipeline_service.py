@@ -1,7 +1,9 @@
 import json
+import logging
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.schema import Game
@@ -30,6 +32,7 @@ from app.services.simulator import MODEL_VERSION, run_monte_carlo
 from app.services.statcast_service import fetch_team_statcast
 
 ET = ZoneInfo("America/New_York")
+logger = logging.getLogger(__name__)
 
 
 def sync_games_for_date(db: Session, target_date: date) -> dict:
@@ -184,11 +187,19 @@ def run_predictions_for_date(
 
                         if v4 and v4.get("v4_confidence", 0) > 0.05:
                             send_sandbox_alert(v4, game, db)
-                    except Exception as alert_error:
-                        print(f"[v4 alert] non-fatal: {alert_error}", flush=True)
-                except Exception as sandbox_error:
-                    print(f"[v4 sandbox] non-fatal error game {game.game_id}: {sandbox_error}", flush=True)
-        except Exception as exc:
+                    except (RuntimeError, ValueError):
+                        logger.warning(
+                            "Sandbox alert skipped for game %s",
+                            game.game_id,
+                            exc_info=True,
+                        )
+                except (ImportError, RuntimeError, ValueError):
+                    logger.warning(
+                        "Sandbox simulation skipped for game %s",
+                        game.game_id,
+                        exc_info=True,
+                    )
+        except (SQLAlchemyError, RuntimeError, ValueError) as exc:
             db.rollback()
             errors.append({"game_id": game.game_id, "error": str(exc)})
 
@@ -209,7 +220,7 @@ async def sync_odds_for_snapshot(
     try:
         stored = await fetch_and_store_odds(db, snapshot_type=snapshot_type)
         return stored, {"status": "ok", label: len(stored)}
-    except Exception as exc:
+    except (RuntimeError, ValueError, SQLAlchemyError) as exc:
         return [], {"status": "error", "detail": str(exc)}
 
 
@@ -241,7 +252,7 @@ def calculate_edges_for_today(
             "skipped": len(skipped),
             "skip_reasons": skip_reasons,
         }
-    except Exception as exc:
+    except (RuntimeError, ValueError, SQLAlchemyError) as exc:
         return {"status": "error", "detail": str(exc)}
 
 
@@ -253,7 +264,7 @@ def compute_line_movements_for_date(db: Session, target_date: date) -> dict:
             movement = compute_line_movement(db, game.game_id)
             if movement:
                 ok.append(game.game_id)
-        except Exception as exc:
+        except (RuntimeError, ValueError, SQLAlchemyError) as exc:
             errors.append({"game_id": game.game_id, "error": str(exc)})
     return {
         "status": "ok" if not errors else "partial",
@@ -266,7 +277,7 @@ def send_daily_alerts(db: Session) -> dict:
     try:
         result = create_and_send_alerts_for_today(db)
         return {"status": "ok", **result}
-    except Exception as exc:
+    except (RuntimeError, ValueError, SQLAlchemyError) as exc:
         return {"status": "error", "detail": str(exc)}
 
 
@@ -277,12 +288,12 @@ async def run_daily_pipeline(db: Session, target_date: date | None = None) -> di
     try:
         resolve_result = resolve_completed_games(db)
         results["steps"]["resolve_yesterday"] = {"status": "ok", **resolve_result}
-    except Exception as exc:
+    except (RuntimeError, ValueError, SQLAlchemyError) as exc:
         results["steps"]["resolve_yesterday"] = {"status": "error", "detail": str(exc)}
 
     try:
         results["steps"]["sync_games"] = sync_games_for_date(db, today)
-    except Exception as exc:
+    except (RuntimeError, ValueError, SQLAlchemyError) as exc:
         results["steps"]["sync_games"] = {"status": "error", "detail": str(exc)}
 
     results["steps"]["prediction_cleanup"] = {

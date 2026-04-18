@@ -757,9 +757,13 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <nav class="header-nav">
       <a href="/dashboard" class="nav-link active">[ WAR ROOM ]</a>
       <span class="nav-sep">|</span>
+      <a href="/bets" class="nav-link ">[ TOP BETS ]</a>
+      <span class="nav-sep">|</span>
       <a href="/system" class="nav-link ">[ SYSTEM STATUS ]</a>
       <span class="nav-sep">|</span>
       <a href="/simulator" class="nav-link ">[ SIMULATOR ]</a>
+      <span class="nav-sep">|</span>
+      <a href="/admin" class="nav-link ">[ ADMIN ]</a>
     </nav>
   </div>
   <div class="header-meta">
@@ -771,6 +775,28 @@ tr:hover td { background: rgba(6,182,212,0.025); }
 
 
 <div class="container">
+
+  <div class="section">
+    <div class="section-head">
+      <div class="section-label">Betting Record</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="record-badge">—</div>
+    </div>
+    <div id="betting-record"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <div class="section-label">Top 10 Bets</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="top-bets-badge">—</div>
+    </div>
+    <div class="card" style="padding:0;">
+      <div class="tbl-wrap" id="top-bets-table">
+        <div class="loading">Loading ranked bets</div>
+      </div>
+    </div>
+  </div>
 
   <!-- ═══════════════ 1. YESTERDAY'S DEBRIEF ═══════════════ -->
   <div class="section">
@@ -891,6 +917,11 @@ function betChip(result) {
   return `<span class="chip c-${result}">${result.toUpperCase()}</span>`;
 }
 
+function fmtAmericanOdds(n) {
+  if (n == null) return '—';
+  return n > 0 ? `+${n}` : `${n}`;
+}
+
 async function loadCommentary() {
   try {
     const res = await fetch('/api/commentary/today');
@@ -941,8 +972,12 @@ async function loadCommentary() {
 
 async function loadAccuracy() {
   try {
-    const res = await fetch('/api/reviews/accuracy');
-    const data = await res.json();
+    const [accuracyRes, summaryRes] = await Promise.all([
+      fetch('/api/reviews/accuracy'),
+      fetch('/api/reviews/summary'),
+    ]);
+    const data = await accuracyRes.json();
+    const summary = await summaryRes.json();
     
     const mkStat = (label, stats) => {
       if (!stats || stats.bets === 0) {
@@ -1014,7 +1049,79 @@ async function loadAccuracy() {
       ${renderConfRow('Totals', data.totals, 'var(--purple)')}
       ${renderConfRow('Run Line', data.run_line, 'var(--orange)')}
     `;
+
+    const winRate = summary.win_rate != null ? (summary.win_rate * 100).toFixed(1) + '%' : '—';
+    const roi = summary.roi_flat_110 != null ? (summary.roi_flat_110 * 100).toFixed(1) + '%' : '—';
+    $('record-badge').textContent = `${summary.wins || 0}W-${summary.losses || 0}L-${summary.pushes || 0}P`;
+    $('betting-record').innerHTML = `
+      <div class="summary-bar" style="border-left-color: var(--green); background: var(--surface3);">
+        <div class="s-stat">
+          <div class="s-stat-val">${summary.total_predictions ?? 0}</div>
+          <div class="s-stat-lbl">Flagged Bets Reviewed</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val green">${summary.wins ?? 0}</div>
+          <div class="s-stat-lbl">Wins</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val red">${summary.losses ?? 0}</div>
+          <div class="s-stat-lbl">Losses</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val muted">${summary.pushes ?? 0}</div>
+          <div class="s-stat-lbl">Pushes</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val">${winRate}</div>
+          <div class="s-stat-lbl">Win Rate</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val">${roi}</div>
+          <div class="s-stat-lbl">ROI (-110 flat)</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val">${summary.bets_graded ?? 0}</div>
+          <div class="s-stat-lbl">Graded Bets</div>
+        </div>
+      </div>
+    `;
   } catch(e) { console.error("Error loading accuracy", e); }
+}
+
+async function loadTopBets() {
+  try {
+    const res = await fetch('/api/ranked/bets?limit=10&active_only=true');
+    const rows = await res.json();
+    $('top-bets-badge').textContent = rows.length ? `${rows.length} LIVE RANKS` : 'NO LIVE BETS';
+    if (!rows.length) {
+      $('top-bets-table').innerHTML = '<div class="empty">No current ranked bets for today.</div>';
+      return;
+    }
+
+    $('top-bets-table').innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Rank</th><th>Matchup</th><th>Play</th><th>Edge</th><th>EV</th><th>Confidence</th><th>Book</th><th>Start</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map(r => `
+            <tr onclick="openDeepDive(${r.game_id})" style="cursor:pointer;">
+              <td class="mono" style="font-weight:700;color:var(--cyan)">#${r.rank}</td>
+              <td style="font-weight:600">${esc(r.matchup)}</td>
+              <td class="mono">${esc((r.play || '—').replace('_', ' ').toUpperCase())}</td>
+              <td class="mono green">${(r.edge_pct * 100).toFixed(1)}%</td>
+              <td class="mono ${r.ev >= 0 ? 'green' : 'red'}">${fmt(r.ev, 3)}</td>
+              <td>${edgeChip(r.confidence, r.edge_pct)}</td>
+              <td class="mono">${esc(r.sportsbook || '—')}</td>
+              <td class="mono">${gameTime(r.start_time)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+  } catch (e) {
+    $('top-bets-table').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
 }
 
 async function loadDebrief() {
@@ -1286,14 +1393,24 @@ function openDeepDive(gameId) {
   const p = currentIntel.preds[gameId];
   if (!g) return;
 
+  const awayImplied = e?.implied_away_pct != null ? pct0_1(e.implied_away_pct) : (e?.away_ml != null ? fmtAmericanOdds(e.away_ml) : 'Odds unavailable');
+  const homeImplied = e?.implied_home_pct != null ? pct0_1(e.implied_home_pct) : (e?.home_ml != null ? fmtAmericanOdds(e.home_ml) : 'Odds unavailable');
+  const awayXera = p?.away_starter_xera != null ? fmt(p.away_starter_xera, 2) : 'Not available yet';
+  const homeXera = p?.home_starter_xera != null ? fmt(p.home_starter_xera, 2) : 'Not available yet';
+  const confidenceLabel = p?.confidence_score != null ? fmt(p.confidence_score, 2) : '—';
+  const bookLabel = e?.sportsbook ? `${e.sportsbook}${e.snapshot_type ? ` · ${e.snapshot_type}` : ''}` : 'No book snapshot linked';
+
   const content = `
     <div class="modal-title">${esc(g.away_team)} @ ${esc(g.home_team)} — DEEP DIVE</div>
+    <div style="font-family:monospace;font-size:11px;color:var(--muted);margin-bottom:18px;text-transform:uppercase;letter-spacing:1px;">
+      ${esc(bookLabel)}
+    </div>
     <div class="dive-grid">
       <div class="dive-section">
         <div class="dive-label">Implied Probabilities (Book)</div>
         <div class="dive-val">
-          <span class="cyan">AWAY: ${e ? pct0_1(e.implied_away_pct) : '—'}</span><br>
-          <span class="purple">HOME: ${e ? pct0_1(e.implied_home_pct) : '—'}</span>
+          <span class="cyan">AWAY: ${awayImplied}</span><br>
+          <span class="purple">HOME: ${homeImplied}</span>
         </div>
       </div>
       <div class="dive-section">
@@ -1312,15 +1429,29 @@ function openDeepDive(gameId) {
       </div>
       <div class="dive-section">
         <div class="dive-label">Model Confidence Score</div>
-        <div class="dive-val large cyan">${p ? fmt(p.confidence_score, 2) : '—'}</div>
+        <div class="dive-val large cyan">${confidenceLabel}</div>
       </div>
       <div class="dive-section">
         <div class="dive-label">${esc(g.away_team)} Starter xERA</div>
-        <div class="dive-val yellow">${p ? fmt(p.away_starter_xera, 2) : '—'}</div>
+        <div class="dive-val yellow">${awayXera}</div>
       </div>
       <div class="dive-section">
         <div class="dive-label">${esc(g.home_team)} Starter xERA</div>
-        <div class="dive-val yellow">${p ? fmt(p.home_starter_xera, 2) : '—'}</div>
+        <div class="dive-val yellow">${homeXera}</div>
+      </div>
+      <div class="dive-section">
+        <div class="dive-label">Book Prices</div>
+        <div class="dive-val">
+          <span class="cyan">AWAY ML: ${fmtAmericanOdds(e?.away_ml)}</span><br>
+          <span class="purple">HOME ML: ${fmtAmericanOdds(e?.home_ml)}</span>
+        </div>
+      </div>
+      <div class="dive-section">
+        <div class="dive-label">Totals Market</div>
+        <div class="dive-val">
+          <span class="yellow">TOTAL: ${e?.book_total != null ? fmt(e.book_total, 1) : '—'}</span><br>
+          <span class="muted">O ${fmtAmericanOdds(e?.over_odds)} / U ${fmtAmericanOdds(e?.under_odds)}</span>
+        </div>
       </div>
     </div>
     <div style="margin-top: 24px; font-family: monospace; font-size: 11px; color: var(--muted);">
@@ -1337,7 +1468,7 @@ function closeModal(e) {
 }
 
 async function loadAll() {
-  await Promise.all([loadAccuracy(), loadDebrief(), loadCommentary(), loadIntel()]);
+  await Promise.all([loadAccuracy(), loadTopBets(), loadDebrief(), loadCommentary(), loadIntel()]);
 }
 
 let countdown = 60;

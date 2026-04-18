@@ -24,3 +24,9 @@ ALERT_CONFIDENCE_LEVELS = set(os.getenv("ALERT_CONFIDENCE_LEVELS", "medium,stron
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 ALERT_DESTINATION = os.getenv("ALERT_DESTINATION", "discord")
 POSTGAME_LOOKBACK_HOURS = int(os.getenv("POSTGAME_LOOKBACK_HOURS", "12"))
+
+BETTING_ENABLED = os.getenv("BETTING_ENABLED", "false").strip().lower() == "true"
+BETTING_MODE = os.getenv("BETTING_MODE", "paper").strip().lower()
+BOOK_PROVIDER = os.getenv("BOOK_PROVIDER", "paper").strip().lower()
+DEFAULT_BANKROLL = float(os.getenv("DEFAULT_BANKROLL", "1000"))
+KILL_SWITCH = os.getenv("KILL_SWITCH", "false").strip().lower() == "true"

@@ -1,0 +1,116 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: #0a0e1a;
+  color: #e2e8f0;
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 28px;
+  border-bottom: 1px solid #1e3050;
+  background: linear-gradient(180deg, #0d1526 0%, #0a0e1a 100%);
+}
+.header-brand {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.title {
+  color: #06b6d4;
+  font: 700 18px "Courier New", monospace;
+  letter-spacing: 4px;
+}
+.nav {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.nav a {
+  color: #7da1c6;
+  text-decoration: none;
+  font: 700 12px "Courier New", monospace;
+  text-transform: uppercase;
+}
+.nav a.active,
+.nav a:hover { color: #06b6d4; }
+.stamp {
+  color: #94a3b8;
+  font: 12px "Courier New", monospace;
+}
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 28px;
+}
+.panel {
+  background: #0e1425;
+  border: 1px solid #1e3050;
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+.panel-head h1,
+.panel-head h2 {
+  margin: 0;
+  font-size: 20px;
+}
+.panel-copy {
+  color: #8aa4bf;
+  margin: 10px 0 18px;
+  line-height: 1.5;
+}
+button {
+  background: transparent;
+  color: #06b6d4;
+  border: 1px solid #2a4a7f;
+  border-radius: 6px;
+  padding: 9px 14px;
+  cursor: pointer;
+}
+button:hover {
+  background: #052836;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.tile {
+  background: #131d30;
+  border: 1px solid #1e3050;
+  border-radius: 8px;
+  padding: 14px;
+}
+.label {
+  color: #5a7a9c;
+  font: 700 11px "Courier New", monospace;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.value {
+  margin-top: 8px;
+  font: 700 18px "Courier New", monospace;
+}
+.loading,
+.result {
+  color: #94a3b8;
+  font: 12px "Courier New", monospace;
+}
+.result {
+  background: #060a12;
+  border: 1px solid #1e3050;
+  border-radius: 8px;
+  padding: 14px;
+  overflow-x: auto;
+}

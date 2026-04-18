@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.config import APP_NAME, APP_VERSION
 
@@ -11,10 +12,13 @@ from app.routes.backtest import router as backtest_router
 from app.routes.ranked import router as ranked_router
 from app.routes.debug import router as debug_router
 from app.routes.alerts import router as alerts_router
+from app.routes.commentary import router as commentary_router
 from app.routes.reviews import router as reviews_router
 from app.routes.status import router as status_router
 from app.routes.dashboard import router as dashboard_router
 from app.routes.sandbox import router as sandbox_router
+from app.routes.bets import router as bets_router
+from app.routes.admin import router as admin_router
 
 from app.scheduler import scheduler
 
@@ -47,6 +51,7 @@ app = FastAPI(
 
 
 app.include_router(alerts_router)
+app.include_router(commentary_router)
 app.include_router(games_router)
 app.include_router(model_router)
 app.include_router(edges_router)
@@ -58,6 +63,9 @@ app.include_router(reviews_router)
 app.include_router(status_router)
 app.include_router(dashboard_router)
 app.include_router(sandbox_router)
+app.include_router(bets_router)
+app.include_router(admin_router)
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
 @app.get("/")
