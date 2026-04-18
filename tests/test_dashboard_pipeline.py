@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import unittest
+import asyncio
 from datetime import date, datetime, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -10,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db import Base
 from app.models.schema import EdgeResult, Game, GameOdds, Prediction, SnapshotType
 from app.routes.edges import get_today_edges
-from app.services.pipeline_service import run_predictions_for_date
+from app.services.pipeline_service import run_predictions_for_date, run_pregame_pipeline
 
 
 class DashboardAndPipelineTests(unittest.TestCase):
@@ -165,6 +166,42 @@ class DashboardAndPipelineTests(unittest.TestCase):
         self.assertEqual(call_kwargs["kbb_adv"], 0.0)
         self.assertEqual(call_kwargs["park_factor_adv"], 0.0)
         self.assertEqual(call_kwargs["pythagorean_win_pct_adv"], 0.0)
+
+    def test_run_pregame_pipeline_generates_pregame_predictions_before_edges(self) -> None:
+        game = self._game(3)
+
+        with patch(
+            "app.services.pipeline_service.sync_odds_for_snapshot",
+            new=AsyncMock(return_value=(["pregame-odds"], {"status": "ok", "stored": 1})),
+        ), \
+             patch(
+                 "app.services.pipeline_service.run_predictions_for_date",
+                 return_value={"status": "ok", "ran": 1, "errors": []},
+             ) as run_predictions, \
+             patch(
+                 "app.services.pipeline_service.compute_line_movements_for_date",
+                 return_value={"status": "ok", "computed": 1, "errors": []},
+             ), \
+             patch(
+                 "app.services.pipeline_service.calculate_edges_for_today",
+                 return_value={"status": "ok", "calculated": 1, "skipped": 0, "skip_reasons": {}},
+             ) as calc_edges, \
+             patch(
+                 "app.services.pipeline_service.send_daily_alerts",
+                 return_value={"status": "ok", "created": 0, "sent": 0, "skipped": 0, "failed": 0},
+             ):
+            result = asyncio.run(run_pregame_pipeline(self.db, game.game_date))
+
+        self.assertEqual(result["steps"]["monte_carlo"]["status"], "ok")
+        run_predictions.assert_called_once_with(
+            self.db,
+            game.game_date,
+            run_stage="pregame",
+            diagnostic_label="pregame-run",
+        )
+        calc_edges.assert_called_once()
+        self.assertEqual(calc_edges.call_args.kwargs["run_stage"], "pregame")
+        self.assertEqual(result["steps"]["edges"]["calculated"], 1)
 
 
 if __name__ == "__main__":

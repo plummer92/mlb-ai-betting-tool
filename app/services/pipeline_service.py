@@ -334,6 +334,12 @@ async def run_pregame_pipeline(db: Session, target_date: date | None = None) -> 
         label="stored",
     )
     results["steps"]["sync_pregame_odds"] = odds_result
+    results["steps"]["monte_carlo"] = run_predictions_for_date(
+        db,
+        today,
+        run_stage="pregame",
+        diagnostic_label="pregame-run",
+    )
     results["steps"]["line_movement"] = compute_line_movements_for_date(db, today)
     results["steps"]["edges"] = calculate_edges_for_today(
         db,
