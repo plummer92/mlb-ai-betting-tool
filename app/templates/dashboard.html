@@ -313,6 +313,41 @@ tr:hover td { background: rgba(6,182,212,0.025); }
 }
 @media (max-width: 1100px) { .commentary-grid { grid-template-columns: 1fr; } }
 
+.commentary-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+@media (max-width: 1100px) { .commentary-summary-grid { grid-template-columns: 1fr; } }
+
+.commentary-summary-card {
+  background: linear-gradient(180deg, var(--surface2) 0%, var(--surface3) 100%);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--cyan);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.commentary-summary-card.watchlist { border-left-color: var(--yellow); }
+.commentary-summary-card.disagreement { border-left-color: var(--orange); }
+
+.commentary-summary-label {
+  font-family: monospace;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  margin-bottom: 7px;
+}
+
+.commentary-summary-text {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
 .commentary-card {
   background: linear-gradient(180deg, var(--surface) 0%, var(--surface2) 100%);
   border: 1px solid var(--border);
@@ -822,6 +857,9 @@ tr:hover td { background: rgba(6,182,212,0.025); }
       <div class="section-rule"></div>
       <div class="section-badge" id="commentary-badge">—</div>
     </div>
+    <div class="commentary-summary-grid" id="commentary-summary-grid">
+      <div class="loading">Loading analyst summary</div>
+    </div>
     <div class="commentary-grid" id="commentary-grid">
       <div class="loading">Loading commentary</div>
     </div>
@@ -927,11 +965,27 @@ async function loadCommentary() {
     const res = await fetch('/api/commentary/today');
     const data = await res.json();
     const items = data.items || [];
+    const summaries = data.summaries || [];
     const source = data.source || 'alerts';
 
     $('commentary-badge').textContent = items.length
       ? `${items.length} NOTE${items.length !== 1 ? 'S' : ''}`
       : 'STANDBY';
+
+    if (summaries.length) {
+      $('commentary-summary-grid').innerHTML = summaries.map(summary => `
+        <div class="commentary-summary-card ${esc(summary.kind || '')}">
+          <div class="commentary-summary-label">${esc(summary.label || 'Desk Note')}</div>
+          <div class="commentary-summary-text">${esc(summary.text || '')}</div>
+        </div>
+      `).join('');
+    } else {
+      $('commentary-summary-grid').innerHTML = `
+        <div class="commentary-summary-card">
+          <div class="commentary-summary-label">Desk Note</div>
+          <div class="commentary-summary-text">No lead commentary has been generated yet. Once the board firms up, this strip will surface the top storyline, sandbox watch, and any model disagreement worth your attention.</div>
+        </div>`;
+    }
 
     if (!items.length) {
       $('commentary-grid').innerHTML = `
@@ -966,6 +1020,7 @@ async function loadCommentary() {
 
     $('commentary-grid').innerHTML = cards;
   } catch(e) {
+    $('commentary-summary-grid').innerHTML = `<div class="commentary-summary-card"><div class="commentary-summary-label">Desk Note</div><div class="commentary-summary-text">Commentary summary unavailable right now.</div></div>`;
     $('commentary-grid').innerHTML = `<div class="card"><div class="empty">Error: ${esc(e.message)}</div></div>`;
   }
 }
