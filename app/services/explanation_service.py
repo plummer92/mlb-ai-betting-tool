@@ -26,6 +26,9 @@ def generate_pick_explanation(game_data: dict) -> str:
     home_bullpen = game_data.get("home_bullpen_strength")
     away_bullpen = game_data.get("away_bullpen_strength")
     park = game_data.get("park") or "this park"
+    series_game_number = game_data.get("series_game_number")
+    is_series_opener = game_data.get("is_series_opener", False)
+    is_series_finale = game_data.get("is_series_finale", False)
 
     if not is_totals:
         if play == "away_ml":
@@ -65,6 +68,11 @@ def generate_pick_explanation(game_data: dict) -> str:
             f"The {away} carry a {float(travel_stress_away):.0%} travel stress penalty after crossing time zones."
         )
 
+    if series_game_number == 1:
+        sentences.append(
+            "As the series opener, home teams historically hold a first-game advantage over traveling visitors."
+        )
+
     bullpen_line = None
     if not is_totals:
         if play == "away_ml" and away_bullpen is not None and float(away_bullpen) < 0.4:
@@ -79,6 +87,14 @@ def generate_pick_explanation(game_data: dict) -> str:
 
     if bullpen_line:
         sentences.append(bullpen_line)
+
+    if is_series_finale and (
+        (home_bullpen is not None and float(home_bullpen) < 0.4)
+        or (away_bullpen is not None and float(away_bullpen) < 0.4)
+    ):
+        sentences.append(
+            "In the series finale, both bullpens face elevated usage — late-inning variance increases."
+        )
 
     edge_line = f"Model projects {edge_pct:.1%} edge with {ev:.1%} expected value."
 

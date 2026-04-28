@@ -443,6 +443,11 @@ class SandboxPredictionV4(Base):
     humidity_pct = Column(Float, nullable=True)
     is_dome = Column(Boolean, default=False)
 
+    # v0.5 series position
+    series_game_number = Column(Integer, nullable=True)
+    is_series_opener = Column(Boolean, default=False)
+    is_series_finale = Column(Boolean, default=False)
+
     f5_result = Column(String(10), nullable=True)
     full_game_result = Column(String(10), nullable=True)
     f5_graded_at = Column(DateTime(timezone=True), nullable=True)

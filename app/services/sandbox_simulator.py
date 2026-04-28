@@ -16,6 +16,7 @@ from app.services.bullpen_calc import (
     collect_reliever_workload,
     get_team_bullpen_availability,
 )
+from app.services.series_service import get_series_opener_edge, get_series_position
 from app.services.travel_service import calculate_travel_stress
 from app.services.umpire_service import collect_umpire_for_game
 from app.services.weather_service import fetch_park_weather
@@ -158,6 +159,30 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
         except Exception:
             pass
 
+        # ── 6.5. Series position ─────────────────────────────────────────
+        series_game_number = None
+        is_series_opener = False
+        is_series_finale = False
+        series_edge = 0.0
+        try:
+            if home_team_id:
+                home_series = get_series_position(home_team_id, game_date, db)
+                series_edge = get_series_opener_edge(home_series)
+                series_game_number = home_series.get("series_game_number")
+                is_series_opener = home_series.get("is_series_opener", False)
+                is_series_finale = home_series.get("is_series_finale", False)
+            if away_team_id:
+                get_series_position(away_team_id, game_date, db)
+            print(
+                f"[v4 series] game_id={game_id} "
+                f"series_game={series_game_number} "
+                f"opener={is_series_opener} "
+                f"finale={is_series_finale}",
+                flush=True,
+            )
+        except Exception:
+            pass
+
         # ── 7. Projections ────────────────────────────────────────────────
         f5_projection = calculate_f5_projection(
             v3_total, umpire_impact, home_starter_xera, away_starter_xera
@@ -172,7 +197,7 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
             max(0.5, late_inning_projection * (1 + wind_factor * 0.06)), 2
         )
 
-        v4_total = f5_projection + late_inning_projection
+        v4_total = round(f5_projection + late_inning_projection + series_edge, 2)
 
         # ── 8. F5 line comparison ─────────────────────────────────────────
         # Look for an F5 line; fall back to v3_total * 0.45 as neutral line
@@ -237,6 +262,9 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
             existing.temp_f = temp_f
             existing.humidity_pct = humidity_pct
             existing.is_dome = is_dome
+            existing.series_game_number = series_game_number
+            existing.is_series_opener = is_series_opener
+            existing.is_series_finale = is_series_finale
         else:
             db.add(SandboxPredictionV4(
                 game_id=game_id,
@@ -265,6 +293,9 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
                 temp_f=temp_f,
                 humidity_pct=humidity_pct,
                 is_dome=is_dome,
+                series_game_number=series_game_number,
+                is_series_opener=is_series_opener,
+                is_series_finale=is_series_finale,
             ))
         db.commit()
         print(
@@ -301,6 +332,9 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
             "temp_f": temp_f,
             "humidity_pct": humidity_pct,
             "is_dome": is_dome,
+            "series_game_number": series_game_number,
+            "is_series_opener": is_series_opener,
+            "is_series_finale": is_series_finale,
             "away_team": game.away_team,
             "home_team": game.home_team,
         }
