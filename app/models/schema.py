@@ -437,6 +437,12 @@ class SandboxPredictionV4(Base):
     travel_stress_home = Column(Float, nullable=True)
     travel_stress_away = Column(Float, nullable=True)
 
+    # v0.5 weather/wind (-1.0 = strong in from CF, +1.0 = strong out to CF)
+    wind_factor = Column(Float, nullable=True)
+    temp_f = Column(Float, nullable=True)
+    humidity_pct = Column(Float, nullable=True)
+    is_dome = Column(Boolean, default=False)
+
     f5_result = Column(String(10), nullable=True)
     full_game_result = Column(String(10), nullable=True)
     f5_graded_at = Column(DateTime(timezone=True), nullable=True)

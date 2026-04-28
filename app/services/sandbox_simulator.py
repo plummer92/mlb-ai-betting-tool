@@ -18,6 +18,7 @@ from app.services.bullpen_calc import (
 )
 from app.services.travel_service import calculate_travel_stress
 from app.services.umpire_service import collect_umpire_for_game
+from app.services.weather_service import fetch_park_weather
 
 
 def calculate_f5_projection(
@@ -133,16 +134,45 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
         except Exception:
             pass
 
-        # ── 6. Projections ────────────────────────────────────────────────
+        # ── 6. Weather/wind ───────────────────────────────────────────────
+        wind_factor = 0.0
+        temp_f: Optional[float] = None
+        humidity_pct: Optional[float] = None
+        is_dome = False
+        try:
+            if home_team_id:
+                wx = fetch_park_weather(home_team_id, game_date)
+                wind_factor = wx["wind_factor"]
+                temp_f = wx["temp_f"]
+                humidity_pct = wx["humidity_pct"]
+                is_dome = wx["is_dome"]
+                print(
+                    f"[v4 weather] game_id={game_id} "
+                    f"wind={wx['wind_mph']:.1f}mph "
+                    f"factor={wind_factor:.2f} "
+                    f"temp={temp_f}F",
+                    flush=True,
+                )
+        except Exception:
+            pass
+
+        # ── 7. Projections ────────────────────────────────────────────────
         f5_projection = calculate_f5_projection(
             v3_total, umpire_impact, home_starter_xera, away_starter_xera
         )
         late_inning_projection = calculate_late_inning_projection(
             v3_total, home_bullpen, away_bullpen, umpire_impact
         )
+
+        # Apply wind factor: max ±6% effect on each segment
+        f5_projection = round(f5_projection * (1 + wind_factor * 0.06), 2)
+        late_inning_projection = round(
+            max(0.5, late_inning_projection * (1 + wind_factor * 0.06)), 2
+        )
+
         v4_total = f5_projection + late_inning_projection
 
-        # ── 7. F5 line comparison ─────────────────────────────────────────
+        # ── 8. F5 line comparison ─────────────────────────────────────────
         # Look for an F5 line; fall back to v3_total * 0.45 as neutral line
         from app.models.schema import F5LineV4
         f5_line_row = (
@@ -160,7 +190,7 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
             f5_pick = None
             f5_edge_pct = 0.0
 
-        # ── 8. Agreement / convergence flags ─────────────────────────────
+        # ── 9. Agreement / convergence flags ─────────────────────────────
         v3_v4_agreement = abs(v4_total - v3_total) < 0.5
         bullpen_convergence = (home_bullpen > 0.7 and away_bullpen > 0.7) or \
                               (home_bullpen < 0.3 and away_bullpen < 0.3)
@@ -177,7 +207,7 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
         # v4 doesn't change win probability — use v3 as baseline
         v4_home_win_pct = v3_home_win_pct
 
-        # ── 9. Upsert to sandbox_predictions_v4 ──────────────────────────
+        # ── 10. Upsert to sandbox_predictions_v4 ─────────────────────────
         existing = (
             db.query(SandboxPredictionV4)
             .filter(SandboxPredictionV4.game_id == game_id)
@@ -201,6 +231,10 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
             existing.v3_v4_agreement = v3_v4_agreement
             existing.travel_stress_home = home_travel_stress
             existing.travel_stress_away = away_travel_stress
+            existing.wind_factor = wind_factor
+            existing.temp_f = temp_f
+            existing.humidity_pct = humidity_pct
+            existing.is_dome = is_dome
         else:
             db.add(SandboxPredictionV4(
                 game_id=game_id,
@@ -225,6 +259,10 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
                 v3_v4_agreement=v3_v4_agreement,
                 travel_stress_home=home_travel_stress,
                 travel_stress_away=away_travel_stress,
+                wind_factor=wind_factor,
+                temp_f=temp_f,
+                humidity_pct=humidity_pct,
+                is_dome=is_dome,
             ))
         db.commit()
         print(
@@ -256,6 +294,10 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
             "v3_v4_agreement": v3_v4_agreement,
             "travel_stress_home": home_travel_stress,
             "travel_stress_away": away_travel_stress,
+            "wind_factor": wind_factor,
+            "temp_f": temp_f,
+            "humidity_pct": humidity_pct,
+            "is_dome": is_dome,
             "away_team": game.away_team,
             "home_team": game.home_team,
         }
