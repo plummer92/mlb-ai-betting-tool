@@ -136,6 +136,7 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
 
         # ── 6. Weather/wind ───────────────────────────────────────────────
         wind_factor = 0.0
+        wind_mph = 0.0
         temp_f: Optional[float] = None
         humidity_pct: Optional[float] = None
         is_dome = False
@@ -143,6 +144,7 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
             if home_team_id:
                 wx = fetch_park_weather(home_team_id, game_date)
                 wind_factor = wx["wind_factor"]
+                wind_mph = wx["wind_mph"]
                 temp_f = wx["temp_f"]
                 humidity_pct = wx["humidity_pct"]
                 is_dome = wx["is_dome"]
@@ -295,6 +297,7 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
             "travel_stress_home": home_travel_stress,
             "travel_stress_away": away_travel_stress,
             "wind_factor": wind_factor,
+            "wind_mph": wind_mph,
             "temp_f": temp_f,
             "humidity_pct": humidity_pct,
             "is_dome": is_dome,

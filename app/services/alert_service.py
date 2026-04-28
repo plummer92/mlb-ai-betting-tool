@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import ALERT_DESTINATION
-from app.models.schema import BetAlert, EdgeResult, Game, Prediction, GameOdds
+from app.models.schema import BetAlert, EdgeResult, Game, Prediction, GameOdds, SandboxPredictionV4
 from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.edge_service import get_trustworthy_active_edges, TOTAL_STD_DEV
 from app.services.notification_service import send_alert_message
@@ -110,12 +110,36 @@ def qualifies_for_alert(edge: EdgeResult) -> bool:
     return False
 
 
+def _get_weather_summary(db: Session, game_id: int) -> str:
+    """One-line weather summary from sandbox_predictions_v4, or empty string if unavailable."""
+    try:
+        row = (
+            db.query(SandboxPredictionV4)
+            .filter(SandboxPredictionV4.game_id == game_id)
+            .order_by(SandboxPredictionV4.created_at.desc())
+            .first()
+        )
+        if not row:
+            return ""
+        if row.is_dome:
+            return "\U0001f3df️ Dome — wind neutral"
+        wind_factor = float(row.wind_factor or 0.0)
+        temp_f = float(row.temp_f or 72.0)
+        if wind_factor > 0.3:
+            return f"\U0001f4a8 Wind OUT (+{wind_factor:.2f}) — hitter friendly"
+        if wind_factor < -0.3:
+            return f"\U0001f32c️ Wind IN ({wind_factor:.2f}) — pitcher friendly"
+        return f"\U0001f324️ {temp_f:.0f}°F — neutral conditions"
+    except Exception:
+        return ""
+
+
 def build_sniper_alert_message(game: Game, edge: EdgeResult, db: Session) -> str:
     """Format a clean, actionable Discord message."""
     away = game.away_team
     home = game.home_team
     play = edge.recommended_play
-    
+
     # Format Recommended Pick
     if play == "over":
         pick = f"OVER {edge.book_total}"
@@ -139,12 +163,16 @@ def build_sniper_alert_message(game: Game, edge: EdgeResult, db: Session) -> str
     else:
         odds_field = f"**Odds:** {avg_odds}"
 
+    weather = _get_weather_summary(db, game.game_id)
+    weather_line = f"\n{weather}" if weather else ""
+
     return (
         f"🎯 **SNIPER ALERT** 🎯\n\n"
         f"**Game:** {away} @ {home}\n"
         f"**Recommended Pick:** {pick}\n"
         f"**Confidence:** {confidence:.1f}%\n"
         f"{odds_field}"
+        f"{weather_line}"
     )
 
 

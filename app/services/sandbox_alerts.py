@@ -1,5 +1,5 @@
 """
-v0.4 Sandbox Discord alerts.
+v0.5 Sandbox Discord alerts.
 
 Sends purple-themed embeds to DISCORD_SANDBOX_WEBHOOK_URL.
 Never raises — all errors are swallowed silently.
@@ -42,6 +42,12 @@ def send_sandbox_alert(v4_pred: dict, game, db: Session) -> None:
         home_bp = v4_pred.get("home_bullpen_strength", 1.0) or 1.0
         agreement = v4_pred.get("v3_v4_agreement", False)
         delta = v4_total - v3_total
+        away_stress = v4_pred.get("travel_stress_away", 0.0) or 0.0
+        home_stress = v4_pred.get("travel_stress_home", 0.0) or 0.0
+        wind_factor = v4_pred.get("wind_factor", 0.0) or 0.0
+        wind_mph = v4_pred.get("wind_mph", 0.0) or 0.0
+        temp_f = v4_pred.get("temp_f") or 72.0
+        is_dome = v4_pred.get("is_dome", False)
 
         # Full-game pick based on v4 vs v3 spread
         if v4_total > v3_total + 0.3:
@@ -67,12 +73,33 @@ def send_sandbox_alert(v4_pred: dict, game, db: Session) -> None:
             f"{confidence_badge}"
         )
 
+        fields = []
+
+        if away_stress > 0.2 or home_stress > 0.2:
+            fields.append({
+                "name": "Travel Stress",
+                "value": f"Away: {away_stress:.0%} | Home: {home_stress:.0%}",
+                "inline": False,
+            })
+
+        if is_dome:
+            weather_value = "\U0001f3df\ufe0f Dome \u2014 wind neutral"
+        elif wind_factor > 0.3:
+            weather_value = f"\U0001f4a8 Wind OUT {wind_mph:.0f}mph (+{wind_factor:.2f}) \u2014 hitter friendly"
+        elif wind_factor < -0.3:
+            weather_value = f"\U0001f32c\ufe0f Wind IN {wind_mph:.0f}mph ({wind_factor:.2f}) \u2014 pitcher friendly"
+        else:
+            weather_value = f"\U0001f324\ufe0f {temp_f:.0f}\u00b0F \u2014 neutral conditions"
+
+        fields.append({"name": "Weather/Wind", "value": weather_value, "inline": False})
+
         payload = {
             "embeds": [
                 {
-                    "title": f"\U0001f9ea v0.4 SANDBOX | {away} @ {home}",
+                    "title": f"\U0001f9ea v0.5 SANDBOX | {away} @ {home}",
                     "description": description,
                     "color": PURPLE_COLOR,
+                    "fields": fields,
                 }
             ]
         }
