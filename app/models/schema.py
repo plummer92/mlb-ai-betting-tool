@@ -433,6 +433,10 @@ class SandboxPredictionV4(Base):
     v4_confidence = Column(Float, nullable=True)
     v3_v4_agreement = Column(Boolean, default=False)
 
+    # v0.5 travel stress (0.0 = no stress, 1.0 = maximum)
+    travel_stress_home = Column(Float, nullable=True)
+    travel_stress_away = Column(Float, nullable=True)
+
     f5_result = Column(String(10), nullable=True)
     full_game_result = Column(String(10), nullable=True)
     f5_graded_at = Column(DateTime(timezone=True), nullable=True)

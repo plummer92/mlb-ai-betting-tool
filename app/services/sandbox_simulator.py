@@ -16,6 +16,7 @@ from app.services.bullpen_calc import (
     collect_reliever_workload,
     get_team_bullpen_availability,
 )
+from app.services.travel_service import calculate_travel_stress
 from app.services.umpire_service import collect_umpire_for_game
 
 
@@ -118,7 +119,21 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
         except Exception:
             pass
 
-        # ── 5. Projections ────────────────────────────────────────────────
+        # ── 5. Travel stress ─────────────────────────────────────────────
+        home_travel_stress = 0.0
+        away_travel_stress = 0.0
+        try:
+            if home_team_id:
+                home_travel_stress = calculate_travel_stress(home_team_id, game_date, db)
+        except Exception:
+            pass
+        try:
+            if away_team_id:
+                away_travel_stress = calculate_travel_stress(away_team_id, game_date, db)
+        except Exception:
+            pass
+
+        # ── 6. Projections ────────────────────────────────────────────────
         f5_projection = calculate_f5_projection(
             v3_total, umpire_impact, home_starter_xera, away_starter_xera
         )
@@ -127,7 +142,7 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
         )
         v4_total = f5_projection + late_inning_projection
 
-        # ── 6. F5 line comparison ─────────────────────────────────────────
+        # ── 7. F5 line comparison ─────────────────────────────────────────
         # Look for an F5 line; fall back to v3_total * 0.45 as neutral line
         from app.models.schema import F5LineV4
         f5_line_row = (
@@ -145,7 +160,7 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
             f5_pick = None
             f5_edge_pct = 0.0
 
-        # ── 7. Agreement / convergence flags ─────────────────────────────
+        # ── 8. Agreement / convergence flags ─────────────────────────────
         v3_v4_agreement = abs(v4_total - v3_total) < 0.5
         bullpen_convergence = (home_bullpen > 0.7 and away_bullpen > 0.7) or \
                               (home_bullpen < 0.3 and away_bullpen < 0.3)
@@ -162,7 +177,7 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
         # v4 doesn't change win probability — use v3 as baseline
         v4_home_win_pct = v3_home_win_pct
 
-        # ── 8. Upsert to sandbox_predictions_v4 ──────────────────────────
+        # ── 9. Upsert to sandbox_predictions_v4 ──────────────────────────
         existing = (
             db.query(SandboxPredictionV4)
             .filter(SandboxPredictionV4.game_id == game_id)
@@ -184,6 +199,8 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
             existing.v4_home_win_pct = v4_home_win_pct
             existing.v4_confidence = v4_confidence
             existing.v3_v4_agreement = v3_v4_agreement
+            existing.travel_stress_home = home_travel_stress
+            existing.travel_stress_away = away_travel_stress
         else:
             db.add(SandboxPredictionV4(
                 game_id=game_id,
@@ -206,13 +223,16 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
                 v4_home_win_pct=v4_home_win_pct,
                 v4_confidence=v4_confidence,
                 v3_v4_agreement=v3_v4_agreement,
+                travel_stress_home=home_travel_stress,
+                travel_stress_away=away_travel_stress,
             ))
         db.commit()
         print(
             f"[v4 sandbox] game_id={game_id} "
             f"v3_total={v3_total:.1f} "
             f"v4_total={v4_total:.1f} "
-            f"agreement={v3_v4_agreement}",
+            f"agreement={v3_v4_agreement} "
+            f"travel_stress=home:{home_travel_stress:.2f}/away:{away_travel_stress:.2f}",
             flush=True,
         )
 
@@ -234,6 +254,8 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
             "v4_home_win_pct": v4_home_win_pct,
             "v4_confidence": v4_confidence,
             "v3_v4_agreement": v3_v4_agreement,
+            "travel_stress_home": home_travel_stress,
+            "travel_stress_away": away_travel_stress,
             "away_team": game.away_team,
             "home_team": game.home_team,
         }
