@@ -1,68 +1,88 @@
-import os
-
-import anthropic
-
-_SYSTEM = (
-    "You are a sharp MLB betting analyst. Write 2-3 sentences explaining why this pick has edge. "
-    "Be specific about the stats. Use plain text, no markdown, no emojis. Be confident but concise."
-)
-
-
 def generate_pick_explanation(game_data: dict) -> str:
-    try:
-        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    if not game_data:
+        return ""
 
-        away = game_data.get("away_team", "")
-        home = game_data.get("home_team", "")
-        play = game_data.get("recommended_play", "")
-        edge_pct = float(game_data.get("edge_pct") or 0)
-        ev = float(game_data.get("ev") or 0)
+    play = game_data.get("recommended_play", "")
+    away = game_data.get("away_team", "")
+    home = game_data.get("home_team", "")
+    edge_pct = game_data.get("edge_pct")
+    ev = game_data.get("ev")
 
-        away_starter = game_data.get("away_starter") or "Unknown"
-        home_starter = game_data.get("home_starter") or "Unknown"
-        away_xera = game_data.get("away_starter_xera")
-        home_xera = game_data.get("home_starter_xera")
+    if not play or edge_pct is None or ev is None:
+        return ""
 
-        wind_factor = game_data.get("wind_factor")
-        temp_f = game_data.get("temp_f")
-        travel_stress_away = game_data.get("travel_stress_away")
-        travel_stress_home = game_data.get("travel_stress_home")
-        home_bullpen = game_data.get("home_bullpen_strength")
-        away_bullpen = game_data.get("away_bullpen_strength")
+    edge_pct = float(edge_pct)
+    ev = float(ev)
 
-        away_era_str = f" (xERA: {float(away_xera):.2f})" if away_xera is not None else ""
-        home_era_str = f" (xERA: {float(home_xera):.2f})" if home_xera is not None else ""
+    sentences = []
+    is_totals = play in ("over", "under")
 
-        lines = [
-            f"Game: {away} @ {home}",
-            f"Pick: {play}",
-            f"Edge: {edge_pct:.1%} | EV: {ev:.1%}",
-            f"Away starter: {away_starter}{away_era_str}",
-            f"Home starter: {home_starter}{home_era_str}",
-        ]
+    away_starter = game_data.get("away_starter") or ""
+    home_starter = game_data.get("home_starter") or ""
+    away_xera = game_data.get("away_starter_xera")
+    home_xera = game_data.get("home_starter_xera")
+    wind_factor = game_data.get("wind_factor")
+    travel_stress_away = game_data.get("travel_stress_away")
+    home_bullpen = game_data.get("home_bullpen_strength")
+    away_bullpen = game_data.get("away_bullpen_strength")
+    park = game_data.get("park") or "this park"
 
-        if wind_factor is not None:
-            lines.append(f"Wind factor: {float(wind_factor):.2f}")
-        if temp_f is not None:
-            lines.append(f"Temp: {float(temp_f):.0f}F")
-        if travel_stress_away is not None:
-            lines.append(f"Away travel stress: {float(travel_stress_away):.2f}")
-        if travel_stress_home is not None:
-            lines.append(f"Home travel stress: {float(travel_stress_home):.2f}")
-        if home_bullpen is not None:
-            lines.append(f"Home bullpen strength: {float(home_bullpen):.2f}")
-        if away_bullpen is not None:
-            lines.append(f"Away bullpen strength: {float(away_bullpen):.2f}")
+    if not is_totals:
+        if play == "away_ml":
+            starter_name = away_starter
+            starter_xera = away_xera
+            team = away
+            opponent_starter = home_starter
+        else:
+            starter_name = home_starter
+            starter_xera = home_xera
+            team = home
+            opponent_starter = away_starter
 
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=150,
-            system=_SYSTEM,
-            messages=[{"role": "user", "content": "\n".join(lines)}],
+        if starter_name:
+            if starter_xera is not None:
+                sentences.append(
+                    f"{starter_name} ({float(starter_xera):.2f} xERA) gives {team} a clear pitching edge."
+                )
+            elif opponent_starter:
+                sentences.append(
+                    f"{starter_name} is projected to outperform {opponent_starter}."
+                )
+
+    if wind_factor is not None:
+        wf = float(wind_factor)
+        if wf < -0.3:
+            sentences.append(
+                f"Wind blowing IN at {park} ({wf:.2f} factor) suppresses fly ball carry, favoring the under."
+            )
+        elif wf > 0.3:
+            sentences.append(
+                f"Wind blowing OUT ({wf:.2f} factor) inflates run environment, favoring the over."
+            )
+
+    if travel_stress_away is not None and float(travel_stress_away) > 0.25:
+        sentences.append(
+            f"The {away} carry a {float(travel_stress_away):.0%} travel stress penalty after crossing time zones."
         )
 
-        explanation = response.content[0].text.strip()
-        print(f"[ai explain] generated for game_id={game_data.get('game_id', '?')}", flush=True)
-        return explanation
-    except Exception:
-        return ""
+    bullpen_line = None
+    if not is_totals:
+        if play == "away_ml" and away_bullpen is not None and float(away_bullpen) < 0.4:
+            bullpen_line = f"{away} bullpen is at {float(away_bullpen):.0%} availability — late inning vulnerability increases."
+        elif play == "home_ml" and home_bullpen is not None and float(home_bullpen) < 0.4:
+            bullpen_line = f"{home} bullpen is at {float(home_bullpen):.0%} availability — late inning vulnerability increases."
+    else:
+        if home_bullpen is not None and float(home_bullpen) < 0.4:
+            bullpen_line = f"{home} bullpen is at {float(home_bullpen):.0%} availability — late inning vulnerability increases."
+        elif away_bullpen is not None and float(away_bullpen) < 0.4:
+            bullpen_line = f"{away} bullpen is at {float(away_bullpen):.0%} availability — late inning vulnerability increases."
+
+    if bullpen_line:
+        sentences.append(bullpen_line)
+
+    edge_line = f"Model projects {edge_pct:.1%} edge with {ev:.1%} expected value."
+
+    body = sentences[:2]
+    body.append(edge_line)
+
+    return " ".join(body)
