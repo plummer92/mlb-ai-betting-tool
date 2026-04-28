@@ -307,6 +307,24 @@ async def run_daily_pipeline(db: Session, target_date: date | None = None) -> di
         diagnostic_label="daily-run",
     )
 
+    # Step: v4 sandbox (non-blocking, never affects v3)
+    v4_ok = 0
+    v4_errors = []
+    from app.services.sandbox_simulator import run_v4_sandbox
+    game_records = db.query(Game).filter(Game.game_date == today).all()
+    for game in game_records:
+        try:
+            result = run_v4_sandbox(game.game_id, db)
+            if result:
+                v4_ok += 1
+        except Exception as e:
+            v4_errors.append({"game_id": game.game_id, "error": str(e)})
+    results["steps"]["sandbox_v4"] = {
+        "status": "ok" if not v4_errors else "partial",
+        "ran": v4_ok,
+        "errors": v4_errors,
+    }
+
     stored, odds_result = await sync_odds_for_snapshot(
         db,
         snapshot_type=SnapshotType.open,
