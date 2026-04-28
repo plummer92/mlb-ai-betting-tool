@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import ALERT_DESTINATION
 from app.models.schema import BetAlert, EdgeResult, Game, Prediction, GameOdds, SandboxPredictionV4
+from app.services.explanation_service import generate_pick_explanation
 from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.edge_service import get_trustworthy_active_edges, TOTAL_STD_DEV
 from app.services.notification_service import send_alert_message
@@ -110,15 +111,22 @@ def qualifies_for_alert(edge: EdgeResult) -> bool:
     return False
 
 
-def _get_weather_summary(db: Session, game_id: int) -> str:
-    """One-line weather summary from sandbox_predictions_v4, or empty string if unavailable."""
+def _get_sandbox_row(db: Session, game_id: int):
+    """Fetch the latest SandboxPredictionV4 row for a game, or None."""
     try:
-        row = (
+        return (
             db.query(SandboxPredictionV4)
             .filter(SandboxPredictionV4.game_id == game_id)
             .order_by(SandboxPredictionV4.created_at.desc())
             .first()
         )
+    except Exception:
+        return None
+
+
+def _get_weather_summary(row) -> str:
+    """One-line weather summary from a SandboxPredictionV4 row, or empty string."""
+    try:
         if not row:
             return ""
         if row.is_dome:
@@ -163,8 +171,49 @@ def build_sniper_alert_message(game: Game, edge: EdgeResult, db: Session) -> str
     else:
         odds_field = f"**Odds:** {avg_odds}"
 
-    weather = _get_weather_summary(db, game.game_id)
+    sandbox_row = _get_sandbox_row(db, game.game_id)
+    weather = _get_weather_summary(sandbox_row)
     weather_line = f"\n{weather}" if weather else ""
+
+    # Build AI explanation
+    ev = 0.0
+    if play == "away_ml":
+        ev = float(edge.ev_away or 0)
+    elif play == "home_ml":
+        ev = float(edge.ev_home or 0)
+    elif play == "under":
+        ev = float(edge.ev_under or 0)
+    elif play == "over":
+        ev = float(edge.ev_over or 0)
+
+    prediction_row = (
+        db.query(Prediction)
+        .filter(Prediction.game_id == game.game_id, Prediction.is_active.is_(True))
+        .order_by(Prediction.prediction_id.desc())
+        .first()
+    )
+
+    game_data = {
+        "game_id": game.game_id,
+        "away_team": away,
+        "home_team": home,
+        "recommended_play": play,
+        "edge_pct": float(edge.edge_pct or 0),
+        "ev": ev,
+        "away_starter": game.away_probable_pitcher,
+        "home_starter": game.home_probable_pitcher,
+        "away_starter_xera": float(prediction_row.away_starter_xera) if prediction_row and prediction_row.away_starter_xera is not None else None,
+        "home_starter_xera": float(prediction_row.home_starter_xera) if prediction_row and prediction_row.home_starter_xera is not None else None,
+        "wind_factor": float(sandbox_row.wind_factor) if sandbox_row and sandbox_row.wind_factor is not None else None,
+        "temp_f": float(sandbox_row.temp_f) if sandbox_row and sandbox_row.temp_f is not None else None,
+        "travel_stress_away": float(sandbox_row.travel_stress_away) if sandbox_row and sandbox_row.travel_stress_away is not None else None,
+        "travel_stress_home": float(sandbox_row.travel_stress_home) if sandbox_row and sandbox_row.travel_stress_home is not None else None,
+        "home_bullpen_strength": float(sandbox_row.home_bullpen_strength) if sandbox_row and sandbox_row.home_bullpen_strength is not None else None,
+        "away_bullpen_strength": float(sandbox_row.away_bullpen_strength) if sandbox_row and sandbox_row.away_bullpen_strength is not None else None,
+    }
+
+    explanation = generate_pick_explanation(game_data)
+    explanation_line = f"\n📊 **Analysis:** {explanation}" if explanation else ""
 
     return (
         f"🎯 **SNIPER ALERT** 🎯\n\n"
@@ -173,6 +222,7 @@ def build_sniper_alert_message(game: Game, edge: EdgeResult, db: Session) -> str
         f"**Confidence:** {confidence:.1f}%\n"
         f"{odds_field}"
         f"{weather_line}"
+        f"{explanation_line}"
     )
 
 

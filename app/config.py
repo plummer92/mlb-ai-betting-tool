@@ -25,6 +25,8 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 ALERT_DESTINATION = os.getenv("ALERT_DESTINATION", "discord")
 POSTGAME_LOOKBACK_HOURS = int(os.getenv("POSTGAME_LOOKBACK_HOURS", "12"))
 
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+
 BETTING_ENABLED = os.getenv("BETTING_ENABLED", "false").strip().lower() == "true"
 BETTING_MODE = os.getenv("BETTING_MODE", "paper").strip().lower()
 BOOK_PROVIDER = os.getenv("BOOK_PROVIDER", "paper").strip().lower()
