@@ -448,6 +448,9 @@ class SandboxPredictionV4(Base):
     is_series_opener = Column(Boolean, default=False)
     is_series_finale = Column(Boolean, default=False)
 
+    # v0.5 home-dog / public-fade factor
+    public_bias_edge = Column(Float, nullable=True)
+
     f5_result = Column(String(10), nullable=True)
     full_game_result = Column(String(10), nullable=True)
     f5_graded_at = Column(DateTime(timezone=True), nullable=True)

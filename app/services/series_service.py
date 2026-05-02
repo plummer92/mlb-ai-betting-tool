@@ -6,12 +6,14 @@ finale). Never raises — returns safe defaults on any error.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
+from typing import Optional
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.schema import Game
+from app.services.travel_service import TIMEZONE_MAP
 
 _DEFAULT_POSITION: dict = {
     "series_game_number": 1,
@@ -89,6 +91,44 @@ def get_series_position(team_id: int, game_date: date, db: Session) -> dict:
 
     except Exception:
         return dict(_DEFAULT_POSITION)
+
+
+def get_public_bias_edge(
+    game_date: date,
+    start_time: Optional[str],
+    home_win_pct: float,
+    away_win_pct: float,
+    home_team_id: Optional[int],
+) -> float:
+    """
+    Home-dog / public-fade factor based on game timing and win probability.
+
+    Public money on weekends skews toward the visible away favorite, leaving
+    the home underdog undervalued. Midweek sharp action punishes the weaker
+    team without the crowd-noise mask.
+    """
+    try:
+        home_is_underdog = home_win_pct < 0.45
+        day = game_date.weekday()          # 0=Mon … 4=Fri, 5=Sat, 6=Sun
+        is_weekend = day in (4, 5, 6)
+
+        # Convert UTC start_time to local hour at home park
+        hour = 19  # safe default (evening game)
+        if start_time and home_team_id:
+            ts = start_time.replace("Z", "+00:00")
+            utc_dt = datetime.fromisoformat(ts)
+            utc_offset = TIMEZONE_MAP.get(home_team_id, -5)
+            hour = (utc_dt.hour + utc_offset) % 24
+
+        if home_is_underdog and is_weekend and hour >= 17:
+            return +0.06   # public backs away favorite, home dog undervalued
+        if home_is_underdog and not is_weekend:
+            return -0.04   # no crowd boost, sharp money, better team wins
+        if not home_is_underdog and is_weekend and hour >= 17:
+            return +0.03   # home favorite gets extra crowd boost
+        return 0.0
+    except Exception:
+        return 0.0
 
 
 def get_series_opener_edge(series_position: dict) -> float:

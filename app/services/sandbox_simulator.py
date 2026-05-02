@@ -16,7 +16,11 @@ from app.services.bullpen_calc import (
     collect_reliever_workload,
     get_team_bullpen_availability,
 )
-from app.services.series_service import get_series_opener_edge, get_series_position
+from app.services.series_service import (
+    get_public_bias_edge,
+    get_series_opener_edge,
+    get_series_position,
+)
 from app.services.travel_service import calculate_travel_stress
 from app.services.umpire_service import collect_umpire_for_game
 from app.services.weather_service import fetch_park_weather
@@ -183,6 +187,29 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
         except Exception:
             pass
 
+        # ── 6.6. Public bias / home-dog fade ─────────────────────────────
+        public_bias_edge = 0.0
+        home_is_underdog = False
+        is_weekend_game = False
+        try:
+            public_bias_edge = get_public_bias_edge(
+                game_date,
+                game.start_time,
+                v3_home_win_pct,
+                1.0 - v3_home_win_pct,
+                home_team_id,
+            )
+            home_is_underdog = v3_home_win_pct < 0.45
+            is_weekend_game = game_date.weekday() in (4, 5, 6)
+            print(
+                f"[v4 public bias] game_id={game_id} "
+                f"underdog={home_is_underdog} weekend={is_weekend_game} "
+                f"edge={public_bias_edge:.2f}",
+                flush=True,
+            )
+        except Exception:
+            pass
+
         # ── 7. Projections ────────────────────────────────────────────────
         f5_projection = calculate_f5_projection(
             v3_total, umpire_impact, home_starter_xera, away_starter_xera
@@ -231,8 +258,22 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
         if umpire_name != "Unknown":
             v4_confidence += 0.3
 
-        # v4 doesn't change win probability — use v3 as baseline
-        v4_home_win_pct = v3_home_win_pct
+        # v4 win probability: v3 baseline adjusted by public-bias fade factor
+        v4_home_win_pct = min(0.95, max(0.05, v3_home_win_pct + public_bias_edge))
+
+        # Explanation driven by public-bias magnitude
+        if public_bias_edge > 0.04:
+            bias_explanation = (
+                "Weekend public money inflates the away favorite — "
+                "the home underdog carries hidden value."
+            )
+        elif public_bias_edge < -0.02:
+            bias_explanation = (
+                "Midweek sharp action favors the better team — "
+                "no crowd effect to mask the talent gap."
+            )
+        else:
+            bias_explanation = None
 
         # ── 10. Upsert to sandbox_predictions_v4 ─────────────────────────
         existing = (
@@ -265,6 +306,7 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
             existing.series_game_number = series_game_number
             existing.is_series_opener = is_series_opener
             existing.is_series_finale = is_series_finale
+            existing.public_bias_edge = public_bias_edge
         else:
             db.add(SandboxPredictionV4(
                 game_id=game_id,
@@ -296,6 +338,7 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
                 series_game_number=series_game_number,
                 is_series_opener=is_series_opener,
                 is_series_finale=is_series_finale,
+                public_bias_edge=public_bias_edge,
             ))
         db.commit()
         print(
@@ -335,6 +378,8 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
             "series_game_number": series_game_number,
             "is_series_opener": is_series_opener,
             "is_series_finale": is_series_finale,
+            "public_bias_edge": public_bias_edge,
+            "bias_explanation": bias_explanation,
             "away_team": game.away_team,
             "home_team": game.home_team,
         }
