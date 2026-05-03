@@ -1,5 +1,6 @@
 import json
 import traceback
+from datetime import date
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.orm import Session
@@ -7,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.db import SessionLocal, get_db
 from app.models.schema import BacktestResult
 from app.services.backtest_service import POINT_IN_TIME_WARNING, collect_season, run_analysis, run_logistic_regression
+from app.services.signal_backtest_service import run_signal_backtest
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
@@ -100,6 +102,21 @@ def backtest_analysis_report(
     """
     season_list = [int(x.strip()) for x in seasons.split(",") if x.strip()]
     return run_analysis(db, season_list)
+
+
+@router.get("/signals")
+def signal_backtest_report(
+    start_date: date = Query(default=date(2026, 3, 27)),
+    end_date: date = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """
+    Back-test v0.5 signals (travel stress, series position, public-bias timing)
+    against actual outcomes stored in game_outcomes_review.
+    """
+    if end_date is None:
+        end_date = date.today()
+    return run_signal_backtest(db, start_date, end_date)
 
 
 @router.get("/latest")
