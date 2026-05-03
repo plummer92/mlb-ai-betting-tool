@@ -79,6 +79,7 @@ def run_model(game_id: int, db: Session = Depends(get_db)):
         sim_count=1000,
         market_home_prob=market_home_prob,
         logistic_home_prob=logistic_home_prob,
+        game_date=game.game_date,
     )
     cal_home = cal_away = None
     if cal_params:

@@ -27,6 +27,7 @@ BETTING_PROFILES: dict[str, dict] = {
         "max_edge": 0.10,
         "min_ev": 0.08,
         "allowed_confidences": {"medium", "strong"},
+        "min_confidence_score": 72.0,
     },
     # Unders were the weakest overall market in the current history, so they
     # are disabled until the model is recalibrated.
@@ -36,6 +37,7 @@ BETTING_PROFILES: dict[str, dict] = {
         "max_edge": 0.10,
         "min_ev": 0.08,
         "allowed_confidences": {"medium", "strong"},
+        "min_confidence_score": 72.0,
     },
 }
 
@@ -50,6 +52,7 @@ def qualifies_for_bet_policy(
     edge_pct: float | None,
     ev: float | None,
     confidence: str | None,
+    confidence_score: float | None = None,
 ) -> bool:
     profile = get_betting_profile(play)
     if not profile.get("enabled"):
@@ -70,6 +73,10 @@ def qualifies_for_bet_policy(
 
     allowed_confidences = profile.get("allowed_confidences") or set()
     if allowed_confidences and normalized_confidence not in allowed_confidences:
+        return False
+
+    min_cs = profile.get("min_confidence_score")
+    if min_cs is not None and confidence_score is not None and confidence_score < float(min_cs):
         return False
 
     return True

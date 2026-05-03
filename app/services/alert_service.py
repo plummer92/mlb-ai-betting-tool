@@ -75,7 +75,7 @@ def get_average_odds(db: Session, game_id: int, play: str) -> str:
 def qualifies_for_alert(edge: EdgeResult) -> bool:
     """
     Sniper Alert Criteria:
-    - Totals: Confidence >= 70.0%
+    - Totals: Confidence >= 72.0%
     - Moneyline: Confidence >= 80.0%
     """
     play = edge.recommended_play
@@ -92,22 +92,23 @@ def qualifies_for_alert(edge: EdgeResult) -> bool:
     elif play == "over":
         ev = float(edge.ev_over or 0)
 
+    sniper_confidence = get_sniper_confidence(edge)
+
     if not qualifies_for_bet_policy(
         play=play,
         edge_pct=float(edge.edge_pct or 0),
         ev=ev,
         confidence=edge.confidence_tier,
+        confidence_score=sniper_confidence,
     ):
         return False
 
-    confidence = get_sniper_confidence(edge)
-    
     if play in ["over", "under"]:
-        return confidence >= 70.0
-    
+        return sniper_confidence >= 72.0
+
     if play in ["away_ml", "home_ml"]:
-        return confidence >= 80.0
-        
+        return sniper_confidence >= 80.0
+
     return False
 
 

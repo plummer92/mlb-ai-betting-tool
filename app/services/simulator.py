@@ -1,8 +1,10 @@
 import math
+from datetime import date, datetime
 
 import numpy as np
 
 LEAGUE_AVG_RPG = 4.4
+EARLY_SEASON_TOTAL_FACTOR = 0.82  # pitchers ahead of hitters in April/May
 _OPS_W = 0.32
 _RUN_DIFF_W = 0.26
 _PYTHAG_W = 0.22
@@ -15,7 +17,7 @@ PROBABILITY_SHRINK = 0.68
 FINAL_PROBABILITY_FLOOR = 0.05
 FINAL_PROBABILITY_CEILING = 0.95
 
-MODEL_VERSION = "v0.3-market-anchored"
+MODEL_VERSION = "v0.4-early-season-adj"
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
@@ -97,6 +99,7 @@ def run_monte_carlo(
     *,
     market_home_prob: float | None = None,
     logistic_home_prob: float | None = None,
+    game_date: "date | str | None" = None,
 ) -> dict:
     away_scores = []
     home_scores = []
@@ -142,8 +145,17 @@ def run_monte_carlo(
     home_win_pct = _clamp(home_win_pct, FINAL_PROBABILITY_FLOOR, FINAL_PROBABILITY_CEILING)
     away_win_pct = _clamp(1.0 - home_win_pct, FINAL_PROBABILITY_FLOOR, FINAL_PROBABILITY_CEILING)
 
-    projected_away_score = sum(away_scores) / sim_count
-    projected_home_score = sum(home_scores) / sim_count
+    early_season_adj = 1.0
+    if game_date is not None:
+        try:
+            gd = game_date if isinstance(game_date, date) else datetime.fromisoformat(str(game_date)).date()
+            if gd < date(gd.year, 6, 1):
+                early_season_adj = EARLY_SEASON_TOTAL_FACTOR
+        except (ValueError, TypeError):
+            pass
+
+    projected_away_score = (sum(away_scores) / sim_count) * early_season_adj
+    projected_home_score = (sum(home_scores) / sim_count) * early_season_adj
     projected_total = projected_away_score + projected_home_score
     confidence_score = abs(home_win_pct - away_win_pct) * 100
     recommended_side = "AWAY" if away_win_pct > home_win_pct else "HOME"
@@ -163,4 +175,5 @@ def run_monte_carlo(
         "logistic_delta": logistic_delta,
         "away_lambda": round(away_lambda, 3),
         "home_lambda": round(home_lambda, 3),
+        "early_season_adj": round(early_season_adj, 2),
     }
