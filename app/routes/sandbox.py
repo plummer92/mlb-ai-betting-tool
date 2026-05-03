@@ -191,6 +191,64 @@ def grade_sandbox_predictions(db: Session = Depends(get_db)):
     return {"graded": graded_count, "remaining_ungraded": len(ungraded) - graded_count}
 
 
+# ── 6. Today's predictions with all v0.5 signal fields ──────────────────────
+
+@router.get("/signals/today")
+def get_signals_today(db: Session = Depends(get_db)):
+    """Today's sandbox predictions with all v0.5 signal fields for the Signal Intelligence panel."""
+    today = date.today()
+    rows = (
+        db.query(SandboxPredictionV4)
+        .filter(SandboxPredictionV4.game_date == today)
+        .order_by(SandboxPredictionV4.created_at.desc())
+        .all()
+    )
+    game_ids = [r.game_id for r in rows if r.game_id]
+    games_by_id: dict = {}
+    if game_ids:
+        for g in db.query(Game).filter(Game.game_id.in_(game_ids)).all():
+            games_by_id[g.game_id] = g
+    return [_signal_to_dict(r, games_by_id.get(r.game_id)) for r in rows]
+
+
+def _signal_to_dict(r: SandboxPredictionV4, game=None) -> dict:
+    parts = []
+    if r.wind_factor is not None:
+        if r.wind_factor < -0.3:
+            parts.append("strong wind blowing in suppresses scoring")
+        elif r.wind_factor > 0.3:
+            parts.append("wind blowing out to CF elevates run scoring")
+    if r.travel_stress_away is not None and r.travel_stress_away > 0.25:
+        parts.append(f"away team carrying {int(r.travel_stress_away * 100)}% travel stress")
+    if r.is_series_opener:
+        parts.append("series opener — starters fresh, bullpens reset")
+    if r.is_series_finale:
+        parts.append("series finale — potential lineup and bullpen fatigue")
+    if r.public_bias_edge is not None:
+        if r.public_bias_edge >= 0.06:
+            parts.append("weekend home-dog fade opportunity")
+        elif r.public_bias_edge <= -0.04:
+            parts.append("public favorite inflated — weekday fade edge on dog")
+    explanation = "; ".join(parts) if parts else "No significant signals detected."
+
+    base = _pred_to_dict(r)
+    base.update({
+        "wind_factor": r.wind_factor,
+        "temp_f": r.temp_f,
+        "humidity_pct": r.humidity_pct,
+        "is_dome": r.is_dome,
+        "travel_stress_home": r.travel_stress_home,
+        "travel_stress_away": r.travel_stress_away,
+        "series_game_number": r.series_game_number,
+        "is_series_opener": r.is_series_opener,
+        "is_series_finale": r.is_series_finale,
+        "public_bias_edge": r.public_bias_edge,
+        "start_time": game.start_time if game else None,
+        "explanation": explanation,
+    })
+    return base
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _pred_to_dict(r: SandboxPredictionV4) -> dict:

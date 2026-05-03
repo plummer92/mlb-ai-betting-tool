@@ -774,6 +774,13 @@ tr:hover td { background: rgba(6,182,212,0.025); }
 .muted  { color: var(--muted); }
 .mono   { font-family: monospace; }
 
+/* ── Signal badges ── */
+.sig-red    { background: var(--red-dim);    color: var(--red);    border: 1px solid rgba(239,68,68,0.3); }
+.sig-green  { background: var(--green-dim);  color: var(--green);  border: 1px solid rgba(16,185,129,0.3); }
+.sig-orange { background: var(--orange-dim); color: var(--orange); border: 1px solid rgba(249,115,22,0.3); }
+.sig-blue   { background: #0c1a3a;           color: var(--blue);   border: 1px solid rgba(59,130,246,0.3); }
+.sig-yellow { background: var(--yellow-dim); color: var(--yellow); border: 1px solid rgba(245,158,11,0.3); }
+
 @media (max-width: 600px) {
   .container { padding: 14px 16px; }
   .header { padding: 0 16px; }
@@ -874,6 +881,18 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     </div>
     <div class="game-grid" id="game-grid">
       <div class="loading">Loading intel</div>
+    </div>
+  </div>
+
+  <!-- ═══════════════ 4. v0.5 SIGNAL INTELLIGENCE ═══════════════ -->
+  <div class="section">
+    <div class="section-head">
+      <div class="section-label">v0.5 Signal Intelligence</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="signals-badge">—</div>
+    </div>
+    <div class="game-grid" id="signals-grid">
+      <div class="loading">Loading signal intelligence</div>
     </div>
   </div>
 
@@ -1522,8 +1541,75 @@ function closeModal(e) {
   $('deep-dive-modal').style.display = 'none';
 }
 
+async function loadSignals() {
+  try {
+    const res = await fetch('/api/sandbox/signals/today');
+    const items = await res.json();
+    $('signals-badge').textContent = items.length
+      ? `${items.length} GAME${items.length !== 1 ? 'S' : ''}`
+      : 'NO DATA';
+
+    if (!items.length) {
+      $('signals-grid').innerHTML = '<div class="empty">No sandbox predictions for today yet.</div>';
+      return;
+    }
+
+    const cards = items.map(p => {
+      const badges = [];
+      if (p.wind_factor != null) {
+        if (p.wind_factor < -0.3)      badges.push(`<span class="chip sig-red">🌬️ Wind IN</span>`);
+        else if (p.wind_factor > 0.3)  badges.push(`<span class="chip sig-green">💨 Wind OUT</span>`);
+      }
+      if (p.travel_stress_away != null && p.travel_stress_away > 0.25) {
+        badges.push(`<span class="chip sig-orange">✈️ Travel ${Math.round(p.travel_stress_away * 100)}%</span>`);
+      }
+      if (p.is_series_opener)  badges.push(`<span class="chip sig-blue">🏟️ Game 1</span>`);
+      if (p.is_series_finale)  badges.push(`<span class="chip sig-yellow">🔚 Finale</span>`);
+      if (p.public_bias_edge != null) {
+        if (p.public_bias_edge >= 0.06)       badges.push(`<span class="chip sig-green">🐶 Weekend Dog</span>`);
+        else if (p.public_bias_edge <= -0.04) badges.push(`<span class="chip sig-red">📉 Weekday Fade</span>`);
+      }
+
+      const stackHtml = badges.length >= 3
+        ? `<div style="font-weight:700;color:var(--yellow);font-family:monospace;font-size:11px;margin:6px 0;">${badges.length} signals stacking</div>`
+        : '';
+
+      const badgesHtml = badges.length
+        ? `<div style="display:flex;flex-wrap:wrap;gap:5px;margin:8px 0 4px;">${badges.join('')}</div>`
+        : `<div style="color:var(--muted);font-size:11px;font-family:monospace;margin:8px 0 4px;">No active signals</div>`;
+
+      const v4proj = p.full_game_projected_total != null ? fmt(p.full_game_projected_total, 1) : '—';
+      const v3proj = p.v3_projected_total != null ? fmt(p.v3_projected_total, 1) : '—';
+
+      return `<div class="game-card">
+        <div class="gc-header">
+          <div class="gc-matchup">
+            <span class="aw">${esc(p.away_team || '?')}</span>
+            <span class="at">@</span>
+            <span class="hw">${esc(p.home_team || '?')}</span>
+          </div>
+          <div class="gc-status-time">${p.start_time ? gameTime(p.start_time) : '—'}</div>
+        </div>
+        ${badgesHtml}
+        ${stackHtml}
+        <div class="gc-footer" style="margin-top:8px;">
+          <div class="gc-totals">
+            <div>v4 Proj: <strong>${v4proj}</strong></div>
+            <div>v3 Total: <strong>${v3proj}</strong></div>
+          </div>
+        </div>
+        ${p.explanation ? `<div style="margin-top:8px;font-size:11px;color:var(--muted);line-height:1.5;font-family:monospace;">${esc(p.explanation)}</div>` : ''}
+      </div>`;
+    }).join('');
+
+    $('signals-grid').innerHTML = cards;
+  } catch(e) {
+    $('signals-grid').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
+}
+
 async function loadAll() {
-  await Promise.all([loadAccuracy(), loadTopBets(), loadDebrief(), loadCommentary(), loadIntel()]);
+  await Promise.all([loadAccuracy(), loadTopBets(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals()]);
 }
 
 let countdown = 60;
