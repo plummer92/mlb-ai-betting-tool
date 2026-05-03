@@ -311,6 +311,7 @@ async def run_daily_pipeline(db: Session, target_date: date | None = None) -> di
     # Step: v4 sandbox (non-blocking, never affects v3)
     v4_ok = 0
     v4_errors = []
+    v4_results: list[tuple[dict, Game]] = []
     from app.services.sandbox_simulator import run_v4_sandbox
     game_records = db.query(Game).filter(Game.game_date == today).all()
     for game in game_records:
@@ -318,6 +319,7 @@ async def run_daily_pipeline(db: Session, target_date: date | None = None) -> di
             result = run_v4_sandbox(game.game_id, db)
             if result:
                 v4_ok += 1
+                v4_results.append((result, game))
         except Exception as e:
             v4_errors.append({"game_id": game.game_id, "error": str(e)})
     results["steps"]["sandbox_v4"] = {
@@ -325,6 +327,18 @@ async def run_daily_pipeline(db: Session, target_date: date | None = None) -> di
         "ran": v4_ok,
         "errors": v4_errors,
     }
+
+    # Series Opener alerts (non-blocking, separate from sandbox alerts)
+    series_opener_sent = 0
+    try:
+        from app.services.sandbox_alerts import send_series_opener_alert
+        for v4, game in v4_results:
+            if v4.get("is_series_opener"):
+                send_series_opener_alert(v4, game, db)
+                series_opener_sent += 1
+    except Exception as exc:
+        logger.warning("Series opener alerts failed: %s", exc)
+    results["steps"]["series_opener_alerts"] = {"sent": series_opener_sent}
 
     stored, odds_result = await sync_odds_for_snapshot(
         db,

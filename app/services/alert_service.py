@@ -211,6 +211,7 @@ def build_sniper_alert_message(game: Game, edge: EdgeResult, db: Session) -> str
         "travel_stress_home": float(sandbox_row.travel_stress_home) if sandbox_row and sandbox_row.travel_stress_home is not None else None,
         "home_bullpen_strength": float(sandbox_row.home_bullpen_strength) if sandbox_row and sandbox_row.home_bullpen_strength is not None else None,
         "away_bullpen_strength": float(sandbox_row.away_bullpen_strength) if sandbox_row and sandbox_row.away_bullpen_strength is not None else None,
+        "is_series_opener": bool(sandbox_row.is_series_opener) if sandbox_row and sandbox_row.is_series_opener is not None else False,
     }
 
     explanation = generate_pick_explanation(game_data)

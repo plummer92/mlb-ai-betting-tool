@@ -109,3 +109,81 @@ def send_sandbox_alert(v4_pred: dict, game, db: Session) -> None:
             print(f"[v4 alert] Discord HTTP {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
         print(f"[v4 alert] send_sandbox_alert silenced error: {e}")
+
+
+BLUE_COLOR = 3447003  # Series Opener embed color
+
+
+def send_series_opener_alert(v4_pred: dict, game, db: Session) -> None:
+    """
+    Post a Series Opener alert embed to Discord (blue themed).
+    Only sends if DISCORD_SANDBOX_WEBHOOK_URL is set and is_series_opener is True.
+    Never raises on HTTP error or missing data.
+    """
+    try:
+        webhook_url = os.getenv("DISCORD_SANDBOX_WEBHOOK_URL", "").strip()
+        if not webhook_url:
+            return
+        if not v4_pred.get("is_series_opener"):
+            return
+
+        away = v4_pred.get("away_team", "AWAY")
+        home = v4_pred.get("home_team", "HOME")
+        v4_total = v4_pred.get("v4_total", 0.0) or 0.0
+        v3_total = v4_pred.get("v3_total", 0.0) or 0.0
+        away_stress = v4_pred.get("travel_stress_away", 0.0) or 0.0
+        wind_factor = v4_pred.get("wind_factor", 0.0) or 0.0
+        wind_mph = v4_pred.get("wind_mph", 0.0) or 0.0
+        temp_f = v4_pred.get("temp_f") or 72.0
+        is_dome = v4_pred.get("is_dome", False)
+
+        start_time = getattr(game, "start_time", None) or "TBD"
+
+        if is_dome:
+            weather_summary = "\U0001f3df️ Dome — wind neutral"
+        elif wind_factor > 0.3:
+            weather_summary = f"\U0001f4a8 Wind OUT {wind_mph:.0f}mph (+{wind_factor:.2f}) — hitter friendly"
+        elif wind_factor < -0.3:
+            weather_summary = f"\U0001f32c️ Wind IN {wind_mph:.0f}mph ({wind_factor:.2f}) — pitcher friendly"
+        else:
+            weather_summary = f"\U0001f324️ {temp_f:.0f}°F — neutral conditions"
+
+        explanation = (
+            f"Home teams historically win 59.5% of series openers. "
+            f"The {away} are arriving at a new city, facing the typical visitor disadvantage. "
+            f"v4 suppresses the total for Game 1 (proj: {v4_total:.1f} vs v3 baseline: {v3_total:.1f})."
+        )
+
+        stress_value = f"{away_stress:.0%}" if away_stress > 0.1 else "None detected"
+
+        fields = [
+            {"name": "Game Time", "value": str(start_time), "inline": True},
+            {"name": "Series Game", "value": "Game 1 of Series", "inline": True},
+            {"name": "Home Win Edge", "value": "+5.5% vs baseline", "inline": True},
+            {"name": "v4 Total Projection", "value": f"{v4_total:.1f} runs (suppressed for G1)", "inline": True},
+            {"name": "v3 Baseline", "value": f"{v3_total:.1f} runs", "inline": True},
+            {"name": "Away Travel Stress", "value": stress_value, "inline": True},
+            {"name": "Weather/Wind", "value": weather_summary, "inline": False},
+            {"name": "Analysis", "value": explanation, "inline": False},
+        ]
+
+        payload = {
+            "embeds": [
+                {
+                    "title": f"\U0001f3df️ SERIES OPENER ALERT | {away} @ {home}",
+                    "color": BLUE_COLOR,
+                    "description": (
+                        "Home team historically wins 59.5% of series openers "
+                        "— visitor arriving at new city."
+                    ),
+                    "fields": fields,
+                    "footer": {"text": "v0.5 Sandbox — Series Position Signal"},
+                }
+            ]
+        }
+
+        resp = requests.post(webhook_url, json=payload, timeout=10)
+        if not resp.ok:
+            print(f"[series opener alert] Discord HTTP {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        print(f"[series opener alert] send_series_opener_alert silenced error: {e}")

@@ -72,9 +72,9 @@ def generate_pick_explanation(game_data: dict) -> str:
             f"The {away} carry a {float(travel_stress_away):.0%} travel stress penalty after crossing time zones."
         )
 
-    if series_game_number == 1:
+    if is_series_opener or series_game_number == 1:
         sentences.append(
-            "As the series opener, home teams historically hold a first-game advantage over traveling visitors."
+            "As the series opener, home teams win 59.5% historically — visitor arriving at a new city."
         )
 
     bullpen_line = None
