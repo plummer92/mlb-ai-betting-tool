@@ -63,7 +63,11 @@ def generate_pick_explanation(game_data: dict) -> str:
                 f"Wind blowing OUT ({wf:.2f} factor) inflates run environment, favoring the over."
             )
 
-    if travel_stress_away is not None and float(travel_stress_away) > 0.25:
+    if travel_stress_away is not None and float(travel_stress_away) > 0.35:
+        sentences.append(
+            "High travel stress games historically average 10.1 runs — elevated scoring environment."
+        )
+    elif travel_stress_away is not None and float(travel_stress_away) > 0.25:
         sentences.append(
             f"The {away} carry a {float(travel_stress_away):.0%} travel stress penalty after crossing time zones."
         )

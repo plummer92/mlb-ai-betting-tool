@@ -20,6 +20,7 @@ from app.services.series_service import (
     get_public_bias_edge,
     get_series_opener_edge,
     get_series_position,
+    get_travel_over_edge,
 )
 from app.services.travel_service import calculate_travel_stress
 from app.services.umpire_service import collect_umpire_for_game
@@ -224,7 +225,8 @@ def run_v4_sandbox(game_id: int, db: Session) -> Optional[dict]:
             max(0.5, late_inning_projection * (1 + wind_factor * 0.06)), 2
         )
 
-        v4_total = round(f5_projection + late_inning_projection + series_edge, 2)
+        travel_over_boost = get_travel_over_edge(away_travel_stress)
+        v4_total = round(f5_projection + late_inning_projection + series_edge + travel_over_boost, 2)
 
         # ── 8. F5 line comparison ─────────────────────────────────────────
         # Look for an F5 line; fall back to v3_total * 0.45 as neutral line

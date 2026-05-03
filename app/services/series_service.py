@@ -125,25 +125,36 @@ def get_public_bias_edge(
         if home_is_underdog and not is_weekend:
             return -0.04   # no crowd boost, sharp money, better team wins
         if not home_is_underdog and is_weekend and hour >= 17:
-            return +0.03   # home favorite gets extra crowd boost
+            return -0.02   # home favorites slightly underperform on weekend nights
         return 0.0
     except Exception:
         return 0.0
+
+
+def get_travel_over_edge(travel_stress_away: float) -> float:
+    """
+    Run boost for high-travel away teams — an OVER signal.
+
+    High travel stress games (>0.35) average 10.07 runs vs 8.76 baseline.
+    """
+    if travel_stress_away > 0.35:
+        return 0.30
+    return 0.0
 
 
 def get_series_opener_edge(series_position: dict) -> float:
     """
     Run suppression modifier based on series position.
 
-    Game 1 (opener): -0.15  home team advantage, visitor just arrived
+    Game 1 (opener): -0.20  home team advantage, visitor just arrived
     Game 2:           0.0   neutral
-    Game 3+:         +0.10  bullpen fatigue, higher scoring expected
+    Game 3+:         +0.05  bullpen fatigue signal is weak
     """
     game_num = series_position.get("series_game_number")
     if game_num is None:
         return 0.0
     if game_num == 1:
-        return -0.15
+        return -0.20
     if game_num == 2:
         return 0.0
-    return 0.10
+    return 0.05
