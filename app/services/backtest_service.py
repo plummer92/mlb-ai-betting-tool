@@ -36,12 +36,10 @@ _DEFAULT_PYTHAG = 0.500
 _DEFAULT_ODDS_POLICY = "closest_prior"
 
 FEATURE_NAMES = [
-    "home_whip_adv",
-    "home_ops_adv",
-    "run_diff_adv",
+    "pythagorean_win_pct_adv",
     "kbb_adv",
     "park_factor_adv",
-    "pythagorean_win_pct_adv",
+    "run_diff_adv",
 ]
 
 POINT_IN_TIME_WARNING = (
@@ -741,12 +739,10 @@ def _row_to_feature_vector(row: BacktestGame) -> list[float]:
     home_kbb_pct = ((row.home_starter_kbb if row.home_starter_kbb is not None else _DEFAULT_KBB) / 45.0)
     away_kbb_pct = ((row.away_starter_kbb if row.away_starter_kbb is not None else _DEFAULT_KBB) / 45.0)
     return [
-        (row.away_team_whip or _DEFAULT_WHIP) - (row.home_team_whip or _DEFAULT_WHIP),
-        (row.home_team_ops or _DEFAULT_OPS) - (row.away_team_ops or _DEFAULT_OPS),
-        run_diff_home - run_diff_away,
+        (row.home_pythagorean_win_pct or _DEFAULT_PYTHAG) - (row.away_pythagorean_win_pct or _DEFAULT_PYTHAG),
         home_kbb_pct - away_kbb_pct,
         PARK_FACTORS.get(row.venue or "", 0.0),
-        (row.home_pythagorean_win_pct or _DEFAULT_PYTHAG) - (row.away_pythagorean_win_pct or _DEFAULT_PYTHAG),
+        run_diff_home - run_diff_away,
     ]
 
 
@@ -1044,16 +1040,15 @@ def apply_backtest_weights(result: BacktestResult) -> None:
     from app.services.simulator import set_weights
 
     coefs = json.loads(result.coefficients_json)
-    ops_abs = abs(coefs.get("home_ops_adv", 0.32))
     run_diff_abs = abs(coefs.get("run_diff_adv", 0.26))
     pythag_proxy_abs = abs(coefs.get("pythagorean_win_pct_adv", 0.22))
 
-    if ops_abs + run_diff_abs + pythag_proxy_abs == 0:
+    if run_diff_abs + pythag_proxy_abs == 0:
         return
 
-    set_weights(ops_abs, run_diff_abs, pythag_proxy_abs)
+    set_weights(0.0, run_diff_abs, pythag_proxy_abs)
     print(
-        f"[backtest] Simulator weights updated — OPS: {ops_abs:.4f}  "
+        f"[backtest] Simulator weights updated — OPS: 0.0000 (removed)  "
         f"RUN_DIFF: {run_diff_abs:.4f}  PYTHAG: {pythag_proxy_abs:.4f}",
         flush=True,
     )
