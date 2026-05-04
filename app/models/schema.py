@@ -383,8 +383,10 @@ class RelieverWorkload(Base):
     team_id = Column(Integer, nullable=True)
     date = Column(Date, nullable=False)
     pitches_thrown = Column(Integer, default=0)
+    innings_pitched = Column(Float, nullable=True)
     days_rest = Column(Integer, default=99)
     appearances_last_3_days = Column(Integer, default=0)
+    note = Column(String(10), nullable=True)
     player_name = Column(String(100), nullable=True)
     collected_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -400,6 +402,8 @@ class ManagerTendency(Base):
     manager_name = Column(String(100), nullable=True)
     b2b_usage_rate = Column(Float, default=0.3)
     strict_pitch_cap = Column(Integer, default=30)
+    avg_relievers_per_game = Column(Float, nullable=True)
+    avg_bullpen_pitches_per_game = Column(Float, nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 

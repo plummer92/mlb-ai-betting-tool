@@ -26,6 +26,8 @@ from app.services.pipeline_service import (
 )
 from app.services.prediction_service import deactivate_stale_active_predictions
 from app.services.ranked_alerts import send_ranked_bets_to_discord_job
+from app.services.bullpen_calc import collect_reliever_workload
+from app.services.manager_service import track_manager_decision
 from app.services.review_service import resolve_completed_games
 
 scheduler = AsyncIOScheduler(timezone="America/New_York")
@@ -43,6 +45,48 @@ def resolve_yesterday_job():
         print(f"[scheduler] 9am resolve: {result}")
     except (SQLAlchemyError, RuntimeError, ValueError):
         logger.exception("[scheduler] Resolve error")
+    finally:
+        db.close()
+
+
+@scheduler.scheduled_job(CronTrigger(hour=9, minute=15, timezone="America/New_York"))
+def collect_bullpen_workload_job():
+    db = SessionLocal()
+    try:
+        today = datetime.now(ET).date()
+        yesterday = today - timedelta(days=1)
+        three_days_ago = today - timedelta(days=3)
+
+        # Find all teams that played in the last 3 days
+        recent_games = (
+            db.query(Game)
+            .filter(Game.game_date >= three_days_ago, Game.game_date <= yesterday)
+            .all()
+        )
+        team_ids: set[int] = set()
+        for g in recent_games:
+            if g.home_team_id:
+                team_ids.add(g.home_team_id)
+            if g.away_team_id:
+                team_ids.add(g.away_team_id)
+
+        total_rows = 0
+        for team_id in team_ids:
+            n = collect_reliever_workload(team_id, today, db)
+            total_rows += n
+
+        # Update manager tendencies for yesterday's completed games
+        yesterday_games = db.query(Game).filter(Game.game_date == yesterday).all()
+        for g in yesterday_games:
+            for team_id in filter(None, [g.home_team_id, g.away_team_id]):
+                track_manager_decision(team_id, g.game_id, db)
+
+        print(
+            f"[scheduler] Bullpen workload: {total_rows} reliever rows across "
+            f"{len(team_ids)} teams; {len(yesterday_games)} manager updates"
+        )
+    except (SQLAlchemyError, RuntimeError, ValueError):
+        logger.exception("[scheduler] Bullpen workload error")
     finally:
         db.close()
 

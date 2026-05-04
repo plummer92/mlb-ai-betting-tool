@@ -77,17 +77,27 @@ def generate_pick_explanation(game_data: dict) -> str:
             "As the series opener, home teams win 59.5% historically — visitor arriving at a new city."
         )
 
+    def _bullpen_sentence(team: str, strength: float, pitches_key: str, unavail_key: str) -> str:
+        pitches = game_data.get(pitches_key)
+        unavail = game_data.get(unavail_key)
+        if pitches is not None and unavail:
+            return (
+                f"The {team} bullpen has thrown {int(pitches)} pitches in the last 3 days "
+                f"with {int(unavail)} arm{'s' if unavail != 1 else ''} unavailable."
+            )
+        return f"{team} bullpen is at {strength:.0%} availability — late inning vulnerability increases."
+
     bullpen_line = None
     if not is_totals:
         if play == "away_ml" and away_bullpen is not None and float(away_bullpen) < 0.4:
-            bullpen_line = f"{away} bullpen is at {float(away_bullpen):.0%} availability — late inning vulnerability increases."
+            bullpen_line = _bullpen_sentence(away, float(away_bullpen), "away_bullpen_pitches_last_3", "away_unavailable_arms")
         elif play == "home_ml" and home_bullpen is not None and float(home_bullpen) < 0.4:
-            bullpen_line = f"{home} bullpen is at {float(home_bullpen):.0%} availability — late inning vulnerability increases."
+            bullpen_line = _bullpen_sentence(home, float(home_bullpen), "home_bullpen_pitches_last_3", "home_unavailable_arms")
     else:
         if home_bullpen is not None and float(home_bullpen) < 0.4:
-            bullpen_line = f"{home} bullpen is at {float(home_bullpen):.0%} availability — late inning vulnerability increases."
+            bullpen_line = _bullpen_sentence(home, float(home_bullpen), "home_bullpen_pitches_last_3", "home_unavailable_arms")
         elif away_bullpen is not None and float(away_bullpen) < 0.4:
-            bullpen_line = f"{away} bullpen is at {float(away_bullpen):.0%} availability — late inning vulnerability increases."
+            bullpen_line = _bullpen_sentence(away, float(away_bullpen), "away_bullpen_pitches_last_3", "away_unavailable_arms")
 
     if bullpen_line:
         sentences.append(bullpen_line)

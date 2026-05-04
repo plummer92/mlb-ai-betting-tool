@@ -896,6 +896,18 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     </div>
   </div>
 
+  <!-- ═══════════════ 5. BULLPEN INTELLIGENCE ═══════════════ -->
+  <div class="section">
+    <div class="section-head">
+      <div class="section-label">Bullpen Intelligence</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="bullpen-badge">—</div>
+    </div>
+    <div class="game-grid" id="bullpen-grid">
+      <div class="loading">Loading bullpen data</div>
+    </div>
+  </div>
+
 </div><!-- /container -->
 
 <!-- DEEP DIVE MODAL -->
@@ -1608,8 +1620,88 @@ async function loadSignals() {
   }
 }
 
+async function loadBullpen() {
+  try {
+    const res = await fetch('/api/bullpen/today');
+    const reports = await res.json();
+
+    $('bullpen-badge').textContent = reports.length
+      ? `${reports.length} TEAM${reports.length !== 1 ? 'S' : ''}`
+      : 'NO DATA';
+
+    if (!reports.length) {
+      $('bullpen-grid').innerHTML = '<div class="empty">No bullpen data available yet. Collected daily at 9:15am ET.</div>';
+      return;
+    }
+
+    const fatigueConfig = {
+      exhausted: { cls: 'sig-red',    emoji: '🔴', label: 'EXHAUSTED' },
+      tired:     { cls: 'sig-orange', emoji: '🟡', label: 'TIRED' },
+      rested:    { cls: 'sig-blue',   emoji: '🟢', label: 'RESTED' },
+      fresh:     { cls: 'sig-green',  emoji: '🟢', label: 'FRESH' },
+    };
+
+    const cards = reports.map(r => {
+      const sig = fatigueConfig[r.fatigue_signal] || fatigueConfig.rested;
+      const strength = r.bullpen_strength != null ? (r.bullpen_strength * 100).toFixed(0) : '—';
+
+      const fatiguedHtml = (r.fatigued_arms || []).slice(0, 3).map(a =>
+        `<div style="font-size:11px;font-family:monospace;color:var(--red);">
+          ${esc(a.name)} <span class="muted">${a.days_rest === 0 ? 'B2B' : a.days_rest + 'd rest'} · ${a.pitches_last_3}p</span>
+        </div>`
+      ).join('');
+
+      const freshHtml = (r.fresh_arms || []).slice(0, 2).map(a =>
+        `<div style="font-size:11px;font-family:monospace;color:var(--green);">
+          ${esc(a.name)} <span class="muted">${a.days_rest}d rest</span>
+        </div>`
+      ).join('');
+
+      const b2bPct = r.b2b_usage_rate != null ? (r.b2b_usage_rate * 100).toFixed(0) + '%' : '—';
+
+      return `<div class="game-card">
+        <div class="gc-header">
+          <div style="font-size:14px;font-weight:700;">${esc(r.team_name)}</div>
+          <span class="chip ${sig.cls}">${sig.emoji} ${sig.label}</span>
+        </div>
+        <div style="display:flex;gap:16px;margin:8px 0;font-family:monospace;font-size:12px;">
+          <div>
+            <div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.8px;">Strength</div>
+            <div style="color:${r.bullpen_strength < 0.4 ? 'var(--red)' : r.bullpen_strength < 0.7 ? 'var(--yellow)' : 'var(--green)'};">${strength}%</div>
+          </div>
+          <div>
+            <div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.8px;">3-Day Pitches</div>
+            <div>${r.last_3_days_pitches}</div>
+          </div>
+          <div>
+            <div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.8px;">Mgr B2B Rate</div>
+            <div style="color:${r.b2b_usage_rate > 0.38 ? 'var(--orange)' : 'var(--text)'};">${b2bPct}</div>
+          </div>
+        </div>
+        ${fatiguedHtml ? `
+        <div style="margin-top:6px;">
+          <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:4px;">Fatigued Arms</div>
+          ${fatiguedHtml}
+        </div>` : ''}
+        ${freshHtml ? `
+        <div style="margin-top:6px;">
+          <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:4px;">Fresh Arms</div>
+          ${freshHtml}
+        </div>` : ''}
+        <div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border);font-size:10px;font-family:monospace;color:var(--muted);">
+          MGR: ${esc(r.manager_name || '—')}
+        </div>
+      </div>`;
+    }).join('');
+
+    $('bullpen-grid').innerHTML = cards;
+  } catch(e) {
+    $('bullpen-grid').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
+}
+
 async function loadAll() {
-  await Promise.all([loadAccuracy(), loadTopBets(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals()]);
+  await Promise.all([loadAccuracy(), loadTopBets(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
 }
 
 let countdown = 60;

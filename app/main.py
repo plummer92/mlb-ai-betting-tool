@@ -19,6 +19,7 @@ from app.routes.dashboard import router as dashboard_router
 from app.routes.sandbox import router as sandbox_router
 from app.routes.bets import router as bets_router
 from app.routes.admin import router as admin_router
+from app.routes.bullpen import router as bullpen_router
 
 from app.scheduler import scheduler
 
@@ -65,6 +66,7 @@ app.include_router(dashboard_router)
 app.include_router(sandbox_router)
 app.include_router(bets_router)
 app.include_router(admin_router)
+app.include_router(bullpen_router)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 

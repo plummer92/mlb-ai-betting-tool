@@ -73,28 +73,61 @@ def _get_manager(team_id: int, db: Session) -> dict:
     return result
 
 
+def invalidate_manager_cache(team_id: int) -> None:
+    """Remove a team from the in-memory cache so the next read hits the DB."""
+    _manager_cache.pop(team_id, None)
+
+
+def _fetch_game_boxscore(game_id: int) -> dict | None:
+    """Fetch the full boxscore from the dedicated MLB Stats API endpoint."""
+    try:
+        url = f"{MLB_API_BASE}/game/{game_id}/boxscore"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        print(f"[v4 bullpen] _fetch_game_boxscore({game_id}) error: {e}")
+        return None
+
+
+def _parse_innings_pitched(value) -> float | None:
+    """Convert '1.2' (1 full inning + 2 outs) to a float IP value."""
+    if value is None:
+        return None
+    try:
+        s = str(value)
+        whole, _, frac = s.partition(".")
+        outs = int(whole) * 3 + (int(frac[:1]) if frac else 0)
+        return round(outs / 3.0, 3)
+    except (TypeError, ValueError):
+        return None
+
+
 def collect_reliever_workload(team_id: int, target_date: date, db: Session) -> int:
     """
-    Fetch last 3 days of bullpen data from MLB Stats API and upsert into
-    reliever_workload. Returns number of rows upserted, or 0 on failure.
+    Fetch last 3 days of bullpen data from the MLB Stats API boxscore endpoint
+    and upsert into reliever_workload. Returns number of rows upserted, or 0 on failure.
     """
     try:
         three_days_ago = target_date - timedelta(days=3)
         yesterday = target_date - timedelta(days=1)
+
+        # Step 1: get game IDs for this team over the last 3 days
         url = (
             f"{MLB_API_BASE}/schedule"
             f"?teamId={team_id}"
             f"&startDate={three_days_ago.isoformat()}"
             f"&endDate={yesterday.isoformat()}"
-            f"&hydrate=boxscore"
+            f"&sportId=1&gameType=R"
         )
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
-        data = resp.json()
+        schedule = resp.json()
 
         upserted = 0
-        dates = data.get("dates", [])
-        for date_entry in dates:
+        for date_entry in schedule.get("dates", []):
             game_date_str = date_entry.get("date", "")
             try:
                 game_date_obj = date.fromisoformat(game_date_str)
@@ -102,31 +135,50 @@ def collect_reliever_workload(team_id: int, target_date: date, db: Session) -> i
                 continue
 
             for game_entry in date_entry.get("games", []):
-                boxscore = game_entry.get("boxscore", {})
-                # Check both home and away teams for this team_id
+                status = game_entry.get("status", {}).get("abstractGameState", "")
+                if status != "Final":
+                    continue
+
+                game_id = game_entry.get("gamePk")
+                if not game_id:
+                    continue
+
+                # Step 2: fetch the real boxscore for this game
+                boxscore = _fetch_game_boxscore(game_id)
+                if not boxscore:
+                    continue
+
                 for side in ("home", "away"):
                     team_data = boxscore.get("teams", {}).get(side, {})
                     if team_data.get("team", {}).get("id") != team_id:
                         continue
-                    pitchers = team_data.get("pitchers", [])
-                    # Skip index 0 (starter); rest are relievers
-                    for player_id in pitchers[1:]:
-                        player_info = team_data.get("players", {}).get(f"ID{player_id}", {})
-                        stats = player_info.get("stats", {}).get("pitching", {})
-                        pitches = stats.get("pitchesThrown", 0) or 0
-                        player_name = player_info.get("person", {}).get("fullName", "")
 
-                        # Count appearances in last 3 days
+                    pitchers = team_data.get("pitchers", [])
+                    players = team_data.get("players", {})
+
+                    # index 0 is the starter; everything after is a reliever
+                    for player_id in pitchers[1:]:
+                        player_info = players.get(f"ID{player_id}", {})
+                        person = player_info.get("person", {})
+                        player_name = person.get("fullName", "")
+
+                        pitching_stats = player_info.get("stats", {}).get("pitching", {})
+                        pitches = int(pitching_stats.get("pitchesThrown") or 0)
+                        ip = _parse_innings_pitched(pitching_stats.get("inningsPitched"))
+                        note = (pitching_stats.get("note") or "").strip() or None
+
+                        # Appearances in last 3 days (excluding this game)
                         appearances = (
                             db.query(RelieverWorkload)
                             .filter(
                                 RelieverWorkload.player_id == player_id,
                                 RelieverWorkload.date >= three_days_ago,
-                                RelieverWorkload.date <= yesterday,
+                                RelieverWorkload.date < game_date_obj,
                             )
                             .count()
                         )
-                        # Days rest = days since last appearance
+
+                        # Days rest = days since previous appearance
                         last_app = (
                             db.query(RelieverWorkload)
                             .filter(
@@ -136,10 +188,7 @@ def collect_reliever_workload(team_id: int, target_date: date, db: Session) -> i
                             .order_by(RelieverWorkload.date.desc())
                             .first()
                         )
-                        if last_app:
-                            days_rest = (game_date_obj - last_app.date).days
-                        else:
-                            days_rest = 99
+                        days_rest = (game_date_obj - last_app.date).days if last_app else 99
 
                         existing = (
                             db.query(RelieverWorkload)
@@ -151,18 +200,22 @@ def collect_reliever_workload(team_id: int, target_date: date, db: Session) -> i
                         )
                         if existing:
                             existing.pitches_thrown = pitches
+                            existing.innings_pitched = ip
                             existing.days_rest = days_rest
                             existing.appearances_last_3_days = appearances + 1
                             existing.player_name = player_name
+                            existing.note = note
                         else:
                             db.add(RelieverWorkload(
                                 player_id=player_id,
                                 team_id=team_id,
                                 date=game_date_obj,
                                 pitches_thrown=pitches,
+                                innings_pitched=ip,
                                 days_rest=days_rest,
                                 appearances_last_3_days=appearances + 1,
                                 player_name=player_name,
+                                note=note,
                             ))
                         upserted += 1
 
@@ -234,7 +287,6 @@ def get_team_bullpen_availability(team_id: int, target_date: date, db: Session) 
             print(f"[v4 bullpen] team_id={team_id} no workload data → strength=1.00")
             return 1.0
 
-        # Get unique player IDs that appeared
         player_ids = list({r.player_id for r in rows if r.player_id})
         if not player_ids:
             return 1.0
