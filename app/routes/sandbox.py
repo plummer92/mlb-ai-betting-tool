@@ -5,7 +5,7 @@ All read-only except POST /api/sandbox/grade.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Request
@@ -15,6 +15,7 @@ from app.db import get_db
 from app.middleware.auth import verify_api_key
 from app.middleware.limiter import limiter
 from app.models.schema import Game, SandboxPredictionV4, UmpireAssignmentV4
+from app.services.sandbox_grade_service import grade_sandbox_f5_predictions
 
 router = APIRouter(prefix="/api/sandbox", tags=["sandbox"])
 
@@ -149,49 +150,9 @@ def get_umpires(db: Session = Depends(get_db)):
 @limiter.limit("10/minute")
 def grade_sandbox_predictions(request: Request, db: Session = Depends(get_db)):
     """
-    Grade ungraded sandbox predictions by comparing projections to actual scores.
-    Updates f5_result and full_game_result.
+    Grade ungraded sandbox predictions using actual first-five linescore runs.
     """
-    ungraded = (
-        db.query(SandboxPredictionV4)
-        .filter(SandboxPredictionV4.f5_result.is_(None))
-        .all()
-    )
-    graded_count = 0
-    for pred in ungraded:
-        game = db.query(Game).filter(Game.game_id == pred.game_id).first()
-        if not game:
-            continue
-        if game.final_away_score is None or game.final_home_score is None:
-            continue
-
-        actual_total = game.final_away_score + game.final_home_score
-        now = datetime.now(timezone.utc)
-
-        # Grade F5 — approximate first 5 innings as ~55% of final total
-        if pred.f5_projected_total is not None and pred.f5_line is not None:
-            actual_f5_approx = actual_total * 0.55
-            if pred.f5_pick == "OVER":
-                pred.f5_result = "WIN" if actual_f5_approx > pred.f5_line else "LOSS"
-            elif pred.f5_pick == "UNDER":
-                pred.f5_result = "WIN" if actual_f5_approx < pred.f5_line else "LOSS"
-            pred.f5_graded_at = now
-
-        # Grade full game
-        if pred.full_game_projected_total is not None and pred.v3_projected_total is not None:
-            v4_line = pred.v3_projected_total  # use v3 as the line reference
-            if pred.full_game_projected_total > v4_line + 0.3:
-                pred.full_game_result = "WIN" if actual_total > v4_line else "LOSS"
-            elif pred.full_game_projected_total < v4_line - 0.3:
-                pred.full_game_result = "WIN" if actual_total < v4_line else "LOSS"
-            else:
-                pred.full_game_result = "PUSH"
-            pred.full_game_graded_at = now
-
-        graded_count += 1
-
-    db.commit()
-    return {"graded": graded_count, "remaining_ungraded": len(ungraded) - graded_count}
+    return grade_sandbox_f5_predictions(db)
 
 
 # ── 6. Today's predictions with all v0.5 signal fields ──────────────────────
