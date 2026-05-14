@@ -840,6 +840,19 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     </div>
   </div>
 
+  <div class="section">
+    <div class="section-head">
+      <div class="section-label">Best Plays This Week</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="best-week-badge">---</div>
+    </div>
+    <div class="card" style="padding:0;">
+      <div class="tbl-wrap" id="best-week-table">
+        <div class="loading">Loading weekly plays</div>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══════════════ 1. YESTERDAY'S DEBRIEF ═══════════════ -->
   <div class="section">
     <div class="section-head">
@@ -891,6 +904,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
       <div class="section-rule"></div>
       <div class="section-badge" id="signals-badge">—</div>
     </div>
+    <div id="signals-summary"></div>
     <div class="game-grid" id="signals-grid">
       <div class="loading">Loading signal intelligence</div>
     </div>
@@ -984,6 +998,26 @@ function edgeChip(confidence, edgePct) {
 function betChip(result) {
   if (!result || result === 'no_bet') return '<span class="chip c-no_bet">NO BET</span>';
   return `<span class="chip c-${result}">${result.toUpperCase()}</span>`;
+}
+
+function addDays(yyyymmdd, days) {
+  const p = yyyymmdd.split('-');
+  const d = new Date(+p[0], +p[1]-1, +p[2]);
+  d.setDate(d.getDate() + days);
+  return toYMD(d);
+}
+
+function currentStreak(items, valueFn, allowedValues) {
+  let active = null;
+  let count = 0;
+  for (const item of items) {
+    const value = valueFn(item);
+    if (!allowedValues.includes(value)) continue;
+    if (active == null) active = value;
+    if (value !== active) break;
+    count++;
+  }
+  return { value: active, count };
 }
 
 function fmtAmericanOdds(n) {
@@ -1210,6 +1244,53 @@ async function loadTopBets() {
   }
 }
 
+async function loadBestPlaysWeek() {
+  try {
+    const res = await fetch('/api/reviews/recent?limit=100');
+    const all = await res.json();
+    const end = toYMD(new Date());
+    const start = addDays(end, -6);
+    const plays = all
+      .filter(r => {
+        const d = r.date || (r.created_at ? String(r.created_at).slice(0,10) : null);
+        return d && d >= start && d <= end && r.ev != null && r.bet_result && r.bet_result !== 'no_bet';
+      })
+      .sort((a, b) => (b.ev ?? -999) - (a.ev ?? -999))
+      .slice(0, 5);
+
+    $('best-week-badge').textContent = plays.length ? `${plays.length} PLAY${plays.length !== 1 ? 'S' : ''}` : 'NO DATA';
+
+    if (!plays.length) {
+      $('best-week-table').innerHTML = '<div class="empty">No graded EV plays in the last 7 days.</div>';
+      return;
+    }
+
+    const rows = plays.map(p => {
+      const ev = p.ev != null ? (p.ev * 100).toFixed(1) + '%' : '---';
+      const edge = p.edge_pct != null ? (p.edge_pct * 100).toFixed(1) + '%' : '---';
+      return `<tr>
+        <td class="mono">${esc(p.date || '---')}</td>
+        <td style="font-weight:600;white-space:nowrap">${esc(p.matchup || '---')}</td>
+        <td class="mono">${esc(p.predicted_side || '---')}</td>
+        <td class="mono green">${ev}</td>
+        <td class="mono">${edge}</td>
+        <td>${betChip(p.bet_result)}</td>
+        <td class="mono">${esc(p.final_score || '---')}</td>
+      </tr>`;
+    }).join('');
+
+    $('best-week-table').innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Date</th><th>Matchup</th><th>Play</th><th>EV</th><th>Edge</th><th>Result</th><th>Score</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } catch(e) {
+    $('best-week-table').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
+}
+
 async function loadDebrief() {
   try {
     const res = await fetch('/api/reviews/recent?limit=100');
@@ -1246,6 +1327,25 @@ async function loadDebrief() {
     const crPct     = corrRate != null ? (corrRate*100).toFixed(1)+'%' : '—';
     const wrCls     = colorClass(winRate  != null ? winRate*100  : null, 55, 48);
     const crCls     = colorClass(corrRate != null ? corrRate*100 : null, 55, 50);
+    const orderedAll = [...all].sort((a, b) => {
+      const ad = reviewDateOf(a) || '';
+      const bd = reviewDateOf(b) || '';
+      return bd.localeCompare(ad);
+    });
+    const modelStreak = currentStreak(
+      orderedAll,
+      r => Boolean(r.model_correct ?? r.was_model_correct) ? 'correct' : 'miss',
+      ['correct', 'miss']
+    );
+    const betStreak = currentStreak(
+      orderedAll,
+      r => r.bet_result,
+      ['win', 'loss']
+    );
+    const modelStreakText = modelStreak.count ? `${modelStreak.count} ${modelStreak.value}` : '---';
+    const betStreakText = betStreak.count ? `${betStreak.count} ${betStreak.value}` : '---';
+    const modelStreakCls = modelStreak.value === 'correct' ? 'green' : modelStreak.value === 'miss' ? 'red' : 'muted';
+    const betStreakCls = betStreak.value === 'win' ? 'green' : betStreak.value === 'loss' ? 'red' : 'muted';
 
     $('debrief-summary').innerHTML = `
       <div class="summary-bar">
@@ -1276,6 +1376,14 @@ async function loadDebrief() {
         <div class="s-stat">
           <div class="s-stat-val">${graded}</div>
           <div class="s-stat-lbl">Bets Graded</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val ${modelStreakCls}">${esc(modelStreakText)}</div>
+          <div class="s-stat-lbl">Model Streak</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val ${betStreakCls}">${esc(betStreakText)}</div>
+          <div class="s-stat-lbl">Bet Streak</div>
         </div>
       </div>`;
 
@@ -1562,9 +1670,36 @@ async function loadSignals() {
       : 'NO DATA';
 
     if (!items.length) {
+      $('signals-summary').innerHTML = '';
       $('signals-grid').innerHTML = '<div class="empty">No sandbox predictions for today yet.</div>';
       return;
     }
+
+    const agreementRows = items.filter(p => p.v3_v4_agreement === true || p.v3_v4_agreement === false);
+    const agreementCount = agreementRows.filter(p => p.v3_v4_agreement === true).length;
+    const agreementRate = agreementRows.length ? agreementCount / agreementRows.length : null;
+    const disagreementCount = agreementRows.length - agreementCount;
+    const agreementPct = agreementRate != null ? (agreementRate * 100).toFixed(1) + '%' : '---';
+    const agreementCls = colorClass(agreementRate != null ? agreementRate * 100 : null, 70, 50);
+    $('signals-summary').innerHTML = `
+      <div class="summary-bar" style="border-left-color: var(--blue); background: var(--surface2);">
+        <div class="s-stat">
+          <div class="s-stat-val ${agreementCls}">${agreementPct}</div>
+          <div class="s-stat-lbl">v0.4 vs v3 Agreement</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val green">${agreementCount}</div>
+          <div class="s-stat-lbl">Agree</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val yellow">${disagreementCount}</div>
+          <div class="s-stat-lbl">Disagree</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val">${agreementRows.length}</div>
+          <div class="s-stat-lbl">Compared</div>
+        </div>
+      </div>`;
 
     const cards = items.map(p => {
       const badges = [];
@@ -1616,6 +1751,7 @@ async function loadSignals() {
 
     $('signals-grid').innerHTML = cards;
   } catch(e) {
+    $('signals-summary').innerHTML = '';
     $('signals-grid').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
   }
 }
@@ -1701,7 +1837,7 @@ async function loadBullpen() {
 }
 
 async function loadAll() {
-  await Promise.all([loadAccuracy(), loadTopBets(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
+  await Promise.all([loadAccuracy(), loadTopBets(), loadBestPlaysWeek(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
 }
 
 let countdown = 60;
