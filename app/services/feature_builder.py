@@ -29,6 +29,8 @@ def build_team_features(
     venue: str | None = None,
     bullpen_stats: dict | None = None,
     statcast_team: dict | None = None,
+    travel_stress: dict | None = None,
+    series_position: dict | None = None,
 ) -> dict:
     # Prefer games_played from the stats API; fall back to wins+losses or season default
     games_played = raw_stats.get("games_played") or 0
@@ -92,4 +94,8 @@ def build_team_features(
         "barrel_rate":       statcast_team.get("barrel_rate")       if statcast_team else None,
         "hard_hit_rate":     statcast_team.get("hard_hit_rate")     if statcast_team else None,
         "sprint_speed_avg":  statcast_team.get("sprint_speed_avg")  if statcast_team else None,
+        "away_travel_stress": travel_stress.get("stress_score", 0.0) if travel_stress else 0.0,
+        "home_travel_stress": 0.0,
+        "series_game_number": series_position.get("series_game_number", 1) if series_position else 1,
+        "is_series_opener": series_position.get("is_series_opener", False) if series_position else False,
     }

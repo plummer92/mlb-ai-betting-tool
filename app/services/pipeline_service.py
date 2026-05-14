@@ -17,6 +17,8 @@ from app.services.backtest_service import (
 from app.services.edge_service import calculate_all_edges_today
 from app.services.feature_builder import build_team_features
 from app.services.mlb_api import fetch_bullpen_stats, fetch_pitcher_stats, fetch_schedule_for_date, fetch_team_stats
+from app.services.travel_service import calculate_travel_stress
+from app.services.series_service import get_series_position
 from app.services.model_diagnostics import summarize_edge_diagnostics, summarize_probability_diagnostics
 from app.services.odds_service import (
     SnapshotType,
@@ -106,11 +108,27 @@ def run_predictions_for_date(
             away_statcast = fetch_team_statcast(game.away_team_id, game.season)
             home_statcast = fetch_team_statcast(game.home_team_id, game.season)
 
+            away_travel = None
+            away_series = None
+            try:
+                away_travel = {"stress_score": calculate_travel_stress(game.away_team_id, game.game_date, db)}
+                away_series = get_series_position(game.away_team_id, game.game_date, db)
+                print(
+                    f"[v5] game {game.game_id}: "
+                    f"away_stress={away_travel.get('stress_score', 0):.2f} "
+                    f"series_game={away_series.get('series_game_number', 1)}",
+                    flush=True,
+                )
+            except Exception:
+                logger.warning("travel/series data unavailable for game %s", game.game_id, exc_info=True)
+
             away_features = build_team_features(
                 away_raw,
                 starter_stats=away_starter,
                 bullpen_stats=away_bullpen,
                 statcast_team=away_statcast,
+                travel_stress=away_travel,
+                series_position=away_series,
             )
             home_features = build_team_features(
                 home_raw,

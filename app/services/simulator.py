@@ -108,6 +108,16 @@ def run_monte_carlo(
     away_lambda = _expected_runs(away_team, home_team, park_run_factor=park_run_factor, is_home=False)
     home_lambda = _expected_runs(home_team, away_team, park_run_factor=park_run_factor, is_home=True)
 
+    # Away travel fatigue reduces offensive output (max 8% reduction at stress=1.0)
+    away_stress = away_team.get("away_travel_stress", 0.0)
+    away_lambda = away_lambda * (1.0 - (away_stress * 0.08))
+
+    # Series opener: starters typically go deeper, suppressing run environment slightly
+    is_opener = away_team.get("is_series_opener", False) or home_team.get("is_series_opener", False)
+    if is_opener:
+        away_lambda = away_lambda * 0.97
+        home_lambda = home_lambda * 0.97
+
     print(
         f"[simulator] total_inputs "
         f"park_run_factor={park_run_factor:.4f} "
