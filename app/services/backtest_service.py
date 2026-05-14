@@ -22,7 +22,7 @@ from sklearn.metrics import brier_score_loss, log_loss as sk_log_loss
 from sklearn.preprocessing import StandardScaler
 
 from app.config import MLB_API_BASE
-from app.models.schema import BacktestGame, BacktestResult, GameOdds, SnapshotType
+from app.models.schema import BacktestGame, BacktestResult, GameOdds, GameOutcomeReview, SandboxPredictionV4, SnapshotType
 from app.services.feature_builder import PARK_FACTORS, PYTHAG_EXPONENT
 from app.services.mlb_api import fetch_pitcher_stats
 
@@ -1000,8 +1000,97 @@ def run_analysis(db: Session, seasons: list[int]) -> dict:
         "odds_snapshot_policy": _DEFAULT_ODDS_POLICY,
         "n_games": len(rows),
         "feature_correlations": feature_correlations,
+        "v05_signal_correlations": _v05_signal_correlations(db, seasons),
         "season_breakdown": season_breakdown,
         "rows_missing_odds": sum(1 for row in rows if not row.odds_complete),
+    }
+
+
+def _pearson_r(values: list[float], outcomes: list[float]) -> float:
+    if len(values) < 2 or len(values) != len(outcomes):
+        return 0.0
+    x = np.array(values, dtype=float)
+    y = np.array(outcomes, dtype=float)
+    if np.std(x) == 0 or np.std(y) == 0:
+        return 0.0
+    corr = float(np.corrcoef(x, y)[0, 1])
+    return 0.0 if math.isnan(corr) else corr
+
+
+def _v05_signal_correlations(db: Session, seasons: list[int]) -> dict:
+    """
+    Read-only v0.5 shadow-mode validation.
+
+    The live travel feature currently represents the away team's travel stress,
+    so the public "travel_stress" row maps to sandbox_predictions_v4.travel_stress_away.
+    """
+    rows = (
+        db.query(SandboxPredictionV4, GameOutcomeReview)
+        .join(GameOutcomeReview, GameOutcomeReview.game_id == SandboxPredictionV4.game_id)
+        .filter(
+            SandboxPredictionV4.season.in_(seasons),
+            GameOutcomeReview.final_home_score.isnot(None),
+            GameOutcomeReview.final_away_score.isnot(None),
+        )
+        .order_by(SandboxPredictionV4.game_date.asc(), SandboxPredictionV4.game_id.asc())
+        .all()
+    )
+    if not rows:
+        return {
+            "n_games": 0,
+            "threshold_abs_r": 0.04,
+            "recommendation": "No reviewed v0.5 sandbox rows found yet; keep collecting shadow-mode data.",
+            "signals": [],
+        }
+
+    signal_getters = {
+        "travel_stress": lambda pred: pred.travel_stress_away,
+        "travel_stress_home": lambda pred: pred.travel_stress_home,
+        "travel_stress_adv": lambda pred: (
+            (pred.travel_stress_home or 0.0) - (pred.travel_stress_away or 0.0)
+            if pred.travel_stress_home is not None or pred.travel_stress_away is not None
+            else None
+        ),
+        "series_game_number": lambda pred: pred.series_game_number,
+        "is_series_opener": lambda pred: 1.0 if pred.is_series_opener else 0.0,
+        "is_series_finale": lambda pred: 1.0 if pred.is_series_finale else 0.0,
+    }
+
+    signals = []
+    for signal_name, getter in signal_getters.items():
+        values = []
+        outcomes = []
+        for prediction, review in rows:
+            value = getter(prediction)
+            if value is None:
+                continue
+            values.append(float(value))
+            outcomes.append(1.0 if review.final_home_score > review.final_away_score else 0.0)
+
+        corr = _pearson_r(values, outcomes)
+        abs_r = abs(corr)
+        signals.append({
+            "signal": signal_name,
+            "n": len(values),
+            "pearson_r": round(corr, 4),
+            "abs_r": round(abs_r, 4),
+            "candidate_for_feature_set": abs_r > 0.04,
+        })
+
+    signals.sort(key=lambda row: row["abs_r"], reverse=True)
+    candidates = [row["signal"] for row in signals if row["candidate_for_feature_set"]]
+    recommendation = (
+        f"Candidate v0.5 signals above threshold: {', '.join(candidates)}. Review before changing FEATURE_NAMES or retraining."
+        if candidates
+        else "No v0.5 signal cleared abs(pearson_r) > 0.04; keep v3 feature set unchanged."
+    )
+
+    return {
+        "n_games": len(rows),
+        "threshold_abs_r": 0.04,
+        "target": "home_win",
+        "recommendation": recommendation,
+        "signals": signals,
     }
 
 
