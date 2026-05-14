@@ -6,10 +6,12 @@ Live endpoints are gated behind BETTING_ENABLED=true + BETTING_MODE=live.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.middleware.auth import verify_api_key
+from app.middleware.limiter import limiter
 from app.services.betting_policy import BETTING_PROFILES
 from app.services.execution_service import (
     create_candidate_bets_for_today,
@@ -69,8 +71,9 @@ def execution_summary(db: Session = Depends(get_db)):
 
 # ── Paper execution ───────────────────────────────────────────────────────────
 
-@router.post("/execute-paper")
-def execute_paper(db: Session = Depends(get_db)):
+@router.post("/execute-paper", dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+def execute_paper(request: Request, db: Session = Depends(get_db)):
     """
     Run the paper execution pipeline for today's elite bets.
 
@@ -86,8 +89,9 @@ def execute_paper(db: Session = Depends(get_db)):
     return result
 
 
-@router.post("/settle-paper")
-def settle_paper(db: Session = Depends(get_db)):
+@router.post("/settle-paper", dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+def settle_paper(request: Request, db: Session = Depends(get_db)):
     """
     Settle open paper bets using final game scores already in the DB.
     Safe to call repeatedly — only settles games with final scores.
@@ -97,8 +101,9 @@ def settle_paper(db: Session = Depends(get_db)):
 
 # ── Kill switch ───────────────────────────────────────────────────────────────
 
-@router.post("/kill-switch/on")
-def enable_kill_switch():
+@router.post("/kill-switch/on", dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+def enable_kill_switch(request: Request):
     """
     Activate the kill switch — blocks all bet execution immediately.
     This is a runtime toggle; does not modify .env.
@@ -107,8 +112,9 @@ def enable_kill_switch():
     return ks_status()
 
 
-@router.post("/kill-switch/off")
-def disable_kill_switch():
+@router.post("/kill-switch/off", dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+def disable_kill_switch(request: Request):
     """
     Deactivate the kill switch — re-enables bet execution.
     This is a runtime toggle; does not modify .env.
@@ -125,8 +131,9 @@ def kill_switch_status():
 
 # ── Live execution (disabled unless BETTING_MODE=live + BETTING_ENABLED) ──────
 
-@router.post("/execute-live")
-def execute_live(db: Session = Depends(get_db)):
+@router.post("/execute-live", dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+def execute_live(request: Request, db: Session = Depends(get_db)):
     """
     Live bet execution — DISABLED by default.
     Requires BETTING_ENABLED=true, BETTING_MODE=live, and a non-paper provider.

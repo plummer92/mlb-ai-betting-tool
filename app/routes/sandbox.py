@@ -8,10 +8,12 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.middleware.auth import verify_api_key
+from app.middleware.limiter import limiter
 from app.models.schema import Game, SandboxPredictionV4, UmpireAssignmentV4
 
 router = APIRouter(prefix="/api/sandbox", tags=["sandbox"])
@@ -143,8 +145,9 @@ def get_umpires(db: Session = Depends(get_db)):
 
 # ── 5. Grade endpoint ────────────────────────────────────────────────────────
 
-@router.post("/grade")
-def grade_sandbox_predictions(db: Session = Depends(get_db)):
+@router.post("/grade", dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+def grade_sandbox_predictions(request: Request, db: Session = Depends(get_db)):
     """
     Grade ungraded sandbox predictions by comparing projections to actual scores.
     Updates f5_result and full_game_result.

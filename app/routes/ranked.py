@@ -5,10 +5,12 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.middleware.auth import verify_api_key
+from app.middleware.limiter import limiter
 from app.models.schema import EdgeResult, Game, GameOdds
 from app.services.betting_policy import qualifies_for_bet_policy
 
@@ -116,8 +118,10 @@ def get_ranked_bets(
     return _build_ranked_rows(db=db, limit=limit, active_only=active_only)
 
 
-@router.post("/discord")
+@router.post("/discord", dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
 def send_ranked_bets_to_discord(
+    request: Request,
     limit: int = Query(10, ge=1, le=20),
     active_only: bool = Query(True),
     db: Session = Depends(get_db),
@@ -142,8 +146,10 @@ def send_ranked_bets_to_discord(
     }
 
 
-@router.post("/discord/game/{game_id}")
+@router.post("/discord/game/{game_id}", dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
 def send_single_game_discord_alert(
+    request: Request,
     game_id: int,
     db: Session = Depends(get_db),
 ):

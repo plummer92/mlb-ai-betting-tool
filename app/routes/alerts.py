@@ -3,10 +3,12 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.middleware.auth import verify_api_key
+from app.middleware.limiter import limiter
 from app.models.schema import BetAlert, EdgeResult, Game, SandboxPredictionV4
 
 from app.services.alert_service import create_and_send_alerts_for_today
@@ -16,13 +18,15 @@ router = APIRouter(prefix="/api/alerts", tags=["alerts"])
 ET = ZoneInfo("America/New_York")
 
 
-@router.post("/run")
-def run_alerts(db: Session = Depends(get_db)):
+@router.post("/run", dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+def run_alerts(request: Request, db: Session = Depends(get_db)):
     return create_and_send_alerts_for_today(db)
 
 
-@router.post("/send")
-def send_alerts(db: Session = Depends(get_db)):
+@router.post("/send", dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
+def send_alerts(request: Request, db: Session = Depends(get_db)):
     result = create_and_send_alerts_for_today(db)
     return {
         "sent": result.get("sent", 0),

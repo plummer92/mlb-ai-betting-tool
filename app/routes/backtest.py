@@ -2,10 +2,12 @@ import json
 import traceback
 from datetime import date
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal, get_db
+from app.middleware.auth import verify_api_key
+from app.middleware.limiter import limiter
 from app.models.schema import BacktestResult
 from app.services.backtest_service import POINT_IN_TIME_WARNING, collect_season, run_analysis, run_logistic_regression
 from app.services.signal_backtest_service import run_signal_backtest
@@ -13,8 +15,10 @@ from app.services.signal_backtest_service import run_signal_backtest
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
 
-@router.post("/collect")
+@router.post("/collect", dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
 def collect_backtest_data(
+    request: Request,
     background_tasks: BackgroundTasks,
     seasons: str = Query("2022,2023,2024"),
 ):
@@ -57,8 +61,10 @@ def collect_backtest_data(
     }
 
 
-@router.post("/run")
+@router.post("/run", dependencies=[Depends(verify_api_key)])
+@limiter.limit("10/minute")
 def run_backtest_route(
+    request: Request,
     seasons: str = Query("2022,2023,2024"),
     db: Session = Depends(get_db),
 ):
