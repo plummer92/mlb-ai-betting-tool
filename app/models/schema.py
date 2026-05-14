@@ -307,6 +307,36 @@ class BetAlert(Base):
     )
 
 
+class PaperTrade(Base):
+    __tablename__ = "paper_trades"
+
+    id = Column(Integer, primary_key=True)
+    bet_alert_id = Column(Integer, ForeignKey("bet_alerts.id"), nullable=False, index=True)
+    game_id = Column(Integer, ForeignKey("games.game_id"), nullable=False, index=True)
+    prediction_id = Column(Integer, ForeignKey("predictions.prediction_id"), nullable=True, index=True)
+    edge_result_id = Column(Integer, ForeignKey("edge_results.id"), nullable=True, index=True)
+
+    game_date = Column(Date, nullable=False, index=True)
+    play = Column(String(20), nullable=False)
+    confidence = Column(String(10), nullable=True)
+    edge_pct = Column(Numeric(8, 4), nullable=True)
+    ev = Column(Numeric(8, 4), nullable=True)
+
+    paper_stake = Column(Numeric(10, 2), nullable=False, default=100)
+    odds = Column(Integer, nullable=True)
+    line = Column(Numeric(5, 1), nullable=True)
+    status = Column(String(20), nullable=False, default="open")
+    result = Column(String(10), nullable=True)
+    profit_loss = Column(Numeric(10, 2), nullable=True)
+
+    placed_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    settled_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("bet_alert_id", name="uq_paper_trades_bet_alert"),
+    )
+
+
 class GameOutcomeReview(Base):
     __tablename__ = "game_outcomes_review"
 

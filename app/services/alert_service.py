@@ -14,6 +14,7 @@ from app.services.explanation_service import generate_pick_explanation
 from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.edge_service import get_trustworthy_active_edges, TOTAL_STD_DEV
 from app.services.notification_service import send_alert_message
+from app.services.paper_trade_service import log_alert_as_paper_trade
 from app.services.odds_service import is_odds_snapshot_fresh
 
 ET = ZoneInfo("America/New_York")
@@ -295,6 +296,7 @@ def create_and_send_alerts_for_today(db: Session) -> dict:
         )
         db.add(alert)
         db.flush()
+        log_alert_as_paper_trade(db, alert, edge)
         created += 1
 
         ok, error = send_alert_message(message)
@@ -382,6 +384,7 @@ def create_and_send_alert_for_game(db: Session, game_id: int) -> dict:
     db.add(alert)
     try:
         db.flush()
+        log_alert_as_paper_trade(db, alert, edge)
     except IntegrityError:
         db.rollback()
         return {"created": 0, "sent": 0, "skipped": 1, "reason": "duplicate (race condition)"}
