@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models.schema import BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, Prediction, SnapshotType
+from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, Prediction, SnapshotType
 from app.routes.commentary import commentary_today
 from app.routes.admin import admin_backfill_prediction_dashboard_metrics, admin_freshness
 from app.routes.model import get_today_predictions, run_model
@@ -392,6 +392,67 @@ class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):
         calc_mock.assert_called_once()
         self.assertEqual(calc_mock.call_args.kwargs["odds_rows"][0].id, odds.id)
         odds_mock.assert_not_called()
+
+    def _backtest_result(self, accuracy: float) -> BacktestResult:
+        result = BacktestResult(
+            seasons="2022,2023,2024",
+            n_games=100,
+            accuracy=accuracy,
+            cv_accuracy=accuracy,
+            brier_score=0.22,
+            log_loss=0.68,
+            calibration_params_json='{"a": 1.0, "b": 0.0}',
+            coefficients_json='{"run_diff_adv": 0.2, "pythagorean_win_pct_adv": 0.3}',
+            feature_ranks_json="[]",
+        )
+        self.db.add(result)
+        self.db.commit()
+        self.db.refresh(result)
+        return result
+
+    def test_weekly_backtest_discards_worse_candidate(self) -> None:
+        old = self._backtest_result(0.57)
+        old_id = old.id
+
+        def create_candidate(db, seasons, apply_weights=True):
+            self.assertFalse(apply_weights)
+            return self._backtest_result(0.56)
+
+        with patch("app.scheduler.SessionLocal", return_value=self.db), \
+             patch("app.scheduler.run_logistic_regression", side_effect=create_candidate), \
+             patch("app.scheduler.apply_backtest_weights") as apply_mock, \
+             patch("app.services.notification_service.send_alert_message", return_value=(True, None)) as notify_mock:
+            from app.scheduler import weekly_backtest_job
+
+            weekly_backtest_job()
+
+        apply_mock.assert_not_called()
+        notify_mock.assert_called_once()
+        rows = self.db.query(BacktestResult).all()
+        self.assertEqual([row.id for row in rows], [old_id])
+
+    def test_weekly_backtest_deploys_better_candidate(self) -> None:
+        old = self._backtest_result(0.56)
+        old_id = old.id
+
+        def create_candidate(db, seasons, apply_weights=True):
+            self.assertFalse(apply_weights)
+            return self._backtest_result(0.57)
+
+        with patch("app.scheduler.SessionLocal", return_value=self.db), \
+             patch("app.scheduler.run_logistic_regression", side_effect=create_candidate), \
+             patch("app.scheduler.apply_backtest_weights") as apply_mock, \
+             patch("app.services.notification_service.send_alert_message") as notify_mock:
+            from app.scheduler import weekly_backtest_job
+
+            weekly_backtest_job()
+
+        apply_mock.assert_called_once()
+        notify_mock.assert_not_called()
+        rows = self.db.query(BacktestResult).order_by(BacktestResult.id.asc()).all()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0].id, old_id)
+        self.assertEqual(rows[1].accuracy, 0.57)
 
 
 if __name__ == "__main__":

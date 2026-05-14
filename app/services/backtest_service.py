@@ -771,7 +771,7 @@ def _fold_metrics(y_true: list[int], probs: list[float]) -> dict:
     }
 
 
-def run_logistic_regression(db: Session, seasons: list[int]) -> BacktestResult:
+def run_logistic_regression(db: Session, seasons: list[int], apply_weights: bool = True) -> BacktestResult:
     rows = (
         db.query(BacktestGame)
         .filter(
@@ -944,7 +944,8 @@ def run_logistic_regression(db: Session, seasons: list[int]) -> BacktestResult:
     db.add(result)
     db.commit()
     db.refresh(result)
-    apply_backtest_weights(result)
+    if apply_weights:
+        apply_backtest_weights(result)
     return result
 
 

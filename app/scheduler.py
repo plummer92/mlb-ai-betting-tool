@@ -10,7 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.db import SessionLocal
 from app.models.schema import Game, GameOdds
 from app.services.alert_service import create_and_send_alert_for_game, create_and_send_alerts_for_today
-from app.services.backtest_service import run_logistic_regression
+from app.services.backtest_service import apply_backtest_weights, get_latest_calibration_result, run_logistic_regression
 from app.services.edge_service import calculate_edge_for_game
 from app.services.odds_service import (
     SnapshotType,
@@ -294,12 +294,32 @@ def resolve_completed_games_job():
 def weekly_backtest_job():
     db = SessionLocal()
     try:
-        result = run_logistic_regression(db, [2022, 2023, 2024])
+        old_result = get_latest_calibration_result(db)
+        old_accuracy = float(old_result.accuracy) if old_result else None
+        result = run_logistic_regression(db, [2022, 2023, 2024], apply_weights=False)
+        new_accuracy = float(result.accuracy)
+        deployed = old_accuracy is None or new_accuracy > old_accuracy
+
+        if deployed:
+            apply_backtest_weights(result)
+        else:
+            from app.services.notification_service import send_alert_message
+
+            result_id = result.id
+            db.delete(result)
+            db.commit()
+            send_alert_message(
+                "Weekly backtest kept existing model weights: "
+                f"new accuracy {new_accuracy:.4f} did not beat old accuracy {old_accuracy:.4f}. "
+                f"Candidate result {result_id} was discarded."
+            )
+
         print(
             f"[scheduler] Weekly backtest: seasons={result.seasons}, "
             f"n_games={result.n_games}, accuracy={result.accuracy:.4f}, "
             f"cv={result.cv_accuracy:.4f}, brier={result.brier_score:.4f}, "
-            f"calibrated={result.calibration_params_json is not None}"
+            f"calibrated={result.calibration_params_json is not None}, "
+            f"old_accuracy={old_accuracy}, deployed={deployed}"
         )
     except (SQLAlchemyError, RuntimeError, ValueError):
         logger.exception("[scheduler] Weekly backtest failed")
