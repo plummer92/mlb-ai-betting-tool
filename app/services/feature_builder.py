@@ -63,13 +63,15 @@ def build_team_features(
     starter_kbb_percent = None
     using_xera = False
     if starter_stats:
-        starter_run_prevention = starter_stats.get("xera")
+        starter_xera = starter_stats.get("xera")
+        starter_era = starter_stats.get("era")
+        starter_run_prevention = starter_xera if starter_xera is not None else starter_era
         starter_whip = starter_stats.get("whip", raw_stats["whip"])
         starter_kbb = starter_stats.get("kbb")
         starter_kbb_percent = starter_stats.get("kbb_percent")
         if starter_kbb_percent is None and starter_kbb is not None:
             starter_kbb_percent = round(_clamp(float(starter_kbb) / 45.0, 0.05, 0.25), 4)
-        using_xera = bool(starter_stats.get("xera"))
+        using_xera = starter_xera is not None
 
     park_delta = PARK_FACTORS.get(venue, 0.0) if venue else 0.0
     park_run_factor = round(_clamp(1.0 + (park_delta * 0.12), 0.96, 1.04), 4)
