@@ -93,10 +93,10 @@ def _event_weights(target_runs: float, sandbox: SandboxPredictionV4 | None, *, i
         if strength is not None:
             bullpen_boost = _clamp((0.55 - float(strength)) * 0.05, -0.025, 0.025)
 
-    hr = _clamp(0.026 * run_factor + (wind_factor * 0.014), 0.014, 0.052)
-    double = _clamp(0.038 * run_factor + (wind_factor * 0.005), 0.026, 0.064)
-    walk = _clamp(0.074 * run_factor + bullpen_boost + (umpire_impact * 0.008), 0.052, 0.112)
-    single = _clamp(0.136 * run_factor, 0.105, 0.178)
+    hr = _clamp(0.028 * run_factor + (wind_factor * 0.014), 0.015, 0.054)
+    double = _clamp(0.041 * run_factor + (wind_factor * 0.005), 0.028, 0.066)
+    walk = _clamp(0.078 * run_factor + bullpen_boost + (umpire_impact * 0.008), 0.054, 0.114)
+    single = _clamp(0.143 * run_factor, 0.110, 0.184)
     triple = _clamp(0.004 * run_factor, 0.001, 0.009)
     strikeout = _clamp(0.232 - ((run_factor - 1.0) * 0.035) - (umpire_impact * 0.006), 0.170, 0.290)
     generic_out = max(0.280, 1.0 - (hr + double + walk + single + triple + strikeout))
@@ -135,11 +135,15 @@ def _force_run_pressure(
     behind_pace = expected_so_far - batting_runs
 
     productive = outcome in {"walk", "single", "double", "triple", "home_run"}
-    if batting_runs >= state.target_runs + 1.5 and productive and rng.random() < 0.72:
+    if batting_runs >= state.target_runs + 2.0 and productive and rng.random() < 0.58:
         return rng.choice(["strikeout", "out"]), "suppressed_hot_pace"
-    if ahead_of_pace > 1.25 and productive and rng.random() < _clamp(0.34 + (ahead_of_pace * 0.08), 0.34, 0.72):
+    if ahead_of_pace > 1.75 and productive and rng.random() < _clamp(0.26 + (ahead_of_pace * 0.06), 0.26, 0.58):
         return rng.choice(["strikeout", "out"]), "suppressed_hot_pace"
-    if behind_pace > 1.15 and batting_runs < state.target_runs - 0.6 and state.outs < 2 and rng.random() < 0.16:
+    if behind_pace > 0.75 and batting_runs < state.target_runs - 0.4 and state.outs < 2:
+        pressure = _clamp(0.18 + (behind_pace * 0.05), 0.18, 0.34)
+        if rng.random() < pressure:
+            return rng.choice(["single", "walk", "double"]), "created_catchup_pressure"
+    if behind_pace > 1.6 and batting_runs < state.target_runs - 0.8 and rng.random() < 0.16:
         return rng.choice(["single", "walk", "double"]), "created_catchup_pressure"
     return outcome, None
 
@@ -156,13 +160,13 @@ def _advance_runners(bases: list[bool], outcome: str, rng: random.Random) -> tup
         new_second = second or first
         return [True, new_second, new_third], runs, rbi
     if outcome == "single":
-        second_scores = second and rng.random() < 0.58
-        first_to_third = first and rng.random() < 0.34
+        second_scores = second and rng.random() < 0.64
+        first_to_third = first and rng.random() < 0.38
         runs += int(third) + int(second_scores)
         rbi += int(third) + int(second_scores)
         return [True, first and not first_to_third, first_to_third or (second and not second_scores)], runs, rbi
     if outcome == "double":
-        first_scores = first and rng.random() < 0.62
+        first_scores = first and rng.random() < 0.70
         runs += int(third) + int(second) + int(first_scores)
         rbi += int(third) + int(second) + int(first_scores)
         return [False, True, first and not first_scores], runs, rbi
