@@ -116,7 +116,19 @@ def get_convergence_plays(db: Session = Depends(get_db)):
         .all()
     )
     return [
-        {**_pred_to_dict(r), "conviction": "HIGH CONVICTION"}
+        {
+            **_pred_to_dict(r),
+            "conviction": (
+                "HIGH CONVICTION"
+                if r.umpire_name and r.umpire_name != "Unknown"
+                else "MODEL+BULLPEN"
+            ),
+            "umpire_status": (
+                "known"
+                if r.umpire_name and r.umpire_name != "Unknown"
+                else "pending"
+            ),
+        }
         for r in rows
     ]
 

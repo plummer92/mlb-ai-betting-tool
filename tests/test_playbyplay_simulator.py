@@ -15,6 +15,7 @@ from app.services.playbyplay_simulator import (
     fetch_actual_play_by_play,
     simulate_play_by_play,
 )
+from app.services.umpire_service import fetch_umpire_assignment
 
 
 class PlayByPlaySimulatorTests(unittest.TestCase):
@@ -189,6 +190,25 @@ class PlayByPlaySimulatorTests(unittest.TestCase):
         self.assertEqual(result["games_processed"], 1)
         self.assertIn("overall", result["calibration"])
         self.assertIn("single", result["recommended_overall_multipliers"])
+
+    @patch("app.services.umpire_service.requests.get")
+    def test_fetch_umpire_assignment_does_not_cache_missing_officials(self, get_mock: Mock) -> None:
+        get_mock.return_value.status_code = 200
+        get_mock.return_value.json.side_effect = [
+            {"officials": []},
+            {
+                "officials": [
+                    {
+                        "officialType": "Home Plate",
+                        "official": {"fullName": "Dan Merzel"},
+                    }
+                ]
+            },
+        ]
+
+        self.assertIsNone(fetch_umpire_assignment(999))
+        self.assertEqual(fetch_umpire_assignment(999), "Dan Merzel")
+        self.assertEqual(get_mock.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -1047,8 +1047,8 @@ async function loadSandbox() {
               <td class="mono" style="color:var(--cyan)">${esc(r.f5_pick||'—')} ${r.f5_line||''}</td>
               <td class="mono">${r.f5_projected_total?.toFixed(1)||'—'}</td>
               <td class="mono">${r.full_game_projected_total?.toFixed(1)||'—'}</td>
-              <td class="mono">${esc(r.umpire_name||'—')}</td>
-              <td><span style="color:var(--yellow);font-weight:700;">⚡ HIGH CONVICTION</span></td>
+              <td class="mono">${esc(r.umpire_name && r.umpire_name !== 'Unknown' ? r.umpire_name : 'Pending')}</td>
+              <td><span style="color:${r.conviction === 'HIGH CONVICTION' ? 'var(--yellow)' : 'var(--cyan)'};font-weight:700;">${esc(r.conviction || 'MODEL+BULLPEN')}</span></td>
             </tr>
           `).join('')}</tbody>
         </table>

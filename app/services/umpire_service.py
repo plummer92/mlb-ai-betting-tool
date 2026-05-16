@@ -94,11 +94,11 @@ def fetch_umpire_assignment(game_id: int) -> Optional[str]:
             if official.get("officialType") == "Home Plate":
                 hp_umpire = official.get("official", {}).get("fullName")
                 break
-        _umpire_cache[game_id] = hp_umpire
+        if hp_umpire:
+            _umpire_cache[game_id] = hp_umpire
         return hp_umpire
     except Exception as e:
         print(f"[v4 umpire] fetch_umpire_assignment({game_id}) silenced error: {e}")
-        _umpire_cache[game_id] = None
         return None
 
 
@@ -144,6 +144,12 @@ def collect_umpire_for_game(game_id: int, season: int, db: Session) -> Optional[
             )
             .first()
         )
+        if existing and umpire_name == "Unknown" and existing.umpire_name and existing.umpire_name != "Unknown":
+            return {
+                "umpire_name": existing.umpire_name,
+                "run_impact": existing.run_expectancy_impact or 0.0,
+            }
+
         if existing:
             existing.umpire_name = umpire_name
             existing.run_expectancy_impact = run_impact
