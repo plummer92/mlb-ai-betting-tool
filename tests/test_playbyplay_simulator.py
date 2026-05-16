@@ -8,14 +8,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models.schema import Game, Prediction, SandboxPredictionV4
+from app.models.schema import Game, Prediction, SandboxPredictionV4, UmpireAssignmentV4
 from app.services.playbyplay_simulator import (
     backtest_play_by_play_weights,
     compare_sim_to_actual,
     fetch_actual_play_by_play,
     simulate_play_by_play,
 )
-from app.services.umpire_service import fetch_umpire_assignment
+from app.services.umpire_service import collect_umpire_for_game, fetch_umpire_assignment
 
 
 class PlayByPlaySimulatorTests(unittest.TestCase):
@@ -209,6 +209,70 @@ class PlayByPlaySimulatorTests(unittest.TestCase):
         self.assertIsNone(fetch_umpire_assignment(999))
         self.assertEqual(fetch_umpire_assignment(999), "Dan Merzel")
         self.assertEqual(get_mock.call_count, 2)
+
+    @patch("app.services.umpire_service.requests.get")
+    def test_collect_umpire_for_game_tracks_crew_and_travel_context(self, get_mock: Mock) -> None:
+        previous = Game(
+            game_id=201,
+            game_date=date(2026, 5, 15),
+            season=2026,
+            away_team="Away Previous",
+            home_team="Boston Red Sox",
+            away_team_id=146,
+            home_team_id=111,
+            venue="Fenway Park",
+            status="Final",
+            start_time=datetime(2026, 5, 15, 23, 0, tzinfo=timezone.utc),
+        )
+        current = Game(
+            game_id=202,
+            game_date=date(2026, 5, 16),
+            season=2026,
+            away_team="Away Current",
+            home_team="Seattle Mariners",
+            away_team_id=135,
+            home_team_id=136,
+            venue="T-Mobile Park",
+            status="Preview",
+            start_time=datetime(2026, 5, 16, 23, 0, tzinfo=timezone.utc),
+        )
+        self.db.add_all([previous, current])
+        self.db.add(
+            UmpireAssignmentV4(
+                game_id=201,
+                umpire_name="Traveling Ump",
+                official_type="Home Plate",
+                game_date=date(2026, 5, 15),
+                home_team_id=111,
+                venue="Fenway Park",
+                season=2026,
+            )
+        )
+        self.db.commit()
+
+        get_mock.return_value.status_code = 200
+        get_mock.return_value.json.return_value = {
+            "officials": [
+                {"officialType": "Home Plate", "official": {"fullName": "Traveling Ump"}},
+                {"officialType": "First Base", "official": {"fullName": "Line Ump"}},
+            ]
+        }
+
+        result = collect_umpire_for_game(202, 2026, self.db)
+
+        self.assertEqual(result["umpire_name"], "Traveling Ump")
+        self.assertEqual(len(result["officials"]), 2)
+        rows = (
+            self.db.query(UmpireAssignmentV4)
+            .filter(UmpireAssignmentV4.game_id == 202)
+            .order_by(UmpireAssignmentV4.official_type)
+            .all()
+        )
+        self.assertEqual(len(rows), 2)
+        hp = next(r for r in rows if r.official_type == "Home Plate")
+        self.assertIsNotNone(hp.travel_miles)
+        self.assertGreater(hp.travel_stress, 0)
+        self.assertEqual(hp.rest_days, 1)
 
 
 if __name__ == "__main__":

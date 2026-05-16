@@ -1056,20 +1056,33 @@ async function loadSandbox() {
     }
 
     // ── Umpire table ──
-    const topUmpires = umpires.filter(u => u.game_id !== 0).slice(0, 10);
+    const topUmpires = umpires.filter(u => u.game_id).slice(0, 10);
     if (!topUmpires.length) {
       $('sandbox-umpires').innerHTML = '<div class="empty">No umpire assignments yet today</div>';
     } else {
       $('sandbox-umpires').innerHTML = `
         <table>
-          <thead><tr><th>Umpire</th><th>Run Impact</th><th>K Rate Delta</th><th>Season</th></tr></thead>
+          <thead><tr>
+            <th>Umpire</th><th>Role</th><th>Run Impact</th><th>K Rate Delta</th>
+            <th>Rest</th><th>Travel</th><th>TZ</th><th>Stress</th><th>Season</th>
+          </tr></thead>
           <tbody>${topUmpires.map(u => {
             const imp = u.run_expectancy_impact || 0;
             const cls = imp > 0.1 ? 'red' : imp < -0.1 ? 'green' : '';
+            const stress = u.travel_stress || 0;
+            const stressCls = stress >= 0.55 ? 'red' : stress >= 0.25 ? 'yellow' : 'green';
+            const miles = u.travel_miles == null ? '---' : `${Math.round(u.travel_miles)} mi`;
+            const rest = u.rest_days == null ? '---' : `${u.rest_days}d`;
+            const tz = u.timezone_shift == null ? '---' : `${u.timezone_shift > 0 ? '+' : ''}${u.timezone_shift}`;
             return `<tr>
               <td class="mono">${esc(u.umpire_name)}</td>
+              <td class="mono">${esc(u.official_type || 'Home Plate')}</td>
               <td class="mono ${cls}" style="font-weight:700;">${imp >= 0 ? '+' : ''}${imp.toFixed(2)}</td>
               <td class="mono">${u.historical_k_rate_delta >= 0 ? '+' : ''}${(u.historical_k_rate_delta||0).toFixed(3)}</td>
+              <td class="mono">${rest}</td>
+              <td class="mono">${miles}</td>
+              <td class="mono">${tz}</td>
+              <td class="mono ${stressCls}" style="font-weight:700;">${stress.toFixed(2)}</td>
               <td class="mono">${u.season||'—'}</td>
             </tr>`;
           }).join('')}</tbody>

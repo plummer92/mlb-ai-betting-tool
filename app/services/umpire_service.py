@@ -6,17 +6,19 @@ All functions catch exceptions silently so v3 pipeline is never affected.
 
 from __future__ import annotations
 
-from typing import Optional
+import math
+from typing import Any, Optional
 
 import requests
 from sqlalchemy.orm import Session
 
-from app.models.schema import UmpireAssignmentV4
+from app.models.schema import Game, UmpireAssignmentV4
+from app.services.travel_service import CITY_COORDS, TIMEZONE_MAP
 
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
-# In-memory cache: game_id -> umpire_name
-_umpire_cache: dict[int, Optional[str]] = {}
+# In-memory cache: game_id -> published officials. Empty/missing crews are not cached.
+_umpire_cache: dict[int, list[dict[str, str]]] = {}
 
 # Seed data: (name, run_expectancy_impact, historical_k_rate_delta)
 _KNOWN_UMPIRES: list[tuple[str, float, float]] = [
@@ -76,10 +78,10 @@ def seed_known_umpires(db: Session) -> None:
     print(f"[v4 umpire] rows after seed: {count}", flush=True)
 
 
-def fetch_umpire_assignment(game_id: int) -> Optional[str]:
+def fetch_game_officials(game_id: int) -> list[dict[str, str]]:
     """
-    Fetch HP umpire name from MLB Stats API boxscore.
-    Caches result in memory. Returns None on failure.
+    Fetch public game officials from MLB Stats API boxscore.
+    Caches only published crew data. Returns [] on failure or pre-release.
     """
     if game_id in _umpire_cache:
         return _umpire_cache[game_id]
@@ -88,18 +90,30 @@ def fetch_umpire_assignment(game_id: int) -> Optional[str]:
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        officials = data.get("officials", [])
-        hp_umpire = None
-        for official in officials:
-            if official.get("officialType") == "Home Plate":
-                hp_umpire = official.get("official", {}).get("fullName")
-                break
-        if hp_umpire:
-            _umpire_cache[game_id] = hp_umpire
-        return hp_umpire
+        raw_officials = data.get("officials", [])
+        officials: list[dict[str, str]] = []
+        for official in raw_officials:
+            name = official.get("official", {}).get("fullName")
+            role = official.get("officialType")
+            if name and role:
+                officials.append({"umpire_name": name, "official_type": role})
+        if officials:
+            _umpire_cache[game_id] = officials
+        return officials
     except Exception as e:
-        print(f"[v4 umpire] fetch_umpire_assignment({game_id}) silenced error: {e}")
-        return None
+        print(f"[v4 umpire] fetch_game_officials({game_id}) silenced error: {e}")
+        return []
+
+
+def fetch_umpire_assignment(game_id: int) -> Optional[str]:
+    """
+    Fetch HP umpire name from MLB Stats API boxscore.
+    Compatibility wrapper for older callers/tests.
+    """
+    for official in fetch_game_officials(game_id):
+        if official.get("official_type") == "Home Plate":
+            return official.get("umpire_name")
+    return None
 
 
 def get_umpire_run_impact(umpire_name: str, db: Session) -> float:
@@ -123,51 +137,214 @@ def get_umpire_run_impact(umpire_name: str, db: Session) -> float:
         return 0.0
 
 
+def _distance_miles(from_team_id: Optional[int], to_team_id: Optional[int]) -> Optional[float]:
+    if not from_team_id or not to_team_id:
+        return None
+    if from_team_id == to_team_id:
+        return 0.0
+    start = CITY_COORDS.get(from_team_id)
+    end = CITY_COORDS.get(to_team_id)
+    if not start or not end:
+        return None
+
+    lat1, lon1 = map(math.radians, start)
+    lat2, lon2 = map(math.radians, end)
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    return round(3958.8 * 2 * math.asin(math.sqrt(a)), 1)
+
+
+def _previous_assignment(
+    db: Session,
+    umpire_name: str,
+    game: Game,
+) -> Optional[UmpireAssignmentV4]:
+    if not game.game_date:
+        return None
+    return (
+        db.query(UmpireAssignmentV4)
+        .filter(
+            UmpireAssignmentV4.umpire_name == umpire_name,
+            UmpireAssignmentV4.game_id != game.game_id,
+            UmpireAssignmentV4.game_date.isnot(None),
+            UmpireAssignmentV4.game_date < game.game_date,
+        )
+        .order_by(UmpireAssignmentV4.game_date.desc(), UmpireAssignmentV4.id.desc())
+        .first()
+    )
+
+
+def build_umpire_travel_context(
+    db: Session,
+    umpire_name: str,
+    game: Optional[Game],
+) -> dict[str, Any]:
+    """
+    Shadow-only travel context for officials. It is descriptive, not a model input.
+    """
+    if not game or not game.game_date:
+        return {
+            "travel_miles": None,
+            "rest_days": None,
+            "timezone_shift": None,
+            "travel_stress": 0.0,
+        }
+
+    prev = _previous_assignment(db, umpire_name, game)
+    if not prev or not prev.home_team_id:
+        return {
+            "travel_miles": None,
+            "rest_days": None,
+            "timezone_shift": None,
+            "travel_stress": 0.0,
+        }
+
+    rest_days = (game.game_date - prev.game_date).days if prev.game_date else None
+    travel_miles = _distance_miles(prev.home_team_id, game.home_team_id)
+    prev_tz = TIMEZONE_MAP.get(prev.home_team_id)
+    curr_tz = TIMEZONE_MAP.get(game.home_team_id)
+    timezone_shift = (curr_tz - prev_tz) if prev_tz is not None and curr_tz is not None else None
+
+    stress = 0.0
+    if travel_miles is not None:
+        stress += min(0.45, travel_miles / 3500)
+    if rest_days is not None:
+        if rest_days <= 1:
+            stress += 0.30
+        elif rest_days == 2:
+            stress += 0.12
+    if timezone_shift is not None:
+        stress += min(0.25, abs(timezone_shift) * 0.08)
+
+    return {
+        "travel_miles": travel_miles,
+        "rest_days": rest_days,
+        "timezone_shift": timezone_shift,
+        "travel_stress": round(min(1.0, stress), 4),
+    }
+
+
 def collect_umpire_for_game(game_id: int, season: int, db: Session) -> Optional[dict]:
     """
-    Fetch umpire name, look up run impact, upsert into umpire_assignments_v4.
+    Fetch public officials, look up HP run impact, upsert into umpire_assignments_v4.
     Returns result dict or None on failure.
     """
     try:
-        umpire_name = fetch_umpire_assignment(game_id)
-        if not umpire_name:
-            umpire_name = "Unknown"
-            run_impact = 0.0
-        else:
-            run_impact = get_umpire_run_impact(umpire_name, db)
+        game = db.query(Game).filter(Game.game_id == game_id).first()
+        officials = fetch_game_officials(game_id)
 
-        # Check if we already have a row for this game
-        existing = (
-            db.query(UmpireAssignmentV4)
-            .filter(
-                UmpireAssignmentV4.game_id == game_id,
+        if not officials:
+            officials = [{"umpire_name": "Unknown", "official_type": "Home Plate"}]
+
+        saved_officials: list[dict[str, Any]] = []
+        hp_result: Optional[dict[str, Any]] = None
+
+        for official in officials:
+            umpire_name = official["umpire_name"]
+            official_type = official.get("official_type") or "Unknown"
+            run_impact = (
+                get_umpire_run_impact(umpire_name, db)
+                if umpire_name != "Unknown" and official_type == "Home Plate"
+                else 0.0
             )
-            .first()
-        )
-        if existing and umpire_name == "Unknown" and existing.umpire_name and existing.umpire_name != "Unknown":
-            return {
-                "umpire_name": existing.umpire_name,
-                "run_impact": existing.run_expectancy_impact or 0.0,
+            travel = build_umpire_travel_context(db, umpire_name, game) if umpire_name != "Unknown" else {
+                "travel_miles": None,
+                "rest_days": None,
+                "timezone_shift": None,
+                "travel_stress": 0.0,
             }
 
-        if existing:
-            existing.umpire_name = umpire_name
-            existing.run_expectancy_impact = run_impact
-            existing.historical_k_rate_delta = existing.historical_k_rate_delta or 0.0
-            existing.season = season
-        else:
-            db.add(UmpireAssignmentV4(
-                game_id=game_id,
-                umpire_name=umpire_name,
-                run_expectancy_impact=run_impact,
-                historical_k_rate_delta=0.0,
-                season=season,
-            ))
+            existing = (
+                db.query(UmpireAssignmentV4)
+                .filter(
+                    UmpireAssignmentV4.game_id == game_id,
+                    UmpireAssignmentV4.official_type == official_type,
+                )
+                .first()
+            )
+            if not existing and official_type == "Home Plate":
+                existing = (
+                    db.query(UmpireAssignmentV4)
+                    .filter(UmpireAssignmentV4.game_id == game_id)
+                    .first()
+                )
+
+            if existing and umpire_name == "Unknown" and existing.umpire_name and existing.umpire_name != "Unknown":
+                if official_type == "Home Plate":
+                    hp_result = {
+                        "umpire_name": existing.umpire_name,
+                        "run_impact": existing.run_expectancy_impact or 0.0,
+                        "officials": saved_officials,
+                        "travel_context": {
+                            "travel_miles": existing.travel_miles,
+                            "rest_days": existing.rest_days,
+                            "timezone_shift": existing.timezone_shift,
+                            "travel_stress": existing.travel_stress or 0.0,
+                        },
+                    }
+                continue
+
+            if existing:
+                existing.umpire_name = umpire_name
+                existing.official_type = official_type
+                existing.run_expectancy_impact = run_impact
+                existing.historical_k_rate_delta = existing.historical_k_rate_delta or 0.0
+                existing.season = season
+                existing.venue = game.venue if game else None
+                existing.home_team_id = game.home_team_id if game else None
+                existing.game_date = game.game_date if game else None
+                existing.travel_miles = travel["travel_miles"]
+                existing.rest_days = travel["rest_days"]
+                existing.timezone_shift = travel["timezone_shift"]
+                existing.travel_stress = travel["travel_stress"]
+            else:
+                db.add(UmpireAssignmentV4(
+                    game_id=game_id,
+                    umpire_name=umpire_name,
+                    official_type=official_type,
+                    run_expectancy_impact=run_impact,
+                    historical_k_rate_delta=0.0,
+                    season=season,
+                    venue=game.venue if game else None,
+                    home_team_id=game.home_team_id if game else None,
+                    game_date=game.game_date if game else None,
+                    travel_miles=travel["travel_miles"],
+                    rest_days=travel["rest_days"],
+                    timezone_shift=travel["timezone_shift"],
+                    travel_stress=travel["travel_stress"],
+                ))
+
+            item = {
+                "umpire_name": umpire_name,
+                "official_type": official_type,
+                "run_impact": run_impact,
+                "travel_context": travel,
+            }
+            saved_officials.append(item)
+            if official_type == "Home Plate":
+                hp_result = {
+                    "umpire_name": umpire_name,
+                    "run_impact": run_impact,
+                    "officials": saved_officials,
+                    "travel_context": travel,
+                }
+
         db.commit()
-        return {
-            "umpire_name": umpire_name,
-            "run_impact": run_impact,
-        }
+        if hp_result:
+            hp_result["officials"] = saved_officials
+            return hp_result
+
+        if saved_officials:
+            first = saved_officials[0]
+            return {
+                "umpire_name": first["umpire_name"],
+                "run_impact": 0.0,
+                "officials": saved_officials,
+                "travel_context": first["travel_context"],
+            }
+
+        return None
     except Exception as e:
         db.rollback()
         print(f"[v4 umpire] collect_umpire_for_game({game_id}) silenced error: {e}")

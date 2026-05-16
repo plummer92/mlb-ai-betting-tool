@@ -139,7 +139,11 @@ def get_convergence_plays(db: Session = Depends(get_db)):
 def get_umpires(db: Session = Depends(get_db)):
     rows = (
         db.query(UmpireAssignmentV4)
-        .order_by(UmpireAssignmentV4.run_expectancy_impact.desc())
+        .order_by(
+            UmpireAssignmentV4.game_date.desc().nullslast(),
+            UmpireAssignmentV4.game_id.desc().nullslast(),
+            UmpireAssignmentV4.run_expectancy_impact.desc(),
+        )
         .all()
     )
     return [
@@ -147,6 +151,14 @@ def get_umpires(db: Session = Depends(get_db)):
             "id": r.id,
             "game_id": r.game_id,
             "umpire_name": r.umpire_name,
+            "official_type": r.official_type,
+            "venue": r.venue,
+            "home_team_id": r.home_team_id,
+            "game_date": r.game_date.isoformat() if r.game_date else None,
+            "travel_miles": r.travel_miles,
+            "rest_days": r.rest_days,
+            "timezone_shift": r.timezone_shift,
+            "travel_stress": r.travel_stress,
             "run_expectancy_impact": r.run_expectancy_impact,
             "historical_k_rate_delta": r.historical_k_rate_delta,
             "season": r.season,
