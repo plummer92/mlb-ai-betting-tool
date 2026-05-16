@@ -739,6 +739,128 @@ tr:hover td { background: rgba(6,182,212,0.025); }
 .muted  { color: var(--muted); }
 .mono   { font-family: monospace; }
 
+/* v0.6 play-by-play shadow engine */
+.pbp-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.8fr) minmax(420px, 1.2fr);
+  gap: 18px;
+}
+@media (max-width: 1000px) { .pbp-layout { grid-template-columns: 1fr; } }
+.pbp-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+.pbp-select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 9px 12px;
+  border-radius: 4px;
+  min-width: 320px;
+  font-family: monospace;
+}
+.field {
+  position: relative;
+  height: 360px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: radial-gradient(circle at 50% 72%, rgba(16,185,129,0.18) 0 12%, transparent 13%), linear-gradient(135deg, rgba(16,185,129,0.10), rgba(6,182,212,0.04)), #06111b;
+}
+.diamond {
+  position: absolute;
+  left: 50%;
+  top: 58%;
+  width: 170px;
+  height: 170px;
+  border: 2px solid rgba(226,232,240,0.42);
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.base {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  background: var(--surface2);
+  border: 1px solid rgba(226,232,240,0.7);
+  transform: rotate(45deg);
+}
+.base.on { background: var(--yellow); box-shadow: 0 0 16px rgba(245,158,11,0.6); }
+.base.first { left: calc(50% + 72px); top: calc(58% - 9px); }
+.base.second { left: calc(50% - 9px); top: calc(58% - 90px); }
+.base.third { left: calc(50% - 90px); top: calc(58% - 9px); }
+.home-plate {
+  position: absolute;
+  left: calc(50% - 10px);
+  top: calc(58% + 75px);
+  width: 20px;
+  height: 20px;
+  background: var(--text);
+  clip-path: polygon(50% 100%, 0 45%, 0 0, 100% 0, 100% 45%);
+}
+.ball-dot {
+  position: absolute;
+  left: 50%;
+  top: 58%;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 0 18px rgba(239,68,68,0.75);
+  transform: translate(-50%, -50%);
+  transition: all 0.4s ease;
+}
+.ball-dot.home_run { left: 50%; top: 13%; }
+.ball-dot.triple { left: 23%; top: 30%; }
+.ball-dot.double { left: 78%; top: 32%; }
+.ball-dot.single { left: 66%; top: 49%; }
+.ball-dot.walk { left: 59%; top: 62%; background: var(--yellow); }
+.ball-dot.strikeout, .ball-dot.out { left: 50%; top: 74%; background: var(--cyan); }
+.scorebug {
+  position: absolute;
+  left: 14px;
+  top: 14px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 5px 12px;
+  min-width: 210px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  background: rgba(6,10,18,0.82);
+  border-radius: 6px;
+  font-family: monospace;
+}
+.scorebug .runs { font-weight: 700; color: var(--cyan); text-align: right; }
+.event-callout {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  padding: 13px 15px;
+  border: 1px solid var(--border-glow);
+  border-radius: 6px;
+  background: rgba(6,10,18,0.88);
+}
+.event-title { display: flex; justify-content: space-between; gap: 10px; color: var(--cyan); font-family: monospace; font-weight: 700; margin-bottom: 5px; }
+.event-text { color: #c9d6e6; font-size: 13px; line-height: 1.5; }
+.event-list {
+  max-height: 360px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #060a12;
+}
+.event-row {
+  display: grid;
+  grid-template-columns: 54px 92px 1fr 58px;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid rgba(30,48,80,0.55);
+  font-size: 12px;
+}
+.event-row.active { background: rgba(6,182,212,0.09); }
+.event-row.highlight { border-left: 3px solid var(--yellow); }
+.compare-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 900px) { .compare-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.lesson-list { display: grid; gap: 8px; margin-top: 12px; }
+.lesson { border: 1px solid var(--border); border-left: 3px solid var(--orange); border-radius: 6px; padding: 10px 12px; background: var(--surface2); font-size: 12px; }
+
 @media (max-width: 600px) {
   .container { padding: 14px 16px; }
   .header { padding: 0 16px; }
@@ -775,6 +897,59 @@ tr:hover td { background: rgba(6,182,212,0.025); }
 
 
 <div class="container">
+
+  <div class="section">
+    <div class="section-head">
+      <div class="section-label">v0.6 Game Engine</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="pbp-badge">Shadow Mode</div>
+    </div>
+
+    <div class="summary-bar" style="border-left-color: var(--blue); background: var(--surface2); padding: 20px;">
+      <div class="pbp-controls">
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <label style="font-family:monospace;font-size:11px;color:var(--muted);text-transform:uppercase;">Game</label>
+          <select id="pbp-game-select" class="pbp-select">
+            <option value="">Loading today's games</option>
+          </select>
+        </div>
+        <button class="refresh-btn" style="height:40px;padding:0 20px;" onclick="runPbpSimulation()">RUN REEL</button>
+        <button class="refresh-btn" style="height:40px;padding:0 20px;" onclick="playPbp()">PLAY</button>
+        <button class="refresh-btn" style="height:40px;padding:0 20px;" onclick="pausePbp()">PAUSE</button>
+        <button class="refresh-btn" style="height:40px;padding:0 20px;" onclick="comparePbp()">COMPARE ACTUAL</button>
+      </div>
+    </div>
+
+    <div class="pbp-layout">
+      <div class="field" id="pbp-field">
+        <div class="scorebug">
+          <div class="team" id="pbp-away-name">AWAY</div><div class="runs" id="pbp-away-score">0</div>
+          <div class="team" id="pbp-home-name">HOME</div><div class="runs" id="pbp-home-score">0</div>
+          <div class="muted mono" id="pbp-frame" style="grid-column:1 / span 2;">Select a game</div>
+        </div>
+        <div class="diamond"></div>
+        <div class="base first" id="base-first"></div>
+        <div class="base second" id="base-second"></div>
+        <div class="base third" id="base-third"></div>
+        <div class="home-plate"></div>
+        <div class="ball-dot" id="pbp-ball"></div>
+        <div class="event-callout">
+          <div class="event-title"><span id="pbp-event-label">READY</span><span id="pbp-outs">0 OUTS</span></div>
+          <div class="event-text" id="pbp-event-text">Run a v0.6 shadow simulation to create a game-flow highlight reel.</div>
+        </div>
+      </div>
+      <div>
+        <div id="pbp-summary" class="summary-bar" style="margin-bottom:12px;">
+          <div class="s-stat"><div class="s-stat-val muted">--</div><div class="s-stat-lbl">Projected Total</div></div>
+          <div class="s-stat"><div class="s-stat-val muted">--</div><div class="s-stat-lbl">Sim Total</div></div>
+          <div class="s-stat"><div class="s-stat-val muted">--</div><div class="s-stat-lbl">Highlights</div></div>
+        </div>
+        <div class="event-list" id="pbp-event-list"><div class="loading">No reel loaded.</div></div>
+      </div>
+    </div>
+
+    <div id="pbp-compare" class="card" style="margin-top:14px;display:none;"></div>
+  </div>
 
   <!-- ═══════════════ BANKROLL SIMULATOR ═══════════════ -->
   <div class="section">
@@ -834,6 +1009,143 @@ function gameTime(iso) {
 function colorClass(val, good, warn) {
   if (val == null) return 'muted';
   return val >= good ? 'green' : val >= warn ? 'yellow' : 'red';
+}
+
+let pbpData = null;
+let pbpIndex = 0;
+let pbpTimer = null;
+
+async function loadPbpGames() {
+  try {
+    const res = await fetch('/api/games/today');
+    const games = await res.json();
+    const select = $('pbp-game-select');
+    if (!games.length) {
+      select.innerHTML = '<option value="">No games synced for today</option>';
+      return;
+    }
+    select.innerHTML = games.map(g => `<option value="${g.game_id}">${esc(g.away_team)} @ ${esc(g.home_team)} - ${gameTime(g.start_time)}</option>`).join('');
+  } catch(e) {
+    $('pbp-game-select').innerHTML = `<option value="">Error loading games</option>`;
+  }
+}
+
+async function runPbpSimulation() {
+  const gameId = $('pbp-game-select').value;
+  if (!gameId) return;
+  pausePbp();
+  $('pbp-badge').textContent = 'Loading';
+  $('pbp-event-list').innerHTML = '<div class="loading">Building game-flow reel</div>';
+  $('pbp-compare').style.display = 'none';
+  try {
+    const res = await fetch(`/api/playbyplay/simulate/${gameId}`);
+    pbpData = await res.json();
+    pbpIndex = 0;
+    if (pbpData.status !== 'ok') {
+      $('pbp-event-list').innerHTML = '<div class="empty">Simulation unavailable for this game.</div>';
+      return;
+    }
+    $('pbp-badge').textContent = pbpData.model_version || 'v0.6';
+    renderPbpSummary();
+    renderPbpList();
+    renderPbpEvent(0);
+  } catch(e) {
+    $('pbp-event-list').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderPbpSummary() {
+  if (!pbpData) return;
+  $('pbp-summary').innerHTML = `
+    <div class="s-stat"><div class="s-stat-val cyan">${fmt(pbpData.projection.total, 1)}</div><div class="s-stat-lbl">Projected Total</div></div>
+    <div class="s-stat"><div class="s-stat-val yellow">${pbpData.simulated_final.total}</div><div class="s-stat-lbl">Sim Total</div></div>
+    <div class="s-stat"><div class="s-stat-val">${pbpData.highlights.length}</div><div class="s-stat-lbl">Highlights</div></div>
+    <div class="s-stat"><div class="s-stat-val">${pbpData.events.length}</div><div class="s-stat-lbl">Plate Apps</div></div>
+  `;
+}
+
+function renderPbpList() {
+  if (!pbpData) return;
+  $('pbp-event-list').innerHTML = pbpData.events.map((e, idx) => `
+    <div class="event-row ${e.is_highlight ? 'highlight' : ''}" id="pbp-row-${idx}" onclick="renderPbpEvent(${idx})">
+      <div class="mono">${e.half === 'top' ? 'T' : 'B'}${e.inning}</div>
+      <div class="mono">${esc(e.label)}</div>
+      <div>${esc(e.batting_team)}</div>
+      <div class="mono">${e.score.away}-${e.score.home}</div>
+    </div>
+  `).join('');
+}
+
+function renderPbpEvent(idx) {
+  if (!pbpData || !pbpData.events.length) return;
+  pbpIndex = Math.max(0, Math.min(idx, pbpData.events.length - 1));
+  const e = pbpData.events[pbpIndex];
+  $('pbp-away-name').textContent = pbpData.game.away_team;
+  $('pbp-home-name').textContent = pbpData.game.home_team;
+  $('pbp-away-score').textContent = e.score.away;
+  $('pbp-home-score').textContent = e.score.home;
+  $('pbp-frame').textContent = `${e.half.toUpperCase()} ${e.inning} - ${e.pitcher || 'Pitcher TBD'}`;
+  $('pbp-event-label').textContent = e.label;
+  $('pbp-event-text').textContent = e.commentary;
+  $('pbp-outs').textContent = `${e.outs_after} OUT${e.outs_after === 1 ? '' : 'S'}`;
+  $('base-first').classList.toggle('on', Boolean(e.bases_after.first));
+  $('base-second').classList.toggle('on', Boolean(e.bases_after.second));
+  $('base-third').classList.toggle('on', Boolean(e.bases_after.third));
+  $('pbp-ball').className = `ball-dot ${e.outcome}`;
+  document.querySelectorAll('.event-row.active').forEach(el => el.classList.remove('active'));
+  const row = $(`pbp-row-${pbpIndex}`);
+  if (row) {
+    row.classList.add('active');
+    row.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function playPbp() {
+  if (!pbpData || !pbpData.events.length) return;
+  pausePbp();
+  pbpTimer = setInterval(() => {
+    renderPbpEvent(pbpIndex + 1);
+    if (pbpIndex >= pbpData.events.length - 1) pausePbp();
+  }, 900);
+}
+
+function pausePbp() {
+  if (pbpTimer) clearInterval(pbpTimer);
+  pbpTimer = null;
+}
+
+async function comparePbp() {
+  const gameId = $('pbp-game-select').value;
+  if (!gameId) return;
+  $('pbp-compare').style.display = 'block';
+  $('pbp-compare').innerHTML = '<div class="loading">Checking actual play-by-play feed</div>';
+  try {
+    const res = await fetch(`/api/playbyplay/compare/${gameId}`);
+    const data = await res.json();
+    if (data.status !== 'ok') {
+      $('pbp-compare').innerHTML = '<div class="empty">Actual play-by-play is not ready yet. Re-run after the game has live or final events.</div>';
+      return;
+    }
+    const lessons = data.lessons.length
+      ? data.lessons.map(l => `<div class="lesson"><strong>${esc(l.type)}</strong><br>${esc(l.message)}</div>`).join('')
+      : '<div class="lesson">No major blind spot flagged by the first-pass comparison.</div>';
+    $('pbp-compare').innerHTML = `
+      <div class="section-head">
+        <div class="section-label">Actual Comparison</div>
+        <div class="section-rule"></div>
+        <div class="section-badge">Learning Notes</div>
+      </div>
+      <div class="compare-grid">
+        <div class="ms-tile"><div class="ms-val ${data.deltas.runs >= 0 ? 'yellow' : 'cyan'}">${data.deltas.runs > 0 ? '+' : ''}${data.deltas.runs}</div><div class="ms-lbl">Run Delta</div></div>
+        <div class="ms-tile"><div class="ms-val">${data.deltas.home_runs > 0 ? '+' : ''}${data.deltas.home_runs}</div><div class="ms-lbl">HR Delta</div></div>
+        <div class="ms-tile"><div class="ms-val">${data.deltas.walks > 0 ? '+' : ''}${data.deltas.walks}</div><div class="ms-lbl">Walk Delta</div></div>
+        <div class="ms-tile"><div class="ms-val">${data.deltas.strikeouts > 0 ? '+' : ''}${data.deltas.strikeouts}</div><div class="ms-lbl">K Delta</div></div>
+      </div>
+      <div class="lesson-list">${lessons}</div>
+    `;
+  } catch(e) {
+    $('pbp-compare').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
 }
 
 
@@ -934,6 +1246,7 @@ document.addEventListener('DOMContentLoaded', () => {
   $('hdr-date').textContent = new Date().toLocaleDateString('en-US', {
     weekday:'short', month:'short', day:'numeric', year:'numeric',
   }).toUpperCase();
+  loadPbpGames();
   
   $('cdown').parentElement.style.display = 'none';
 });

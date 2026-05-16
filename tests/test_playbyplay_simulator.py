@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import unittest
+from datetime import date, datetime, timezone
+from unittest.mock import Mock, patch
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.db import Base
+from app.models.schema import Game, Prediction
+from app.services.playbyplay_simulator import (
+    compare_sim_to_actual,
+    fetch_actual_play_by_play,
+    simulate_play_by_play,
+)
+
+
+class PlayByPlaySimulatorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.engine = create_engine("sqlite:///:memory:")
+        testing_session_local = sessionmaker(bind=self.engine, autocommit=False, autoflush=False)
+        Base.metadata.create_all(bind=self.engine)
+        self.db = testing_session_local()
+        game = Game(
+            game_id=101,
+            game_date=date(2026, 5, 16),
+            season=2026,
+            away_team="Away Club",
+            home_team="Home Club",
+            away_team_id=1,
+            home_team_id=2,
+            venue="Test Park",
+            status="Preview",
+            start_time=datetime(2026, 5, 16, 18, 0, tzinfo=timezone.utc),
+            away_probable_pitcher="Away Starter",
+            home_probable_pitcher="Home Starter",
+        )
+        prediction = Prediction(
+            game_id=101,
+            model_version="v-test",
+            away_win_pct=0.46,
+            home_win_pct=0.54,
+            projected_away_score=3.9,
+            projected_home_score=4.7,
+            projected_total=8.6,
+            confidence_score=8.0,
+            recommended_side="HOME",
+            is_active=True,
+        )
+        self.db.add_all([game, prediction])
+        self.db.commit()
+
+    def tearDown(self) -> None:
+        self.db.close()
+        Base.metadata.drop_all(bind=self.engine)
+        self.engine.dispose()
+
+    def test_simulate_play_by_play_is_deterministic_and_visual_ready(self) -> None:
+        first = simulate_play_by_play(self.db, 101)
+        second = simulate_play_by_play(self.db, 101)
+
+        self.assertEqual(first["status"], "ok")
+        self.assertEqual(first["model_version"], "v0.6-pbp-shadow")
+        self.assertEqual(first["events"], second["events"])
+        self.assertGreater(len(first["events"]), 40)
+        self.assertIn("score", first["events"][0])
+        self.assertIn("bases_after", first["events"][0])
+        self.assertGreaterEqual(len(first["highlights"]), 1)
+
+    @patch("app.services.playbyplay_simulator.requests.get")
+    def test_fetch_actual_play_by_play_summarizes_mlb_feed(self, get_mock: Mock) -> None:
+        get_mock.return_value.status_code = 200
+        get_mock.return_value.json.return_value = {
+            "gameData": {
+                "teams": {
+                    "away": {"name": "Away Club"},
+                    "home": {"name": "Home Club"},
+                }
+            },
+            "liveData": {
+                "plays": {
+                    "allPlays": [
+                        {
+                            "about": {"inning": 1, "halfInning": "top"},
+                            "result": {"eventType": "home_run", "event": "Home Run", "rbi": 2, "description": "Two-run homer"},
+                            "matchup": {"batter": {"fullName": "Batter A"}, "pitcher": {"fullName": "Pitcher H"}},
+                        },
+                        {
+                            "about": {"inning": 1, "halfInning": "bottom"},
+                            "result": {"eventType": "strikeout", "event": "Strikeout", "rbi": 0, "description": "Strikeout"},
+                            "matchup": {"batter": {"fullName": "Batter H"}, "pitcher": {"fullName": "Pitcher A"}},
+                        },
+                    ]
+                }
+            },
+        }
+
+        actual = fetch_actual_play_by_play(101)
+
+        self.assertEqual(actual["status"], "ok")
+        self.assertEqual(actual["summary"]["runs"], 2)
+        self.assertEqual(actual["summary"]["home_runs"], 1)
+        self.assertEqual(actual["summary"]["strikeouts"], 1)
+        self.assertEqual(len(actual["highlights"]), 1)
+
+    @patch("app.services.playbyplay_simulator.fetch_actual_play_by_play")
+    def test_compare_sim_to_actual_reports_not_ready_without_actual_events(self, actual_mock: Mock) -> None:
+        actual_mock.return_value = {"status": "ok", "game_id": 101, "events": [], "summary": {}}
+
+        result = compare_sim_to_actual(self.db, 101)
+
+        self.assertEqual(result["status"], "not_ready")
+        self.assertEqual(result["game_id"], 101)
+
+
+if __name__ == "__main__":
+    unittest.main()
