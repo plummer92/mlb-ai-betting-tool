@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models.schema import Game, Prediction
+from app.models.schema import Game, Prediction, SandboxPredictionV4
 from app.services.playbyplay_simulator import (
     compare_sim_to_actual,
     fetch_actual_play_by_play,
@@ -48,7 +48,22 @@ class PlayByPlaySimulatorTests(unittest.TestCase):
             recommended_side="HOME",
             is_active=True,
         )
-        self.db.add_all([game, prediction])
+        sandbox = SandboxPredictionV4(
+            game_id=101,
+            game_date=date(2026, 5, 16),
+            season=2026,
+            away_team="Away Club",
+            home_team="Home Club",
+            f5_projected_total=4.2,
+            full_game_projected_total=8.8,
+            umpire_name="Tight Zone",
+            umpire_run_impact=0.15,
+            home_bullpen_strength=0.72,
+            away_bullpen_strength=0.44,
+            bullpen_convergence=False,
+            wind_factor=0.2,
+        )
+        self.db.add_all([game, prediction, sandbox])
         self.db.commit()
 
     def tearDown(self) -> None:
@@ -67,6 +82,11 @@ class PlayByPlaySimulatorTests(unittest.TestCase):
         self.assertIn("score", first["events"][0])
         self.assertIn("bases_after", first["events"][0])
         self.assertGreaterEqual(len(first["highlights"]), 1)
+        self.assertIn("projection_drift", first)
+        self.assertTrue(any("is_model_miss_clue" in event for event in first["events"]))
+        self.assertTrue(first["context"]["uses_sandbox_signals"])
+        self.assertEqual(first["context"]["umpire"]["name"], "Tight Zone")
+        self.assertEqual(first["context"]["bullpen"]["away_strength"], 0.44)
 
     @patch("app.services.playbyplay_simulator.requests.get")
     def test_fetch_actual_play_by_play_summarizes_mlb_feed(self, get_mock: Mock) -> None:

@@ -856,6 +856,38 @@ tr:hover td { background: rgba(6,182,212,0.025); }
 }
 .event-row.active { background: rgba(6,182,212,0.09); }
 .event-row.highlight { border-left: 3px solid var(--yellow); }
+.pbp-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.pbp-filter-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.pbp-filter-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 5px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: monospace;
+  font-size: 10px;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+.pbp-filter-btn.active {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  background: var(--cyan-dim);
+}
+.context-line {
+  color: var(--muted);
+  font-family: monospace;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+}
 .compare-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 @media (max-width: 900px) { .compare-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .lesson-list { display: grid; gap: 8px; margin-top: 12px; }
@@ -944,6 +976,14 @@ tr:hover td { background: rgba(6,182,212,0.025); }
           <div class="s-stat"><div class="s-stat-val muted">--</div><div class="s-stat-lbl">Sim Total</div></div>
           <div class="s-stat"><div class="s-stat-val muted">--</div><div class="s-stat-lbl">Highlights</div></div>
         </div>
+        <div class="pbp-filter-bar">
+          <div class="pbp-filter-buttons">
+            <button class="pbp-filter-btn active" id="pbp-filter-all" onclick="setPbpFilter('all')">All Plays</button>
+            <button class="pbp-filter-btn" id="pbp-filter-scoring" onclick="setPbpFilter('scoring')">Scoring</button>
+            <button class="pbp-filter-btn" id="pbp-filter-clues" onclick="setPbpFilter('clues')">Model-Miss Clues</button>
+          </div>
+          <div class="context-line" id="pbp-context-line">Run a reel to inspect inputs.</div>
+        </div>
         <div class="event-list" id="pbp-event-list"><div class="loading">No reel loaded.</div></div>
       </div>
     </div>
@@ -1014,6 +1054,7 @@ function colorClass(val, good, warn) {
 let pbpData = null;
 let pbpIndex = 0;
 let pbpTimer = null;
+let pbpFilter = 'all';
 
 async function loadPbpGames() {
   try {
@@ -1047,6 +1088,7 @@ async function runPbpSimulation() {
     }
     $('pbp-badge').textContent = pbpData.model_version || 'v0.6';
     renderPbpSummary();
+    renderPbpContext();
     renderPbpList();
     renderPbpEvent(0);
   } catch(e) {
@@ -1056,24 +1098,64 @@ async function runPbpSimulation() {
 
 function renderPbpSummary() {
   if (!pbpData) return;
+  const drift = pbpData.projection_drift ?? (pbpData.simulated_final.total - pbpData.projection.total);
+  const driftCls = Math.abs(drift) <= 2 ? 'green' : Math.abs(drift) <= 4 ? 'yellow' : 'red';
+  const driftLabel = `${drift >= 0 ? '+' : ''}${fmt(drift, 1)}`;
   $('pbp-summary').innerHTML = `
     <div class="s-stat"><div class="s-stat-val cyan">${fmt(pbpData.projection.total, 1)}</div><div class="s-stat-lbl">Projected Total</div></div>
     <div class="s-stat"><div class="s-stat-val yellow">${pbpData.simulated_final.total}</div><div class="s-stat-lbl">Sim Total</div></div>
+    <div class="s-stat"><div class="s-stat-val ${driftCls}">${driftLabel}</div><div class="s-stat-lbl">Sim vs Model</div></div>
     <div class="s-stat"><div class="s-stat-val">${pbpData.highlights.length}</div><div class="s-stat-lbl">Highlights</div></div>
     <div class="s-stat"><div class="s-stat-val">${pbpData.events.length}</div><div class="s-stat-lbl">Plate Apps</div></div>
   `;
 }
 
+function renderPbpContext() {
+  if (!pbpData) return;
+  const ctx = pbpData.context || {};
+  const bp = ctx.bullpen || {};
+  const ump = ctx.umpire || {};
+  const awayBp = bp.away_strength != null ? fmt(bp.away_strength * 100, 0) + '%' : '--';
+  const homeBp = bp.home_strength != null ? fmt(bp.home_strength * 100, 0) + '%' : '--';
+  const umpText = ump.name ? `${ump.name} (${fmt(ump.run_impact, 2)} run impact)` : 'umpire unknown';
+  const source = ctx.uses_sandbox_signals ? 'sandbox bullpen/umpire on' : 'projection-only fallback';
+  $('pbp-context-line').textContent = `${source} | BP ${awayBp}/${homeBp} | ${umpText}`;
+}
+
+function filteredPbpEvents() {
+  if (!pbpData) return [];
+  if (pbpFilter === 'scoring') return pbpData.events.filter(e => e.is_scoring_play || e.runs > 0);
+  if (pbpFilter === 'clues') return pbpData.events.filter(e => e.is_model_miss_clue || e.governor_note);
+  return pbpData.events;
+}
+
+function setPbpFilter(filter) {
+  pbpFilter = filter;
+  ['all', 'scoring', 'clues'].forEach(name => {
+    const el = $(`pbp-filter-${name}`);
+    if (el) el.classList.toggle('active', name === filter);
+  });
+  renderPbpList();
+}
+
 function renderPbpList() {
   if (!pbpData) return;
-  $('pbp-event-list').innerHTML = pbpData.events.map((e, idx) => `
-    <div class="event-row ${e.is_highlight ? 'highlight' : ''}" id="pbp-row-${idx}" onclick="renderPbpEvent(${idx})">
+  const rows = filteredPbpEvents();
+  if (!rows.length) {
+    $('pbp-event-list').innerHTML = '<div class="empty">No plays match this filter.</div>';
+    return;
+  }
+  $('pbp-event-list').innerHTML = rows.map(e => {
+    const idx = pbpData.events.indexOf(e);
+    const clue = e.governor_note ? ` title="${esc(e.governor_note)}"` : '';
+    return `
+    <div class="event-row ${e.is_highlight ? 'highlight' : ''}" id="pbp-row-${idx}" onclick="renderPbpEvent(${idx})"${clue}>
       <div class="mono">${e.half === 'top' ? 'T' : 'B'}${e.inning}</div>
       <div class="mono">${esc(e.label)}</div>
       <div>${esc(e.batting_team)}</div>
       <div class="mono">${e.score.away}-${e.score.home}</div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 function renderPbpEvent(idx) {
@@ -1086,7 +1168,9 @@ function renderPbpEvent(idx) {
   $('pbp-home-score').textContent = e.score.home;
   $('pbp-frame').textContent = `${e.half.toUpperCase()} ${e.inning} - ${e.pitcher || 'Pitcher TBD'}`;
   $('pbp-event-label').textContent = e.label;
-  $('pbp-event-text').textContent = e.commentary;
+  $('pbp-event-text').textContent = e.governor_note
+    ? `${e.commentary} (${e.governor_note.replace(/_/g, ' ')})`
+    : e.commentary;
   $('pbp-outs').textContent = `${e.outs_after} OUT${e.outs_after === 1 ? '' : 'S'}`;
   $('base-first').classList.toggle('on', Boolean(e.bases_after.first));
   $('base-second').classList.toggle('on', Boolean(e.bases_after.second));

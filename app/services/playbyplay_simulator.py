@@ -3,14 +3,14 @@ from __future__ import annotations
 import random
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import requests
 from sqlalchemy.orm import Session
 
 from app.config import MLB_API_BASE
-from app.models.schema import Game, Prediction, SandboxPredictionV4
+from app.models.schema import Game, ManagerTendency, Prediction, RelieverWorkload, SandboxPredictionV4
 
 
 MODEL_VERSION = "v0.6-pbp-shadow"
@@ -30,6 +30,10 @@ class HalfState:
     bases: list[bool]
     outs: int = 0
     runs: int = 0
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
 
 
 def _latest_prediction(db: Session, game_id: int) -> Prediction | None:
@@ -62,20 +66,22 @@ def _iso_or_raw(value: Any) -> str | None:
 
 
 def _event_weights(target_runs: float, sandbox: SandboxPredictionV4 | None, *, is_home: bool) -> list[tuple[str, float]]:
-    run_factor = max(0.72, min(1.38, target_runs / 4.2))
+    run_factor = _clamp(target_runs / 4.2, 0.72, 1.32)
     wind_factor = float(sandbox.wind_factor or 0.0) if sandbox and sandbox.wind_factor is not None else 0.0
+    umpire_impact = float(sandbox.umpire_run_impact or 0.0) if sandbox and sandbox.umpire_run_impact is not None else 0.0
     bullpen_boost = 0.0
     if sandbox:
-        strength = sandbox.home_bullpen_strength if is_home else sandbox.away_bullpen_strength
+        # The batting team is affected by the opposing bullpen, not its own.
+        strength = sandbox.away_bullpen_strength if is_home else sandbox.home_bullpen_strength
         if strength is not None:
-            bullpen_boost = max(-0.025, min(0.025, (0.55 - float(strength)) * 0.05))
+            bullpen_boost = _clamp((0.55 - float(strength)) * 0.05, -0.025, 0.025)
 
-    hr = max(0.018, min(0.062, 0.032 * run_factor + (wind_factor * 0.018)))
-    double = max(0.030, min(0.072, 0.045 * run_factor + (wind_factor * 0.006)))
-    walk = max(0.060, min(0.120, 0.083 * run_factor + bullpen_boost))
-    single = max(0.115, min(0.190, 0.148 * run_factor))
-    triple = max(0.002, min(0.010, 0.005 * run_factor))
-    strikeout = max(0.165, min(0.280, 0.225 - ((run_factor - 1.0) * 0.045)))
+    hr = _clamp(0.026 * run_factor + (wind_factor * 0.014), 0.014, 0.052)
+    double = _clamp(0.038 * run_factor + (wind_factor * 0.005), 0.026, 0.064)
+    walk = _clamp(0.074 * run_factor + bullpen_boost + (umpire_impact * 0.008), 0.052, 0.112)
+    single = _clamp(0.136 * run_factor, 0.105, 0.178)
+    triple = _clamp(0.004 * run_factor, 0.001, 0.009)
+    strikeout = _clamp(0.232 - ((run_factor - 1.0) * 0.035) - (umpire_impact * 0.006), 0.170, 0.290)
     generic_out = max(0.280, 1.0 - (hr + double + walk + single + triple + strikeout))
     return [
         ("home_run", hr),
@@ -104,16 +110,24 @@ def _force_run_pressure(
     state: HalfState,
     inning: int,
     rng: random.Random,
-) -> str:
-    expected_so_far = state.target_runs * (inning / 9.0)
-    if state.runs < expected_so_far - 1.2 and state.outs < 2 and rng.random() < 0.22:
-        return rng.choice(["single", "double", "walk"])
-    if state.runs > expected_so_far + 1.5 and rng.random() < 0.24:
-        return rng.choice(["strikeout", "out"])
-    return outcome
+) -> tuple[str, str | None]:
+    batting_runs = state.score_home if state.half == "bottom" else state.score_away
+    inning_progress = ((inning - 1) + ((state.outs + 1) / 6.0)) / 9.0
+    expected_so_far = state.target_runs * _clamp(inning_progress, 0.05, 1.0)
+    ahead_of_pace = batting_runs - expected_so_far
+    behind_pace = expected_so_far - batting_runs
+
+    productive = outcome in {"walk", "single", "double", "triple", "home_run"}
+    if batting_runs >= state.target_runs + 1.5 and productive and rng.random() < 0.72:
+        return rng.choice(["strikeout", "out"]), "suppressed_hot_pace"
+    if ahead_of_pace > 1.25 and productive and rng.random() < _clamp(0.34 + (ahead_of_pace * 0.08), 0.34, 0.72):
+        return rng.choice(["strikeout", "out"]), "suppressed_hot_pace"
+    if behind_pace > 1.15 and batting_runs < state.target_runs - 0.6 and state.outs < 2 and rng.random() < 0.16:
+        return rng.choice(["single", "walk", "double"]), "created_catchup_pressure"
+    return outcome, None
 
 
-def _advance_runners(bases: list[bool], outcome: str) -> tuple[list[bool], int, int]:
+def _advance_runners(bases: list[bool], outcome: str, rng: random.Random) -> tuple[list[bool], int, int]:
     runs = 0
     rbi = 0
     first, second, third = bases
@@ -125,13 +139,16 @@ def _advance_runners(bases: list[bool], outcome: str) -> tuple[list[bool], int, 
         new_second = second or first
         return [True, new_second, new_third], runs, rbi
     if outcome == "single":
-        runs += int(third) + int(second)
-        rbi += int(third) + int(second)
-        return [True, first, False], runs, rbi
+        second_scores = second and rng.random() < 0.58
+        first_to_third = first and rng.random() < 0.34
+        runs += int(third) + int(second_scores)
+        rbi += int(third) + int(second_scores)
+        return [True, first and not first_to_third, first_to_third or (second and not second_scores)], runs, rbi
     if outcome == "double":
-        runs += int(third) + int(second) + int(first)
-        rbi += int(third) + int(second) + int(first)
-        return [False, True, False], runs, rbi
+        first_scores = first and rng.random() < 0.62
+        runs += int(third) + int(second) + int(first_scores)
+        rbi += int(third) + int(second) + int(first_scores)
+        return [False, True, first and not first_scores], runs, rbi
     if outcome == "triple":
         runs += int(third) + int(second) + int(first)
         rbi += int(third) + int(second) + int(first)
@@ -141,6 +158,83 @@ def _advance_runners(bases: list[bool], outcome: str) -> tuple[list[bool], int, 
         rbi += runs
         return [False, False, False], runs, rbi
     return bases, 0, 0
+
+
+def _safe_bullpen_report(db: Session, team_id: int | None) -> dict[str, Any] | None:
+    if team_id is None:
+        return None
+    try:
+        target_date = date.today()
+        three_days_ago = target_date - timedelta(days=3)
+        rows = (
+            db.query(RelieverWorkload)
+            .filter(
+                RelieverWorkload.team_id == team_id,
+                RelieverWorkload.date >= three_days_ago,
+                RelieverWorkload.date < target_date,
+            )
+            .all()
+        )
+        manager = db.query(ManagerTendency).filter(ManagerTendency.team_id == team_id).first()
+        team_game = (
+            db.query(Game)
+            .filter((Game.home_team_id == team_id) | (Game.away_team_id == team_id))
+            .order_by(Game.game_date.desc())
+            .first()
+        )
+        team_name = None
+        if team_game:
+            team_name = team_game.home_team if team_game.home_team_id == team_id else team_game.away_team
+
+        player_pitches: dict[int, int] = {}
+        player_latest: dict[int, date] = {}
+        player_names: dict[int, str] = {}
+        for row in rows:
+            if row.player_id is None:
+                continue
+            player_pitches[row.player_id] = player_pitches.get(row.player_id, 0) + int(row.pitches_thrown or 0)
+            if row.player_id not in player_latest or row.date > player_latest[row.player_id]:
+                player_latest[row.player_id] = row.date
+                player_names[row.player_id] = row.player_name or f"Player {row.player_id}"
+
+        fatigued_arms = []
+        fresh_arms = []
+        for player_id, last_date in player_latest.items():
+            days_rest = (target_date - last_date).days
+            if days_rest < 2:
+                fatigued_arms.append({
+                    "name": player_names[player_id],
+                    "days_rest": days_rest,
+                    "pitches_last_3": player_pitches.get(player_id, 0),
+                })
+            elif days_rest >= 3:
+                fresh_arms.append({"name": player_names[player_id], "days_rest": days_rest})
+
+        last_3_days_pitches = sum(int(row.pitches_thrown or 0) for row in rows)
+        b2b_rate = float(manager.b2b_usage_rate) if manager and manager.b2b_usage_rate is not None else 0.30
+        bullpen_strength = _clamp(1.0 - (last_3_days_pitches / 180.0) - (b2b_rate * 0.18), 0.05, 1.0)
+        if bullpen_strength < 0.30:
+            fatigue_signal = "exhausted"
+        elif bullpen_strength < 0.55:
+            fatigue_signal = "tired"
+        elif bullpen_strength < 0.75:
+            fatigue_signal = "rested"
+        else:
+            fatigue_signal = "fresh"
+
+        return {
+            "team_id": team_id,
+            "team_name": team_name or f"Team {team_id}",
+            "bullpen_strength": round(bullpen_strength, 2),
+            "fatigue_signal": fatigue_signal,
+            "last_3_days_pitches": last_3_days_pitches,
+            "manager_name": manager.manager_name if manager and manager.manager_name else "Unknown",
+            "b2b_usage_rate": round(b2b_rate, 2),
+            "fatigued_arms": sorted(fatigued_arms, key=lambda item: item["days_rest"])[:3],
+            "fresh_arms": sorted(fresh_arms, key=lambda item: item["days_rest"], reverse=True)[:2],
+        }
+    except Exception:
+        return None
 
 
 def _event_label(outcome: str) -> str:
@@ -204,13 +298,13 @@ def simulate_play_by_play(db: Session, game_id: int) -> dict[str, Any]:
             batter_slot = 1
             while state.outs < 3 and event_id <= MAX_EVENTS:
                 before_score = score_home - score_away
-                outcome = _force_run_pressure(_choose(rng, weights), state, inning, rng)
+                outcome, governor_note = _force_run_pressure(_choose(rng, weights), state, inning, rng)
                 if outcome in {"strikeout", "out"}:
                     state.outs += 1
                     runs = 0
                     rbi = 0
                 else:
-                    state.bases, runs, rbi = _advance_runners(state.bases, outcome)
+                    state.bases, runs, rbi = _advance_runners(state.bases, outcome, rng)
                     state.runs += runs
                     if is_home_batting:
                         score_home += runs
@@ -239,6 +333,9 @@ def simulate_play_by_play(db: Session, game_id: int) -> dict[str, Any]:
                         "bases_after": {"first": state.bases[0], "second": state.bases[1], "third": state.bases[2]},
                         "score": {"away": score_away, "home": score_home},
                         "is_highlight": bool(runs or outcome == "home_run" or lead_change),
+                        "is_scoring_play": bool(runs),
+                        "is_model_miss_clue": bool(governor_note or runs >= 2 or lead_change),
+                        "governor_note": governor_note,
                         "commentary": _event_commentary(outcome, runs, state.batting_team, inning, half),
                     }
                 )
@@ -248,6 +345,12 @@ def simulate_play_by_play(db: Session, game_id: int) -> dict[str, Any]:
     highlights = [e for e in events if e["is_highlight"]]
     if len(highlights) < 6:
         highlights = sorted(events, key=lambda e: (e["runs"], e["outcome"] == "home_run"), reverse=True)[:6]
+
+    projected_total = round(away_target + home_target, 2)
+    simulated_total = score_away + score_home
+    projection_drift = round(simulated_total - projected_total, 1)
+    away_report = _safe_bullpen_report(db, game.away_team_id)
+    home_report = _safe_bullpen_report(db, game.home_team_id)
 
     return {
         "status": "ok",
@@ -265,10 +368,30 @@ def simulate_play_by_play(db: Session, game_id: int) -> dict[str, Any]:
         "projection": {
             "away_runs": away_target,
             "home_runs": home_target,
-            "total": round(away_target + home_target, 2),
+            "total": projected_total,
             "source": "latest_active_prediction" if prediction else "fallback_league_average",
         },
-        "simulated_final": {"away": score_away, "home": score_home, "total": score_away + score_home},
+        "simulated_final": {"away": score_away, "home": score_home, "total": simulated_total},
+        "projection_drift": projection_drift,
+        "context": {
+            "uses_sandbox_signals": bool(sandbox),
+            "umpire": {
+                "name": sandbox.umpire_name if sandbox else None,
+                "run_impact": float(sandbox.umpire_run_impact) if sandbox and sandbox.umpire_run_impact is not None else 0.0,
+            },
+            "bullpen": {
+                "away_strength": float(sandbox.away_bullpen_strength) if sandbox and sandbox.away_bullpen_strength is not None else (away_report or {}).get("bullpen_strength"),
+                "home_strength": float(sandbox.home_bullpen_strength) if sandbox and sandbox.home_bullpen_strength is not None else (home_report or {}).get("bullpen_strength"),
+                "convergence": bool(sandbox.bullpen_convergence) if sandbox else False,
+                "away_report": away_report,
+                "home_report": home_report,
+            },
+            "weather": {
+                "wind_factor": float(sandbox.wind_factor) if sandbox and sandbox.wind_factor is not None else None,
+                "temp_f": float(sandbox.temp_f) if sandbox and sandbox.temp_f is not None else None,
+                "is_dome": bool(sandbox.is_dome) if sandbox and sandbox.is_dome is not None else None,
+            },
+        },
         "inning_runs": inning_runs,
         "score_swings": score_swings,
         "events": events,
