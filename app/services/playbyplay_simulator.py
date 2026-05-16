@@ -16,6 +16,7 @@ from app.services.sandbox_simulator import run_v4_sandbox
 
 MODEL_VERSION = "v0.6-pbp-shadow"
 MAX_EVENTS = 96
+SIM_OUTCOMES = ("home_run", "triple", "double", "single", "walk", "strikeout", "out")
 
 
 @dataclass
@@ -109,6 +110,12 @@ def _event_weights(target_runs: float, sandbox: SandboxPredictionV4 | None, *, i
         ("strikeout", strikeout),
         ("out", generic_out),
     ]
+
+
+def _weight_map(target_runs: float, sandbox: SandboxPredictionV4 | None, *, is_home: bool) -> dict[str, float]:
+    weights = dict(_event_weights(target_runs, sandbox, is_home=is_home))
+    total = sum(weights.values()) or 1.0
+    return {name: weights.get(name, 0.0) / total for name in SIM_OUTCOMES}
 
 
 def _choose(rng: random.Random, weights: list[tuple[str, float]]) -> str:
@@ -268,6 +275,23 @@ def _event_label(outcome: str) -> str:
         "strikeout": "Strikeout",
         "out": "Ball in Play Out",
     }.get(outcome, outcome)
+
+
+def _normalize_actual_outcome(event_type: str | None, label: str | None = None) -> str:
+    raw = (event_type or label or "").strip().lower().replace(" ", "_")
+    if raw in {"home_run"}:
+        return "home_run"
+    if raw in {"triple"}:
+        return "triple"
+    if raw in {"double", "ground_rule_double"}:
+        return "double"
+    if raw in {"single"}:
+        return "single"
+    if raw in {"walk", "intent_walk", "hit_by_pitch"}:
+        return "walk"
+    if raw in {"strikeout", "strikeout_double_play"}:
+        return "strikeout"
+    return "out"
 
 
 def _event_commentary(outcome: str, runs: int, team: str, inning: int, half: str) -> str:
@@ -458,6 +482,7 @@ def fetch_actual_play_by_play(game_id: int) -> dict[str, Any]:
                 "batter": ((matchup.get("batter") or {}).get("fullName")),
                 "pitcher": ((matchup.get("pitcher") or {}).get("fullName")),
                 "outcome": result.get("eventType") or result.get("event") or "unknown",
+                "sim_outcome": _normalize_actual_outcome(result.get("eventType"), result.get("event")),
                 "label": result.get("event") or result.get("description") or "Play",
                 "runs": rbi,
                 "description": result.get("description") or "",
@@ -476,7 +501,7 @@ def fetch_actual_play_by_play(game_id: int) -> dict[str, Any]:
 
 
 def _summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
-    counter = Counter(e.get("outcome") for e in events)
+    counter = Counter(e.get("sim_outcome") or _normalize_actual_outcome(e.get("outcome"), e.get("label")) for e in events)
     runs_by_inning: dict[int, int] = defaultdict(int)
     for event in events:
         if event.get("inning"):
@@ -489,6 +514,129 @@ def _summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
         "walks": counter.get("walk", 0),
         "strikeouts": counter.get("strikeout", 0),
         "runs_by_inning": dict(sorted(runs_by_inning.items())),
+    }
+
+
+def _latest_prediction_any(db: Session, game_id: int) -> Prediction | None:
+    return (
+        db.query(Prediction)
+        .filter(Prediction.game_id == game_id)
+        .order_by(Prediction.prediction_id.desc())
+        .first()
+    )
+
+
+def _projection_bucket(projected_total: float | None) -> str:
+    if projected_total is None:
+        return "unknown"
+    if projected_total < 7.5:
+        return "low"
+    if projected_total <= 9.0:
+        return "normal"
+    return "high"
+
+
+def _empty_bucket() -> dict[str, Any]:
+    return {
+        "games": 0,
+        "plate_appearances": 0,
+        "runs": 0,
+        "projected_total_sum": 0.0,
+        "actual_total_sum": 0.0,
+        "events": {name: 0 for name in SIM_OUTCOMES},
+    }
+
+
+def _finish_bucket(bucket: dict[str, Any], expected_rates: dict[str, float]) -> dict[str, Any]:
+    plate_appearances = bucket["plate_appearances"] or 1
+    actual_rates = {name: round(bucket["events"].get(name, 0) / plate_appearances, 4) for name in SIM_OUTCOMES}
+    multipliers = {}
+    for name in SIM_OUTCOMES:
+        expected = expected_rates.get(name, 0.0)
+        multipliers[name] = round(_clamp((actual_rates[name] / expected) if expected else 1.0, 0.65, 1.45), 3)
+
+    games = bucket["games"] or 1
+    projected_avg = bucket["projected_total_sum"] / games if bucket["projected_total_sum"] else None
+    actual_avg = bucket["actual_total_sum"] / games if bucket["actual_total_sum"] else None
+    return {
+        "games": bucket["games"],
+        "plate_appearances": bucket["plate_appearances"],
+        "actual_event_rates": actual_rates,
+        "expected_event_rates": {k: round(v, 4) for k, v in expected_rates.items()},
+        "recommended_multipliers": multipliers,
+        "avg_projected_total": round(projected_avg, 2) if projected_avg is not None else None,
+        "avg_actual_total": round(actual_avg, 2) if actual_avg is not None else None,
+        "avg_total_drift": round(actual_avg - projected_avg, 2) if projected_avg is not None and actual_avg is not None else None,
+    }
+
+
+def backtest_play_by_play_weights(db: Session, season: int, limit: int = 120) -> dict[str, Any]:
+    games = (
+        db.query(Game)
+        .filter(
+            Game.season == season,
+            Game.final_away_score.isnot(None),
+            Game.final_home_score.isnot(None),
+        )
+        .order_by(Game.game_date.desc(), Game.game_id.desc())
+        .limit(max(1, min(limit, 500)))
+        .all()
+    )
+    buckets = {"overall": _empty_bucket(), "low": _empty_bucket(), "normal": _empty_bucket(), "high": _empty_bucket(), "unknown": _empty_bucket()}
+    expected = {name: 0.0 for name in SIM_OUTCOMES}
+    errors = []
+    processed = 0
+
+    for game in games:
+        try:
+            actual = fetch_actual_play_by_play(game.game_id)
+            events = actual.get("events") or []
+            if actual.get("status") != "ok" or not events:
+                continue
+        except Exception as exc:
+            errors.append({"game_id": game.game_id, "error": str(exc)})
+            continue
+
+        prediction = _latest_prediction_any(db, game.game_id)
+        sandbox = _latest_sandbox(db, game.game_id)
+        away_target = float(prediction.projected_away_score) if prediction and prediction.projected_away_score is not None else None
+        home_target = float(prediction.projected_home_score) if prediction and prediction.projected_home_score is not None else None
+        projected_total = (
+            away_target + home_target
+            if away_target is not None and home_target is not None
+            else (float(prediction.projected_total) if prediction and prediction.projected_total is not None else None)
+        )
+        actual_total = int(game.final_away_score or 0) + int(game.final_home_score or 0)
+        bucket_name = _projection_bucket(projected_total)
+        processed += 1
+
+        away_weights = _weight_map(away_target or 4.2, sandbox, is_home=False)
+        home_weights = _weight_map(home_target or 4.4, sandbox, is_home=True)
+        game_expected = {name: (away_weights[name] + home_weights[name]) / 2.0 for name in SIM_OUTCOMES}
+        for name, value in game_expected.items():
+            expected[name] += value
+
+        for target in (buckets["overall"], buckets[bucket_name]):
+            target["games"] += 1
+            target["plate_appearances"] += len(events)
+            target["runs"] += sum(int(e.get("runs") or 0) for e in events)
+            if projected_total is not None:
+                target["projected_total_sum"] += projected_total
+            target["actual_total_sum"] += actual_total
+            for event in events:
+                target["events"][_normalize_actual_outcome(event.get("outcome"), event.get("label"))] += 1
+
+    expected_rates = {name: expected[name] / processed if processed else _weight_map(4.2, None, is_home=False)[name] for name in SIM_OUTCOMES}
+    finished = {name: _finish_bucket(bucket, expected_rates) for name, bucket in buckets.items() if bucket["games"]}
+    return {
+        "status": "ok",
+        "model_version": MODEL_VERSION,
+        "season": season,
+        "games_considered": len(games),
+        "games_processed": processed,
+        "errors": errors[:12],
+        "calibration": finished,
+        "recommended_overall_multipliers": finished.get("overall", {}).get("recommended_multipliers", {}),
     }
 
 

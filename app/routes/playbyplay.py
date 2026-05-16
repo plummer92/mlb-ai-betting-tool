@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.services.playbyplay_simulator import (
+    backtest_play_by_play_weights,
     compare_sim_to_actual,
     fetch_actual_play_by_play,
     simulate_play_by_play,
@@ -26,3 +27,8 @@ def actual_game(game_id: int):
 @router.get("/compare/{game_id}")
 def compare_game(game_id: int, db: Session = Depends(get_db)):
     return compare_sim_to_actual(db, game_id)
+
+
+@router.get("/backtest/weights")
+def backtest_weights(season: int = 2026, limit: int = 120, db: Session = Depends(get_db)):
+    return backtest_play_by_play_weights(db, season=season, limit=limit)

@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db import Base
 from app.models.schema import Game, Prediction, SandboxPredictionV4
 from app.services.playbyplay_simulator import (
+    backtest_play_by_play_weights,
     compare_sim_to_actual,
     fetch_actual_play_by_play,
     simulate_play_by_play,
@@ -64,6 +65,33 @@ class PlayByPlaySimulatorTests(unittest.TestCase):
             wind_factor=0.2,
         )
         self.db.add_all([game, prediction, sandbox])
+        final_game = Game(
+            game_id=102,
+            game_date=date(2026, 5, 15),
+            season=2026,
+            away_team="Away Final",
+            home_team="Home Final",
+            away_team_id=3,
+            home_team_id=4,
+            venue="Final Park",
+            status="Final",
+            start_time=datetime(2026, 5, 15, 18, 0, tzinfo=timezone.utc),
+            final_away_score=5,
+            final_home_score=4,
+        )
+        final_prediction = Prediction(
+            game_id=102,
+            model_version="v-test",
+            away_win_pct=0.48,
+            home_win_pct=0.52,
+            projected_away_score=4.1,
+            projected_home_score=4.2,
+            projected_total=8.3,
+            confidence_score=7.0,
+            recommended_side="HOME",
+            is_active=False,
+        )
+        self.db.add_all([final_game, final_prediction])
         self.db.commit()
 
     def tearDown(self) -> None:
@@ -141,6 +169,26 @@ class PlayByPlaySimulatorTests(unittest.TestCase):
         self.assertEqual(result["status"], "not_ready")
         self.assertEqual(result["game_id"], 101)
         sandbox_mock.assert_called_once_with(101, self.db)
+
+    @patch("app.services.playbyplay_simulator.fetch_actual_play_by_play")
+    def test_backtest_play_by_play_weights_returns_recommended_multipliers(self, actual_mock: Mock) -> None:
+        actual_mock.return_value = {
+            "status": "ok",
+            "events": [
+                {"outcome": "single", "label": "Single", "runs": 1, "inning": 1},
+                {"outcome": "double", "label": "Double", "runs": 2, "inning": 1},
+                {"outcome": "walk", "label": "Walk", "runs": 0, "inning": 2},
+                {"outcome": "strikeout", "label": "Strikeout", "runs": 0, "inning": 2},
+                {"outcome": "field_out", "label": "Field Out", "runs": 0, "inning": 3},
+            ],
+        }
+
+        result = backtest_play_by_play_weights(self.db, season=2026, limit=10)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["games_processed"], 1)
+        self.assertIn("overall", result["calibration"])
+        self.assertIn("single", result["recommended_overall_multipliers"])
 
 
 if __name__ == "__main__":
