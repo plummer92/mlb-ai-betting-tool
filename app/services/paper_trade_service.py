@@ -94,6 +94,68 @@ def log_alert_as_paper_trade(db: Session, alert: BetAlert, edge: EdgeResult | No
         print(f"[paper] alert paper-trade log skipped: {exc}", flush=True)
 
 
+def backfill_missing_paper_trades(db: Session, limit: int | None = None) -> dict:
+    """
+    Create paper-trade mirror rows for historical BetAlert records.
+
+    This is intentionally idempotent so it is safe to run manually after deploys
+    or any time the tracker looks out of sync.
+    """
+    query = (
+        db.query(BetAlert, EdgeResult)
+        .outerjoin(PaperTrade, PaperTrade.bet_alert_id == BetAlert.id)
+        .outerjoin(EdgeResult, EdgeResult.id == BetAlert.edge_result_id)
+        .filter(PaperTrade.id.is_(None))
+        .order_by(BetAlert.game_date.asc(), BetAlert.id.asc())
+    )
+    if limit is not None:
+        query = query.limit(limit)
+
+    created = 0
+    skipped = 0
+    errors: list[str] = []
+
+    for alert, edge in query.all():
+        try:
+            stake = DEFAULT_PAPER_STAKE
+            result = alert.bet_result if alert.bet_result in {"win", "loss", "push"} else None
+            odds = _odds_for_play(edge, alert.play)
+            profit_loss = _profit_loss(result, odds, stake)
+            db.add(
+                PaperTrade(
+                    bet_alert_id=alert.id,
+                    game_id=alert.game_id,
+                    prediction_id=alert.prediction_id,
+                    edge_result_id=alert.edge_result_id,
+                    game_date=alert.game_date,
+                    play=alert.play or "none",
+                    confidence=alert.confidence,
+                    edge_pct=alert.edge_pct,
+                    ev=alert.ev,
+                    paper_stake=stake,
+                    odds=odds,
+                    line=_line_for_play(edge, alert.play),
+                    status="settled" if result else "open",
+                    result=result,
+                    profit_loss=profit_loss,
+                    settled_at=alert.resolved_at if result else None,
+                )
+            )
+            created += 1
+        except Exception as exc:
+            skipped += 1
+            if len(errors) < 10:
+                errors.append(f"alert_id={alert.id}: {exc}")
+
+    db.commit()
+    return {
+        "created": created,
+        "skipped": skipped,
+        "errors": errors,
+        "remaining_missing": max((db.query(func.count(BetAlert.id)).scalar() or 0) - (db.query(func.count(PaperTrade.id)).scalar() or 0), 0),
+    }
+
+
 def get_paper_summary(db: Session) -> dict:
     total_alerts = db.query(func.count(BetAlert.id)).scalar() or 0
     rows = (

@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.models.schema import BetAlert, EdgeResult, Game, GameOdds, Prediction, SnapshotType
-from app.services.paper_trade_service import get_paper_summary, log_alert_as_paper_trade
+from app.services.paper_trade_service import backfill_missing_paper_trades, get_paper_summary, log_alert_as_paper_trade
 
 
 class PaperTradeServiceTests(unittest.TestCase):
@@ -137,6 +137,32 @@ class PaperTradeServiceTests(unittest.TestCase):
         by_confidence = {row["confidence"]: row for row in summary["roi_by_confidence"]}
         self.assertGreater(by_confidence["strong"]["roi"], 0)
         self.assertLess(by_confidence["medium"]["roi"], 0)
+
+    def test_backfill_missing_paper_trades_is_idempotent(self) -> None:
+        self._seed_alert(
+            game_id=1,
+            play="home_ml",
+            confidence="strong",
+            result="win",
+        )
+        self._seed_alert(
+            game_id=2,
+            play="over",
+            confidence="medium",
+            result=None,
+        )
+
+        first = backfill_missing_paper_trades(self.db)
+        second = backfill_missing_paper_trades(self.db)
+        summary = get_paper_summary(self.db)
+
+        self.assertEqual(first["created"], 2)
+        self.assertEqual(first["remaining_missing"], 0)
+        self.assertEqual(second["created"], 0)
+        self.assertEqual(summary["paper_bets_placed"], 2)
+        self.assertEqual(summary["missing_paper_trades"], 0)
+        self.assertEqual(summary["settled_trades"], 1)
+        self.assertEqual(summary["open_trades"], 1)
 
 
 if __name__ == "__main__":
