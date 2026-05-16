@@ -1118,7 +1118,10 @@ function renderPbpContext() {
   const awayBp = bp.away_strength != null ? fmt(bp.away_strength * 100, 0) + '%' : '--';
   const homeBp = bp.home_strength != null ? fmt(bp.home_strength * 100, 0) + '%' : '--';
   const umpText = ump.name ? `${ump.name} (${fmt(ump.run_impact, 2)} run impact)` : 'umpire unknown';
-  const source = ctx.uses_sandbox_signals ? 'sandbox bullpen/umpire on' : 'projection-only fallback';
+  const refresh = ctx.sandbox_refresh || {};
+  const source = ctx.uses_sandbox_signals
+    ? (refresh.ok ? 'sandbox refreshed' : 'sandbox cached')
+    : 'projection-only fallback';
   $('pbp-context-line').textContent = `${source} | BP ${awayBp}/${homeBp} | ${umpText}`;
 }
 

@@ -71,11 +71,13 @@ class PlayByPlaySimulatorTests(unittest.TestCase):
         Base.metadata.drop_all(bind=self.engine)
         self.engine.dispose()
 
-    def test_simulate_play_by_play_is_deterministic_and_visual_ready(self) -> None:
+    @patch("app.services.playbyplay_simulator.run_v4_sandbox", return_value={"status": "ok"})
+    def test_simulate_play_by_play_is_deterministic_and_visual_ready(self, sandbox_mock: Mock) -> None:
         first = simulate_play_by_play(self.db, 101)
         second = simulate_play_by_play(self.db, 101)
 
         self.assertEqual(first["status"], "ok")
+        self.assertEqual(sandbox_mock.call_count, 2)
         self.assertEqual(first["model_version"], "v0.6-pbp-shadow")
         self.assertEqual(first["events"], second["events"])
         self.assertGreater(len(first["events"]), 40)
@@ -85,6 +87,7 @@ class PlayByPlaySimulatorTests(unittest.TestCase):
         self.assertIn("projection_drift", first)
         self.assertTrue(any("is_model_miss_clue" in event for event in first["events"]))
         self.assertTrue(first["context"]["uses_sandbox_signals"])
+        self.assertEqual(first["context"]["sandbox_refresh"]["ok"], True)
         self.assertEqual(first["context"]["umpire"]["name"], "Tight Zone")
         self.assertEqual(first["context"]["bullpen"]["away_strength"], 0.44)
 
@@ -125,13 +128,19 @@ class PlayByPlaySimulatorTests(unittest.TestCase):
         self.assertEqual(len(actual["highlights"]), 1)
 
     @patch("app.services.playbyplay_simulator.fetch_actual_play_by_play")
-    def test_compare_sim_to_actual_reports_not_ready_without_actual_events(self, actual_mock: Mock) -> None:
+    @patch("app.services.playbyplay_simulator.run_v4_sandbox", return_value={"status": "ok"})
+    def test_compare_sim_to_actual_reports_not_ready_without_actual_events(
+        self,
+        sandbox_mock: Mock,
+        actual_mock: Mock,
+    ) -> None:
         actual_mock.return_value = {"status": "ok", "game_id": 101, "events": [], "summary": {}}
 
         result = compare_sim_to_actual(self.db, 101)
 
         self.assertEqual(result["status"], "not_ready")
         self.assertEqual(result["game_id"], 101)
+        sandbox_mock.assert_called_once_with(101, self.db)
 
 
 if __name__ == "__main__":

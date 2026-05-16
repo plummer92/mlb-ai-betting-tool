@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.config import MLB_API_BASE
 from app.models.schema import Game, ManagerTendency, Prediction, RelieverWorkload, SandboxPredictionV4
+from app.services.sandbox_simulator import run_v4_sandbox
 
 
 MODEL_VERSION = "v0.6-pbp-shadow"
@@ -55,6 +56,22 @@ def _latest_sandbox(db: Session, game_id: int) -> SandboxPredictionV4 | None:
         )
     except Exception:
         return None
+
+
+def _refresh_sandbox_context(db: Session, game_id: int) -> dict[str, Any]:
+    try:
+        result = run_v4_sandbox(game_id, db)
+        return {
+            "attempted": True,
+            "ok": bool(result),
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "attempted": True,
+            "ok": False,
+            "error": str(exc),
+        }
 
 
 def _iso_or_raw(value: Any) -> str | None:
@@ -268,6 +285,11 @@ def simulate_play_by_play(db: Session, game_id: int) -> dict[str, Any]:
         return {"status": "not_found", "game_id": game_id, "events": []}
 
     prediction = _latest_prediction(db, game_id)
+    sandbox_refresh = _refresh_sandbox_context(db, game_id) if prediction else {
+        "attempted": False,
+        "ok": False,
+        "error": "missing active prediction",
+    }
     sandbox = _latest_sandbox(db, game_id)
     away_target = float(prediction.projected_away_score) if prediction and prediction.projected_away_score is not None else 4.2
     home_target = float(prediction.projected_home_score) if prediction and prediction.projected_home_score is not None else 4.4
@@ -375,6 +397,7 @@ def simulate_play_by_play(db: Session, game_id: int) -> dict[str, Any]:
         "projection_drift": projection_drift,
         "context": {
             "uses_sandbox_signals": bool(sandbox),
+            "sandbox_refresh": sandbox_refresh,
             "umpire": {
                 "name": sandbox.umpire_name if sandbox else None,
                 "run_impact": float(sandbox.umpire_run_impact) if sandbox and sandbox.umpire_run_impact is not None else 0.0,
