@@ -337,6 +337,35 @@ class PaperTrade(Base):
     )
 
 
+class PlayByPlayComparison(Base):
+    __tablename__ = "playbyplay_comparisons"
+
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, ForeignKey("games.game_id"), nullable=False, index=True)
+    game_date = Column(Date, nullable=False, index=True)
+    season = Column(Integer, nullable=False, index=True)
+    model_version = Column(String(40), nullable=False)
+    projection_bucket = Column(String(20), nullable=False, index=True)
+
+    projected_total = Column(Float, nullable=True)
+    simulated_total = Column(Integer, nullable=False)
+    actual_total = Column(Integer, nullable=False)
+    run_delta = Column(Integer, nullable=False)
+    home_run_delta = Column(Integer, nullable=False)
+    walk_delta = Column(Integer, nullable=False)
+    strikeout_delta = Column(Integer, nullable=False)
+
+    sim_summary_json = Column(Text, nullable=False)
+    actual_summary_json = Column(Text, nullable=False)
+    context_json = Column(Text, nullable=True)
+    lessons_json = Column(Text, nullable=True)
+    compared_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("game_id", name="uq_playbyplay_comparison_game"),
+    )
+
+
 class GameOutcomeReview(Base):
     __tablename__ = "game_outcomes_review"
 

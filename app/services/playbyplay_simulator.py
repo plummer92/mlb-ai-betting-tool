@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -10,7 +11,14 @@ import requests
 from sqlalchemy.orm import Session
 
 from app.config import MLB_API_BASE
-from app.models.schema import Game, ManagerTendency, Prediction, RelieverWorkload, SandboxPredictionV4
+from app.models.schema import (
+    Game,
+    ManagerTendency,
+    PlayByPlayComparison,
+    Prediction,
+    RelieverWorkload,
+    SandboxPredictionV4,
+)
 from app.services.sandbox_simulator import run_v4_sandbox
 
 
@@ -94,7 +102,13 @@ def _iso_or_raw(value: Any) -> str | None:
     return str(value)
 
 
-def _event_weights(target_runs: float, sandbox: SandboxPredictionV4 | None, *, is_home: bool) -> list[tuple[str, float]]:
+def _event_weights(
+    target_runs: float,
+    sandbox: SandboxPredictionV4 | None,
+    *,
+    is_home: bool,
+    multipliers: dict[str, float] | None = None,
+) -> list[tuple[str, float]]:
     run_factor = _clamp(target_runs / 4.2, 0.72, 1.32)
     wind_factor = float(sandbox.wind_factor or 0.0) if sandbox and sandbox.wind_factor is not None else 0.0
     umpire_impact = float(sandbox.umpire_run_impact or 0.0) if sandbox and sandbox.umpire_run_impact is not None else 0.0
@@ -122,13 +136,19 @@ def _event_weights(target_runs: float, sandbox: SandboxPredictionV4 | None, *, i
         "out": generic_out,
     }
     return [
-        (name, max(0.001, base_weights[name] * PBP_SHADOW_MULTIPLIERS.get(name, 1.0)))
+        (name, max(0.001, base_weights[name] * (multipliers or PBP_SHADOW_MULTIPLIERS).get(name, 1.0)))
         for name in SIM_OUTCOMES
     ]
 
 
-def _weight_map(target_runs: float, sandbox: SandboxPredictionV4 | None, *, is_home: bool) -> dict[str, float]:
-    weights = dict(_event_weights(target_runs, sandbox, is_home=is_home))
+def _weight_map(
+    target_runs: float,
+    sandbox: SandboxPredictionV4 | None,
+    *,
+    is_home: bool,
+    multipliers: dict[str, float] | None = None,
+) -> dict[str, float]:
+    weights = dict(_event_weights(target_runs, sandbox, is_home=is_home, multipliers=multipliers))
     total = sum(weights.values()) or 1.0
     return {name: weights.get(name, 0.0) / total for name in SIM_OUTCOMES}
 
@@ -336,6 +356,10 @@ def simulate_play_by_play(db: Session, game_id: int) -> dict[str, Any]:
     sandbox = _latest_sandbox(db, game_id)
     away_target = float(prediction.projected_away_score) if prediction and prediction.projected_away_score is not None else 4.2
     home_target = float(prediction.projected_home_score) if prediction and prediction.projected_home_score is not None else 4.4
+    projected_total = round(away_target + home_target, 2)
+    projection_bucket = _projection_bucket(projected_total)
+    calibration = _bucketed_shadow_multipliers(db, projection_bucket)
+    event_multipliers = calibration["multipliers"]
 
     rng = random.Random(f"{MODEL_VERSION}:{game_id}:{prediction.prediction_id if prediction else 'na'}")
     score_away = 0
@@ -359,7 +383,12 @@ def simulate_play_by_play(db: Session, game_id: int) -> dict[str, Any]:
                 score_home=score_home,
                 bases=[False, False, False],
             )
-            weights = _event_weights(state.target_runs, sandbox, is_home=is_home_batting)
+            weights = _event_weights(
+                state.target_runs,
+                sandbox,
+                is_home=is_home_batting,
+                multipliers=event_multipliers,
+            )
             batter_slot = 1
             while state.outs < 3 and event_id <= MAX_EVENTS:
                 before_score = score_home - score_away
@@ -411,7 +440,6 @@ def simulate_play_by_play(db: Session, game_id: int) -> dict[str, Any]:
     if len(highlights) < 6:
         highlights = sorted(events, key=lambda e: (e["runs"], e["outcome"] == "home_run"), reverse=True)[:6]
 
-    projected_total = round(away_target + home_target, 2)
     simulated_total = score_away + score_home
     projection_drift = round(simulated_total - projected_total, 1)
     away_report = _safe_bullpen_report(db, game.away_team_id)
@@ -436,9 +464,8 @@ def simulate_play_by_play(db: Session, game_id: int) -> dict[str, Any]:
             "total": projected_total,
             "source": "latest_active_prediction" if prediction else "fallback_league_average",
             "pbp_calibration": {
-                "mode": "shadow",
-                "sample": "2026 through 2026-05-16, 60 completed games",
-                "multipliers": PBP_SHADOW_MULTIPLIERS,
+                **calibration,
+                "global_baseline": PBP_SHADOW_MULTIPLIERS,
             },
         },
         "simulated_final": {"away": score_away, "home": score_home, "total": simulated_total},
@@ -533,6 +560,7 @@ def _summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
         "extra_base_hits": counter.get("double", 0) + counter.get("triple", 0) + counter.get("home_run", 0),
         "walks": counter.get("walk", 0),
         "strikeouts": counter.get("strikeout", 0),
+        "outcome_counts": {name: counter.get(name, 0) for name in SIM_OUTCOMES},
         "runs_by_inning": dict(sorted(runs_by_inning.items())),
     }
 
@@ -554,6 +582,56 @@ def _projection_bucket(projected_total: float | None) -> str:
     if projected_total <= 9.0:
         return "normal"
     return "high"
+
+
+def _bucketed_shadow_multipliers(db: Session, bucket: str) -> dict[str, Any]:
+    rows = (
+        db.query(PlayByPlayComparison)
+        .filter(PlayByPlayComparison.projection_bucket == bucket)
+        .order_by(PlayByPlayComparison.game_date.desc(), PlayByPlayComparison.compared_at.desc())
+        .limit(40)
+        .all()
+    )
+    if not rows:
+        return {
+            "mode": "shadow_global",
+            "bucket": bucket,
+            "sample_games": 0,
+            "multipliers": PBP_SHADOW_MULTIPLIERS,
+            "reason": "no stored comparisons for this bucket yet",
+        }
+
+    actual_counts = {name: 0 for name in SIM_OUTCOMES}
+    sim_counts = {name: 0 for name in SIM_OUTCOMES}
+    run_delta_sum = 0
+    for row in rows:
+        try:
+            actual_summary = json.loads(row.actual_summary_json or "{}")
+            sim_summary = json.loads(row.sim_summary_json or "{}")
+        except json.JSONDecodeError:
+            continue
+        for name in SIM_OUTCOMES:
+            actual_counts[name] += int((actual_summary.get("outcome_counts") or {}).get(name, 0) or 0)
+            sim_counts[name] += int((sim_summary.get("outcome_counts") or {}).get(name, 0) or 0)
+        run_delta_sum += int(row.run_delta or 0)
+
+    multipliers = {}
+    for name in SIM_OUTCOMES:
+        if sim_counts[name] <= 0 or actual_counts[name] <= 0:
+            multipliers[name] = PBP_SHADOW_MULTIPLIERS[name]
+            continue
+        miss_ratio = _clamp(actual_counts[name] / sim_counts[name], 0.75, 1.25)
+        blended_ratio = 1.0 + ((miss_ratio - 1.0) * 0.35)
+        multipliers[name] = round(_clamp(PBP_SHADOW_MULTIPLIERS[name] * blended_ratio, 0.55, 1.60), 3)
+
+    return {
+        "mode": "shadow_bucket",
+        "bucket": bucket,
+        "sample_games": len(rows),
+        "avg_run_delta": round(run_delta_sum / len(rows), 2),
+        "multipliers": multipliers,
+        "reason": "blended from stored compare-actual misses in the same projected-total bucket",
+    }
 
 
 def _empty_bucket() -> dict[str, Any]:
@@ -588,6 +666,49 @@ def _finish_bucket(bucket: dict[str, Any], expected_rates: dict[str, float]) -> 
         "avg_actual_total": round(actual_avg, 2) if actual_avg is not None else None,
         "avg_total_drift": round(actual_avg - projected_avg, 2) if projected_avg is not None and actual_avg is not None else None,
     }
+
+
+def _store_pbp_comparison(
+    db: Session,
+    game: Game,
+    sim: dict[str, Any],
+    actual: dict[str, Any],
+    sim_summary: dict[str, Any],
+    actual_summary: dict[str, Any],
+    lessons: list[dict[str, str]],
+) -> None:
+    projected_total = sim.get("projection", {}).get("total")
+    run_delta = actual_summary["runs"] - sim_summary["runs"]
+    payload = {
+        "game_id": game.game_id,
+        "game_date": game.game_date,
+        "season": game.season,
+        "model_version": sim.get("model_version") or MODEL_VERSION,
+        "projection_bucket": _projection_bucket(projected_total),
+        "projected_total": projected_total,
+        "simulated_total": sim_summary["runs"],
+        "actual_total": actual_summary["runs"],
+        "run_delta": run_delta,
+        "home_run_delta": actual_summary["home_runs"] - sim_summary["home_runs"],
+        "walk_delta": actual_summary["walks"] - sim_summary["walks"],
+        "strikeout_delta": actual_summary["strikeouts"] - sim_summary["strikeouts"],
+        "sim_summary_json": json.dumps(sim_summary, sort_keys=True),
+        "actual_summary_json": json.dumps(actual_summary, sort_keys=True),
+        "context_json": json.dumps({
+            "calibration": sim.get("projection", {}).get("pbp_calibration"),
+            "game": sim.get("game"),
+            "context": sim.get("context"),
+        }, sort_keys=True),
+        "lessons_json": json.dumps(lessons, sort_keys=True),
+        "compared_at": datetime.utcnow(),
+    }
+    existing = db.query(PlayByPlayComparison).filter(PlayByPlayComparison.game_id == game.game_id).first()
+    if existing:
+        for key, value in payload.items():
+            setattr(existing, key, value)
+    else:
+        db.add(PlayByPlayComparison(**payload))
+    db.commit()
 
 
 def backtest_play_by_play_weights(db: Session, season: int, limit: int = 120) -> dict[str, Any]:
@@ -667,6 +788,7 @@ def compare_sim_to_actual(db: Session, game_id: int) -> dict[str, Any]:
     if sim.get("status") != "ok" or actual.get("status") != "ok" or not actual.get("events"):
         return {"status": "not_ready", "game_id": game_id, "simulation": sim, "actual": actual, "lessons": []}
 
+    game = db.query(Game).filter(Game.game_id == game_id).first()
     sim_summary = _summarize_events(sim["events"])
     actual_summary = actual["summary"]
     lessons = []
@@ -683,9 +805,19 @@ def compare_sim_to_actual(db: Session, game_id: int) -> dict[str, Any]:
     if actual_summary["strikeouts"] < sim_summary["strikeouts"] - 4:
         lessons.append({"type": "contact", "message": "Simulation expected more strikeouts than actual; lineup contact profile may be underrated."})
 
+    stored = False
+    if game:
+        try:
+            _store_pbp_comparison(db, game, sim, actual, sim_summary, actual_summary, lessons)
+            stored = True
+        except Exception as exc:
+            db.rollback()
+            lessons.append({"type": "memory", "message": f"Comparison generated but memory write failed: {exc}"})
+
     return {
         "status": "ok",
         "game_id": game_id,
+        "stored": stored,
         "simulation_summary": sim_summary,
         "actual_summary": actual_summary,
         "deltas": {

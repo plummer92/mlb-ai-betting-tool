@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models.schema import Game, Prediction, SandboxPredictionV4, UmpireAssignmentV4
+from app.models.schema import Game, PlayByPlayComparison, Prediction, SandboxPredictionV4, UmpireAssignmentV4
 from app.services.playbyplay_simulator import (
     PBP_SHADOW_MULTIPLIERS,
     backtest_play_by_play_weights,
@@ -109,7 +109,7 @@ class PlayByPlaySimulatorTests(unittest.TestCase):
         self.assertEqual(first["status"], "ok")
         self.assertEqual(sandbox_mock.call_count, 2)
         self.assertEqual(first["model_version"], "v0.6-pbp-shadow")
-        self.assertEqual(first["projection"]["pbp_calibration"]["mode"], "shadow")
+        self.assertEqual(first["projection"]["pbp_calibration"]["mode"], "shadow_global")
         self.assertEqual(first["projection"]["pbp_calibration"]["multipliers"], PBP_SHADOW_MULTIPLIERS)
         self.assertEqual(first["events"], second["events"])
         self.assertGreater(len(first["events"]), 40)
@@ -173,6 +173,53 @@ class PlayByPlaySimulatorTests(unittest.TestCase):
         self.assertEqual(result["status"], "not_ready")
         self.assertEqual(result["game_id"], 101)
         sandbox_mock.assert_called_once_with(101, self.db)
+
+    @patch("app.services.playbyplay_simulator.fetch_actual_play_by_play")
+    @patch("app.services.playbyplay_simulator.run_v4_sandbox", return_value={"status": "ok"})
+    def test_compare_sim_to_actual_persists_memory_and_reuses_bucket(
+        self,
+        sandbox_mock: Mock,
+        actual_mock: Mock,
+    ) -> None:
+        actual_mock.return_value = {
+            "status": "ok",
+            "summary": {
+                "plate_appearances": 4,
+                "runs": 1,
+                "home_runs": 0,
+                "extra_base_hits": 0,
+                "walks": 1,
+                "strikeouts": 1,
+                "outcome_counts": {
+                    "home_run": 0,
+                    "triple": 0,
+                    "double": 0,
+                    "single": 1,
+                    "walk": 1,
+                    "strikeout": 1,
+                    "out": 1,
+                },
+                "runs_by_inning": {1: 1},
+            },
+            "events": [
+                {"outcome": "single", "label": "Single", "runs": 1, "inning": 1},
+                {"outcome": "walk", "label": "Walk", "runs": 0, "inning": 1},
+                {"outcome": "strikeout", "label": "Strikeout", "runs": 0, "inning": 1},
+                {"outcome": "field_out", "label": "Field Out", "runs": 0, "inning": 1},
+            ],
+        }
+
+        result = compare_sim_to_actual(self.db, 101)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["stored"])
+        row = self.db.query(PlayByPlayComparison).filter(PlayByPlayComparison.game_id == 101).one()
+        self.assertEqual(row.projection_bucket, "normal")
+
+        rerun = simulate_play_by_play(self.db, 101)
+
+        self.assertEqual(rerun["projection"]["pbp_calibration"]["mode"], "shadow_bucket")
+        self.assertEqual(rerun["projection"]["pbp_calibration"]["sample_games"], 1)
 
     @patch("app.services.playbyplay_simulator.fetch_actual_play_by_play")
     def test_backtest_play_by_play_weights_returns_recommended_multipliers(self, actual_mock: Mock) -> None:
