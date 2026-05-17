@@ -19,6 +19,7 @@ from app.models.schema import (
     SnapshotType,
 )
 from app.services.market_audit_service import get_clv_report, get_movement_backtest_report
+from app.services.market_respect_service import market_respect_for_edge
 
 
 class MarketAuditServiceTests(unittest.TestCase):
@@ -212,6 +213,94 @@ class MarketAuditServiceTests(unittest.TestCase):
         self.assertEqual(report["summary"]["bets"], 1)
         self.assertEqual(report["by_movement_direction"][0]["movement_direction"], "toward_model")
         self.assertEqual(report["by_movement_bucket"][0]["movement_bucket"], "ml_steam")
+        self.assertEqual(report["by_market_respect_tag"][0]["market_respect_tag"], "MARKET AGREED")
+
+    def test_market_respect_scores_late_sharp_buy(self) -> None:
+        game, _prediction, _entry_odds, edge, _alert = self._base_rows(game_id=3)
+        game.start_time = datetime(2026, 5, 17, 18, 0, tzinfo=timezone.utc)
+        close = GameOdds(
+            game_id=game.game_id,
+            sportsbook="draftkings",
+            snapshot_type=SnapshotType.pregame,
+            fetched_at=datetime(2026, 5, 17, 17, 15, tzinfo=timezone.utc),
+            away_ml=100,
+            home_ml=-120,
+            total_line=8.0,
+            over_odds=-110,
+            under_odds=-110,
+        )
+        movement = LineMovement(
+            game_id=game.game_id,
+            sportsbook="consensus",
+            calculated_at=datetime(2026, 5, 17, 17, 15, tzinfo=timezone.utc),
+            open_away_ml=120,
+            open_home_ml=-140,
+            open_total=8.0,
+            pregame_away_ml=100,
+            pregame_home_ml=-120,
+            pregame_total=8.0,
+            away_prob_move=0.045,
+            home_prob_move=-0.045,
+            total_move=0.0,
+            sharp_away=True,
+            sharp_home=False,
+            total_steam_over=False,
+            total_steam_under=False,
+        )
+        self.db.add_all([close, movement])
+        self.db.commit()
+        self.db.refresh(movement)
+        edge.movement_id = movement.id
+        edge.movement_direction = "toward_model"
+        self.db.commit()
+
+        respect = market_respect_for_edge(self.db, edge, movement=movement, game=game)
+
+        self.assertGreaterEqual(respect["score"], 80)
+        self.assertIn("MARKET AGREED", respect["tags"])
+        self.assertIn("LATE SHARP BUY", respect["tags"])
+
+    def test_market_respect_rejects_negative_move(self) -> None:
+        game, _prediction, _entry_odds, edge, _alert = self._base_rows(game_id=4)
+        close = GameOdds(
+            game_id=game.game_id,
+            sportsbook="draftkings",
+            snapshot_type=SnapshotType.pregame,
+            fetched_at=datetime.now(timezone.utc),
+            away_ml=150,
+            home_ml=-170,
+            total_line=8.0,
+            over_odds=-110,
+            under_odds=-110,
+        )
+        movement = LineMovement(
+            game_id=game.game_id,
+            sportsbook="consensus",
+            open_away_ml=120,
+            open_home_ml=-140,
+            open_total=8.0,
+            pregame_away_ml=150,
+            pregame_home_ml=-170,
+            pregame_total=8.0,
+            away_prob_move=-0.04,
+            home_prob_move=0.04,
+            total_move=0.0,
+            sharp_away=False,
+            sharp_home=True,
+            total_steam_over=False,
+            total_steam_under=False,
+        )
+        self.db.add_all([close, movement])
+        self.db.commit()
+        self.db.refresh(movement)
+        edge.movement_id = movement.id
+        edge.movement_direction = "away_from_model"
+        self.db.commit()
+
+        respect = market_respect_for_edge(self.db, edge, movement=movement, game=game)
+
+        self.assertLessEqual(respect["score"], 35)
+        self.assertIn("MARKET REJECTED", respect["tags"])
 
 
 if __name__ == "__main__":

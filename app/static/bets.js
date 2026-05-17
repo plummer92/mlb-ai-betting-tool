@@ -3,6 +3,7 @@ const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'
 const fmt=(n,d=1)=>n==null?'—':(+n).toFixed(d);
 function gameTime(iso){if(!iso)return '—'; try{const d=new Date(iso); if(isNaN(d)) return iso; return d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZoneName:'short'});}catch{return iso;}}
 function edgeChip(confidence, edgePct){const pctStr=edgePct!=null?` ${(edgePct*100).toFixed(1)}%`:''; if(!confidence||confidence==='weak') return `<span class="chip c-weak">WEAK${pctStr}</span>`; const cls=confidence==='strong'?'c-strong':'c-medium'; return `<span class="chip ${cls}">${confidence.toUpperCase()}${pctStr}</span>`;}
+function marketRespectChip(respect){if(!respect)return ''; const score=respect.score??50; const tag=(respect.tags||[])[0]||'MARKET NEUTRAL'; const cls=score>=70?'c-strong':score>=50?'c-medium':'c-loss'; return `<span class="chip ${cls}">MRS ${score} ${esc(tag)}</span>`;}
 
 async function loadRecords(){
   const [reviewRes, paperRes] = await Promise.all([fetch('/api/reviews/summary'), fetch('/api/bets/summary')]);
@@ -33,8 +34,8 @@ async function loadBets(){
   const rows = await res.json();
   $('bets-badge').textContent = rows.length ? `${rows.length} LIVE RANKS` : 'NO LIVE BETS';
   if(!rows.length){$('bets-table').innerHTML = '<div class="empty">No ranked bets for today.</div>'; return;}
-  $('bets-table').innerHTML = `<table><thead><tr><th>Rank</th><th>Matchup</th><th>Play</th><th>Edge</th><th>EV</th><th>Confidence</th><th>Book</th><th>Start</th></tr></thead><tbody>${
-    rows.map(r=>`<tr><td class="mono green">#${r.rank}</td><td style="font-weight:600">${esc(r.matchup)}</td><td class="mono">${esc((r.play||'—').replace('_',' ').toUpperCase())}</td><td class="mono green">${(r.edge_pct*100).toFixed(1)}%</td><td class="mono ${r.ev >= 0 ? 'green' : 'red'}">${fmt(r.ev,3)}</td><td>${edgeChip(r.confidence,r.edge_pct)}</td><td class="mono">${esc(r.sportsbook||'—')}</td><td class="mono">${gameTime(r.start_time)}</td></tr>`).join('')
+  $('bets-table').innerHTML = `<table><thead><tr><th>Rank</th><th>Matchup</th><th>Play</th><th>Edge</th><th>EV</th><th>Market</th><th>Confidence</th><th>Book</th><th>Start</th></tr></thead><tbody>${
+    rows.map(r=>`<tr><td class="mono green">#${r.rank}</td><td style="font-weight:600">${esc(r.matchup)}</td><td class="mono">${esc((r.play||'—').replace('_',' ').toUpperCase())}</td><td class="mono green">${(r.edge_pct*100).toFixed(1)}%</td><td class="mono ${r.ev >= 0 ? 'green' : 'red'}">${fmt(r.ev,3)}</td><td>${marketRespectChip(r.market_respect)}</td><td>${edgeChip(r.confidence,r.edge_pct)}</td><td class="mono">${esc(r.sportsbook||'—')}</td><td class="mono">${gameTime(r.start_time)}</td></tr>`).join('')
   }</tbody></table>`;
 }
 

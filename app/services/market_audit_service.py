@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.models.schema import EdgeResult, GameOdds, GameOutcomeReview, LineMovement, PaperTrade, SnapshotType
 from app.services.ev_math import american_to_decimal, implied_prob_raw
+from app.services.market_respect_service import market_respect_for_edge
 from app.services.paper_trade_service import DEFAULT_PAPER_STAKE
 
 
@@ -93,6 +94,10 @@ def get_clv_report(db: Session) -> dict:
             "closing_sportsbook": close.sportsbook if close else None,
             **clv,
         }
+        if edge:
+            respect = market_respect_for_edge(db, edge)
+            row["market_respect_score"] = respect["score"]
+            row["market_respect_tags"] = respect["tags"]
         details.append(row)
         by_play[trade.play or "unknown"].append(row)
 
@@ -175,6 +180,18 @@ def _movement_bucket(movement: LineMovement | None) -> str:
     return "flat"
 
 
+def _respect_bucket(score: int | None) -> str:
+    if score is None:
+        return "unknown"
+    if score >= 75:
+        return "strong_market_agreement"
+    if score >= 60:
+        return "market_agreement"
+    if score >= 41:
+        return "mixed_market"
+    return "market_rejection"
+
+
 def get_movement_backtest_report(db: Session, *, min_sample: int = 3) -> dict:
     rows = (
         db.query(GameOutcomeReview, EdgeResult, GameOdds, LineMovement)
@@ -187,11 +204,15 @@ def get_movement_backtest_report(db: Session, *, min_sample: int = 3) -> dict:
 
     normalized = []
     for review, edge, odds, movement in rows:
+        respect = market_respect_for_edge(db, edge, odds=odds, movement=movement) if edge else None
         normalized.append(
             {
                 "play": (review.recommended_play or "none").lower(),
                 "movement_direction": (review.movement_direction or "none").lower(),
                 "movement_bucket": _movement_bucket(movement),
+                "market_respect_score": respect["score"] if respect else None,
+                "market_respect_bucket": _respect_bucket(respect["score"] if respect else None),
+                "market_respect_tags": respect["tags"] if respect else [],
                 "bet_result": review.bet_result,
                 "profit_units": _profit_units(review, odds),
             }
@@ -201,11 +222,16 @@ def get_movement_backtest_report(db: Session, *, min_sample: int = 3) -> dict:
     by_bucket: dict[str, list[dict]] = defaultdict(list)
     by_play_direction: dict[tuple[str, str], list[dict]] = defaultdict(list)
     by_play_bucket: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    by_respect_bucket: dict[str, list[dict]] = defaultdict(list)
+    by_respect_tag: dict[str, list[dict]] = defaultdict(list)
     for row in normalized:
         by_direction[row["movement_direction"]].append(row)
         by_bucket[row["movement_bucket"]].append(row)
         by_play_direction[(row["play"], row["movement_direction"])].append(row)
         by_play_bucket[(row["play"], row["movement_bucket"])].append(row)
+        by_respect_bucket[row["market_respect_bucket"]].append(row)
+        for tag in row["market_respect_tags"] or ["UNTAGGED"]:
+            by_respect_tag[tag].append(row)
 
     def rows_for(grouped: dict, key_names: tuple[str, ...]) -> list[dict]:
         output = []
@@ -227,5 +253,7 @@ def get_movement_backtest_report(db: Session, *, min_sample: int = 3) -> dict:
         "by_movement_bucket": rows_for(by_bucket, ("movement_bucket",)),
         "by_play_movement_direction": rows_for(by_play_direction, ("play", "movement_direction")),
         "by_play_movement_bucket": rows_for(by_play_bucket, ("play", "movement_bucket")),
+        "by_market_respect_bucket": rows_for(by_respect_bucket, ("market_respect_bucket",)),
+        "by_market_respect_tag": rows_for(by_respect_tag, ("market_respect_tag",)),
         "min_sample": min_sample,
     }

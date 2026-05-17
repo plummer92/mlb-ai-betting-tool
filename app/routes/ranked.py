@@ -14,6 +14,7 @@ from app.middleware.limiter import limiter
 from app.models.schema import EdgeResult, Game, GameOdds
 from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.edge_service import get_trustworthy_active_edges
+from app.services.market_respect_service import market_respect_for_edge
 
 router = APIRouter(prefix="/api/ranked", tags=["ranked"])
 
@@ -54,6 +55,7 @@ def _build_ranked_rows(
     ranked = []
     for edge, game, odds in latest_by_game.values():
         ev = _pick_ev(edge)
+        market_respect = market_respect_for_edge(db, edge, odds=odds, game=game)
         ranked.append(
             {
                 "game_id": game.game_id,
@@ -72,6 +74,9 @@ def _build_ranked_rows(
                 "sportsbook": odds.sportsbook if odds else None,
                 "snapshot_type": odds.snapshot_type.value if odds and odds.snapshot_type else None,
                 "movement_direction": edge.movement_direction,
+                "market_respect": market_respect,
+                "market_respect_score": market_respect["score"],
+                "market_respect_tags": market_respect["tags"],
                 "calculated_at": edge.calculated_at.isoformat() if edge.calculated_at else None,
                 "policy_qualified": qualifies_for_bet_policy(
                     play=edge.recommended_play,
@@ -98,7 +103,8 @@ def _build_discord_lines(bets: list[dict], title: str = "📊 **Ranked MLB Bets*
         lines.append(
             f"#{bet['rank']} {bet['matchup']} | {bet['play']}{snap}{move} | "
             f"edge={bet['edge_pct']:.4f} | ev={bet['ev']:.4f} | "
-            f"{bet['confidence'] or 'n/a'}"
+            f"{bet['confidence'] or 'n/a'} | MRS={bet.get('market_respect_score', 50)} "
+            f"{','.join(bet.get('market_respect_tags', [])[:2])}"
         )
     return lines
 

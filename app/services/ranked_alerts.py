@@ -9,6 +9,7 @@ import requests
 from app.db import SessionLocal
 from app.models.schema import EdgeResult, Game, GameOdds
 from app.services.edge_service import get_trustworthy_active_edges
+from app.services.market_respect_service import market_respect_for_edge
 
 ET = ZoneInfo("America/New_York")
 FINAL_STATUSES = {"Final", "Completed Early", "Cancelled"}
@@ -45,6 +46,7 @@ def _build_ranked_rows(limit: int = 10, active_only: bool = True) -> list[dict]:
         ranked = []
         for edge, game, odds in latest_by_game.values():
             ev = _pick_ev(edge)
+            market_respect = market_respect_for_edge(db, edge, odds=odds, game=game)
             ranked.append(
                 {
                     "game_id": game.game_id,
@@ -58,6 +60,9 @@ def _build_ranked_rows(limit: int = 10, active_only: bool = True) -> list[dict]:
                     "sportsbook": odds.sportsbook if odds else None,
                     "snapshot_type": odds.snapshot_type.value if odds and odds.snapshot_type else None,
                     "movement_direction": edge.movement_direction,
+                    "market_respect": market_respect,
+                    "market_respect_score": market_respect["score"],
+                    "market_respect_tags": market_respect["tags"],
                 }
             )
 
@@ -87,7 +92,8 @@ def send_ranked_bets_to_discord_job(limit: int = 10, active_only: bool = True) -
         lines.append(
             f"#{bet['rank']} {bet['matchup']} | {bet['play']}{snap}{move} | "
             f"edge={bet['edge_pct']:.4f} | ev={bet['ev']:.4f} | "
-            f"{bet['confidence'] or 'n/a'}"
+            f"{bet['confidence'] or 'n/a'} | MRS={bet.get('market_respect_score', 50)} "
+            f"{','.join(bet.get('market_respect_tags', [])[:2])}"
         )
 
     payload = {"content": "\n".join(lines)}

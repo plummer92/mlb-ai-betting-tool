@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models.schema import Game
 from app.services.edge_service import get_trustworthy_active_edges
+from app.services.market_respect_service import market_respect_for_edge
 
 ET = ZoneInfo("America/New_York")
 
@@ -26,28 +27,29 @@ def get_top_edges(
     )
 
     latest_by_game = {}
-    for edge, _game, _prediction, _odds in rows:
+    for edge, game, _prediction, odds in rows:
         if edge.game_id not in latest_by_game:
-            latest_by_game[edge.game_id] = edge
+            latest_by_game[edge.game_id] = (edge, game, odds)
 
     top_rows = sorted(
         latest_by_game.values(),
-        key=lambda edge: float(edge.edge_pct or 0),
+        key=lambda row: float(row[0].edge_pct or 0),
         reverse=True,
     )[:limit]
 
     return [
         {
-            "game_id": r.game_id,
-            "play": r.recommended_play,
-            "edge_pct": float(r.edge_pct) if r.edge_pct is not None else None,
-            "ev_away": float(r.ev_away) if r.ev_away is not None else None,
-            "ev_home": float(r.ev_home) if r.ev_home is not None else None,
-            "confidence": r.confidence_tier,
-            "pitching_edge_score": float(r.pitching_edge_score) if getattr(r, "pitching_edge_score", None) is not None else None,
-            "calculated_at": r.calculated_at.isoformat() if r.calculated_at else None,
+            "game_id": edge.game_id,
+            "play": edge.recommended_play,
+            "edge_pct": float(edge.edge_pct) if edge.edge_pct is not None else None,
+            "ev_away": float(edge.ev_away) if edge.ev_away is not None else None,
+            "ev_home": float(edge.ev_home) if edge.ev_home is not None else None,
+            "confidence": edge.confidence_tier,
+            "pitching_edge_score": float(edge.pitching_edge_score) if getattr(edge, "pitching_edge_score", None) is not None else None,
+            "market_respect": market_respect_for_edge(db, edge, odds=odds, game=game),
+            "calculated_at": edge.calculated_at.isoformat() if edge.calculated_at else None,
         }
-        for r in top_rows
+        for edge, game, odds in top_rows
     ]
 
 
@@ -67,6 +69,7 @@ def get_today_edges(db: Session = Depends(get_db)):
     for edge, game, prediction, odds in trusted_rows:
         if edge.game_id in latest_by_game:
             continue
+        market_respect = market_respect_for_edge(db, edge, odds=odds, game=game)
         latest_by_game[edge.game_id] = {
             "game_id": game.game_id,
             "play": edge.recommended_play,
@@ -77,6 +80,9 @@ def get_today_edges(db: Session = Depends(get_db)):
             "ev_under": float(edge.ev_under) if edge.ev_under is not None else None,
             "confidence": edge.confidence_tier,
             "movement_direction": edge.movement_direction,
+            "market_respect": market_respect,
+            "market_respect_score": market_respect["score"],
+            "market_respect_tags": market_respect["tags"],
             "model_away_win_pct": float(edge.model_away_win_pct) if edge.model_away_win_pct is not None else None,
             "model_home_win_pct": float(edge.model_home_win_pct) if edge.model_home_win_pct is not None else None,
             "implied_away_pct": float(edge.implied_away_pct) if edge.implied_away_pct is not None else None,
