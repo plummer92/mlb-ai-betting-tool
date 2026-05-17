@@ -516,15 +516,28 @@ def calculate_edge_for_game(
     # ── Movement direction relative to model recommendation ──
     movement_direction: str | None = None
     if movement:
-        model_prefers_away = model_away > model_home
-        if model_prefers_away:
+        if play == "over":
+            if movement.total_steam_over:
+                movement_direction = "toward_model"
+            elif movement.total_steam_under:
+                movement_direction = "away_from_model"
+            else:
+                movement_direction = "neutral"
+        elif play == "under":
+            if movement.total_steam_under:
+                movement_direction = "toward_model"
+            elif movement.total_steam_over:
+                movement_direction = "away_from_model"
+            else:
+                movement_direction = "neutral"
+        elif play == "away_ml":
             if movement.sharp_away:
                 movement_direction = "toward_model"
             elif movement.sharp_home:
                 movement_direction = "away_from_model"
             else:
                 movement_direction = "neutral"
-        else:
+        elif play == "home_ml":
             if movement.sharp_home:
                 movement_direction = "toward_model"
             elif movement.sharp_away:

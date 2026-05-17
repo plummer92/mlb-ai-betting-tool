@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.models.schema import Game, GameOdds, SnapshotType
-from app.services.odds_service import _event_game_date, _match_game, fetch_and_store_odds
+from app.services.odds_service import _event_game_date, _match_game, compute_line_movement, fetch_and_store_odds
 
 
 class _FakeResponse:
@@ -74,15 +74,18 @@ class OddsServiceTests(unittest.IsolatedAsyncioTestCase):
         sportsbook: str = "draftkings",
         snapshot_type: SnapshotType = SnapshotType.open,
         fetched_at: datetime | None = None,
+        away_ml: int = 110,
+        home_ml: int = -130,
+        total_line: float = 8.5,
     ) -> GameOdds:
         odds = GameOdds(
             game_id=game_id,
             sportsbook=sportsbook,
             snapshot_type=snapshot_type,
             fetched_at=fetched_at or datetime.now(timezone.utc),
-            away_ml=110,
-            home_ml=-130,
-            total_line=8.5,
+            away_ml=away_ml,
+            home_ml=home_ml,
+            total_line=total_line,
             over_odds=-110,
             under_odds=-110,
         )
@@ -213,6 +216,37 @@ class OddsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(matched)
         self.assertEqual(matched.game_id, game.game_id)
         self.assertIsNone(reason)
+
+    def test_compute_line_movement_uses_multibook_consensus(self) -> None:
+        self._game(4, date.today(), "Toronto Blue Jays", "Chicago White Sox")
+        for book, open_away, open_home, pre_away, pre_home in [
+            ("draftkings", 130, -150, 105, -125),
+            ("fanduel", 128, -148, 100, -120),
+        ]:
+            self._odds(
+                4,
+                sportsbook=book,
+                snapshot_type=SnapshotType.open,
+                away_ml=open_away,
+                home_ml=open_home,
+                total_line=8.0,
+            )
+            self._odds(
+                4,
+                sportsbook=book,
+                snapshot_type=SnapshotType.pregame,
+                away_ml=pre_away,
+                home_ml=pre_home,
+                total_line=8.5,
+            )
+
+        movement = compute_line_movement(self.db, 4)
+
+        self.assertIsNotNone(movement)
+        self.assertEqual(movement.sportsbook, "consensus")
+        self.assertGreater(float(movement.away_prob_move), 0.04)
+        self.assertTrue(movement.sharp_away)
+        self.assertTrue(movement.total_steam_over)
 
 
 if __name__ == "__main__":

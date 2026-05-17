@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
@@ -23,6 +24,16 @@ ODDS_FRESHNESS_MINUTES: dict[SnapshotType, int] = {
     SnapshotType.pregame: 90,
     SnapshotType.live: 15,
 }
+
+
+@dataclass(frozen=True)
+class _ConsensusSnapshot:
+    away_ml: int
+    home_ml: int
+    total_line: float | None
+    away_prob: float
+    home_prob: float
+    books: tuple[str, ...]
 
 
 async def fetch_and_store_odds(
@@ -250,36 +261,50 @@ def _refresh_existing_snapshot(existing: GameOdds, incoming: GameOdds) -> None:
 def compute_line_movement(
     db: Session,
     game_id: int,
-    sportsbook: str = "draftkings",
+    sportsbook: str = "consensus",
 ) -> LineMovement | None:
     """
     Compare open vs pregame snapshots for a game and store the movement summary.
     Call this after the pregame snapshot is stored.
     """
-    open_odds = _get_existing_snapshot(
-        db,
-        game_id=game_id,
-        sportsbook=sportsbook,
-        snapshot_type=SnapshotType.open,
-    ) or get_latest_odds_snapshot(db, game_id=game_id, snapshot_type=SnapshotType.open)
-    pregame_odds = _get_existing_snapshot(
-        db,
-        game_id=game_id,
-        sportsbook=sportsbook,
-        snapshot_type=SnapshotType.pregame,
-    ) or get_latest_odds_snapshot(db, game_id=game_id, snapshot_type=SnapshotType.pregame)
+    if sportsbook == "consensus":
+        open_odds, pregame_odds = _consensus_open_pregame(db, game_id)
+        if not open_odds or not pregame_odds:
+            return None
+        away_move = pregame_odds.away_prob - open_odds.away_prob
+        home_move = pregame_odds.home_prob - open_odds.home_prob
+        total_move = (
+            float(pregame_odds.total_line) - float(open_odds.total_line)
+            if pregame_odds.total_line is not None and open_odds.total_line is not None
+            else 0.0
+        )
+        sharp_away = away_move > 0.04
+        sharp_home = home_move > 0.04
+    else:
+        open_odds = _get_existing_snapshot(
+            db,
+            game_id=game_id,
+            sportsbook=sportsbook,
+            snapshot_type=SnapshotType.open,
+        ) or get_latest_odds_snapshot(db, game_id=game_id, snapshot_type=SnapshotType.open)
+        pregame_odds = _get_existing_snapshot(
+            db,
+            game_id=game_id,
+            sportsbook=sportsbook,
+            snapshot_type=SnapshotType.pregame,
+        ) or get_latest_odds_snapshot(db, game_id=game_id, snapshot_type=SnapshotType.pregame)
 
-    if not open_odds or not pregame_odds:
-        return None  # can't compute without both snapshots
+        if not open_odds or not pregame_odds:
+            return None
 
-    away_move = prob_move(open_odds.away_ml, pregame_odds.away_ml)
-    home_move = prob_move(open_odds.home_ml, pregame_odds.home_ml)
-    total_move = float(pregame_odds.total_line or 0) - float(open_odds.total_line or 0)
+        away_move = prob_move(open_odds.away_ml, pregame_odds.away_ml)
+        home_move = prob_move(open_odds.home_ml, pregame_odds.home_ml)
+        total_move = float(pregame_odds.total_line or 0) - float(open_odds.total_line or 0)
 
-    sharp_away, sharp_home = is_sharp_move(
-        open_odds.away_ml, pregame_odds.away_ml,
-        open_odds.home_ml, pregame_odds.home_ml,
-    )
+        sharp_away, sharp_home = is_sharp_move(
+            open_odds.away_ml, pregame_odds.away_ml,
+            open_odds.home_ml, pregame_odds.home_ml,
+        )
 
     total_steam_over = total_move >= 0.5
     total_steam_under = total_move <= -0.5
@@ -306,6 +331,8 @@ def compute_line_movement(
     existing = db.query(LineMovement).filter(LineMovement.game_id == game_id).first()
     if existing:
         for col in [
+            "sportsbook",
+            "open_away_ml", "open_home_ml", "open_total",
             "away_prob_move", "home_prob_move", "total_move",
             "sharp_away", "sharp_home", "total_steam_over", "total_steam_under",
             "pregame_away_ml", "pregame_home_ml", "pregame_total",
@@ -318,6 +345,80 @@ def compute_line_movement(
     db.commit()
     db.refresh(movement)
     return movement
+
+
+def _consensus_open_pregame(
+    db: Session,
+    game_id: int,
+) -> tuple[_ConsensusSnapshot | None, _ConsensusSnapshot | None]:
+    open_rows = _snapshot_rows_by_book(db, game_id=game_id, snapshot_type=SnapshotType.open)
+    pregame_rows = _snapshot_rows_by_book(db, game_id=game_id, snapshot_type=SnapshotType.pregame)
+    common_books = sorted(set(open_rows) & set(pregame_rows))
+    if not common_books:
+        return None, None
+    return (
+        _build_consensus_snapshot([open_rows[book] for book in common_books], common_books),
+        _build_consensus_snapshot([pregame_rows[book] for book in common_books], common_books),
+    )
+
+
+def _snapshot_rows_by_book(
+    db: Session,
+    *,
+    game_id: int,
+    snapshot_type: SnapshotType,
+) -> dict[str, GameOdds]:
+    rows = (
+        db.query(GameOdds)
+        .filter(
+            GameOdds.game_id == game_id,
+            GameOdds.snapshot_type == snapshot_type,
+            GameOdds.away_ml.isnot(None),
+            GameOdds.home_ml.isnot(None),
+        )
+        .order_by(GameOdds.fetched_at.desc(), GameOdds.id.desc())
+        .all()
+    )
+    by_book: dict[str, GameOdds] = {}
+    for row in rows:
+        by_book.setdefault(row.sportsbook, row)
+    return by_book
+
+
+def _build_consensus_snapshot(
+    rows: list[GameOdds],
+    books: list[str],
+) -> _ConsensusSnapshot:
+    away_probs: list[float] = []
+    home_probs: list[float] = []
+    totals: list[float] = []
+    for row in rows:
+        away_raw = ml_to_implied_prob(row.away_ml)
+        home_raw = ml_to_implied_prob(row.home_ml)
+        away_prob, home_prob = remove_vig(away_raw, home_raw)
+        away_probs.append(float(away_prob))
+        home_probs.append(float(home_prob))
+        if row.total_line is not None:
+            totals.append(float(row.total_line))
+
+    away_prob = sum(away_probs) / len(away_probs)
+    home_prob = sum(home_probs) / len(home_probs)
+    total_line = round(sum(totals) / len(totals), 1) if totals else None
+    return _ConsensusSnapshot(
+        away_ml=_prob_to_american(away_prob),
+        home_ml=_prob_to_american(home_prob),
+        total_line=total_line,
+        away_prob=away_prob,
+        home_prob=home_prob,
+        books=tuple(books),
+    )
+
+
+def _prob_to_american(probability: float) -> int:
+    probability = min(max(float(probability), 0.01), 0.99)
+    if probability >= 0.5:
+        return int(round(-100 * probability / (1 - probability)))
+    return int(round(100 * (1 - probability) / probability))
 
 
 # Static mapping from The Odds API team names → MLB Stats API team names.
