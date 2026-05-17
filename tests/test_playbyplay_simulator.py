@@ -220,6 +220,8 @@ class PlayByPlaySimulatorTests(unittest.TestCase):
 
         self.assertEqual(rerun["projection"]["pbp_calibration"]["mode"], "shadow_bucket")
         self.assertEqual(rerun["projection"]["pbp_calibration"]["sample_games"], 1)
+        self.assertLess(rerun["projection"]["pbp_calibration"]["run_environment_factor"], 1.0)
+        self.assertGreater(rerun["projection"]["pbp_calibration"]["out_environment_factor"], 1.0)
 
     @patch("app.services.playbyplay_simulator.fetch_actual_play_by_play")
     def test_backtest_play_by_play_weights_returns_recommended_multipliers(self, actual_mock: Mock) -> None:

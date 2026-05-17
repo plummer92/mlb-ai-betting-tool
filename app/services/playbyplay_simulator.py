@@ -36,6 +36,7 @@ PBP_SHADOW_MULTIPLIERS = {
     "strikeout": 0.902,
     "out": 0.900,
 }
+PRODUCTIVE_OUTCOMES = {"home_run", "triple", "double", "single", "walk"}
 
 
 @dataclass
@@ -615,22 +616,37 @@ def _bucketed_shadow_multipliers(db: Session, bucket: str) -> dict[str, Any]:
             sim_counts[name] += int((sim_summary.get("outcome_counts") or {}).get(name, 0) or 0)
         run_delta_sum += int(row.run_delta or 0)
 
+    avg_run_delta = run_delta_sum / len(rows)
+    # Negative delta means actual scored fewer runs than the sim. Correct the run
+    # environment first, then let event-shape ratios fine tune inside that.
+    run_environment_factor = _clamp(1.0 + (avg_run_delta * 0.045), 0.78, 1.22)
+    out_environment_factor = _clamp(1.0 - ((run_environment_factor - 1.0) * 0.45), 0.90, 1.10)
+
     multipliers = {}
     for name in SIM_OUTCOMES:
         if sim_counts[name] <= 0 or actual_counts[name] <= 0:
-            multipliers[name] = PBP_SHADOW_MULTIPLIERS[name]
+            event_adjusted = PBP_SHADOW_MULTIPLIERS[name]
+        else:
+            miss_ratio = _clamp(actual_counts[name] / sim_counts[name], 0.75, 1.25)
+            blended_ratio = 1.0 + ((miss_ratio - 1.0) * 0.35)
+            event_adjusted = PBP_SHADOW_MULTIPLIERS[name] * blended_ratio
+        if name in PRODUCTIVE_OUTCOMES:
+            multipliers[name] = round(_clamp(event_adjusted * run_environment_factor, 0.45, 1.60), 3)
             continue
-        miss_ratio = _clamp(actual_counts[name] / sim_counts[name], 0.75, 1.25)
-        blended_ratio = 1.0 + ((miss_ratio - 1.0) * 0.35)
-        multipliers[name] = round(_clamp(PBP_SHADOW_MULTIPLIERS[name] * blended_ratio, 0.55, 1.60), 3)
+        if name == "out":
+            multipliers[name] = round(_clamp(event_adjusted * out_environment_factor, 0.60, 1.25), 3)
+            continue
+        multipliers[name] = round(_clamp(event_adjusted, 0.55, 1.60), 3)
 
     return {
         "mode": "shadow_bucket",
         "bucket": bucket,
         "sample_games": len(rows),
-        "avg_run_delta": round(run_delta_sum / len(rows), 2),
+        "avg_run_delta": round(avg_run_delta, 2),
+        "run_environment_factor": round(run_environment_factor, 3),
+        "out_environment_factor": round(out_environment_factor, 3),
         "multipliers": multipliers,
-        "reason": "blended from stored compare-actual misses in the same projected-total bucket",
+        "reason": "run-total governor plus event-shape misses from stored comparisons in this projected-total bucket",
     }
 
 
