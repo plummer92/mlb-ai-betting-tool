@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db import Base
 from app.models.schema import Game, Prediction, SandboxPredictionV4, UmpireAssignmentV4
 from app.services.playbyplay_simulator import (
+    PBP_SHADOW_MULTIPLIERS,
     backtest_play_by_play_weights,
     compare_sim_to_actual,
     fetch_actual_play_by_play,
@@ -108,6 +109,8 @@ class PlayByPlaySimulatorTests(unittest.TestCase):
         self.assertEqual(first["status"], "ok")
         self.assertEqual(sandbox_mock.call_count, 2)
         self.assertEqual(first["model_version"], "v0.6-pbp-shadow")
+        self.assertEqual(first["projection"]["pbp_calibration"]["mode"], "shadow")
+        self.assertEqual(first["projection"]["pbp_calibration"]["multipliers"], PBP_SHADOW_MULTIPLIERS)
         self.assertEqual(first["events"], second["events"])
         self.assertGreater(len(first["events"]), 40)
         self.assertIn("score", first["events"][0])

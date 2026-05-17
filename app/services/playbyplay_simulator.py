@@ -17,6 +17,17 @@ from app.services.sandbox_simulator import run_v4_sandbox
 MODEL_VERSION = "v0.6-pbp-shadow"
 MAX_EVENTS = 96
 SIM_OUTCOMES = ("home_run", "triple", "double", "single", "walk", "strikeout", "out")
+PBP_SHADOW_MULTIPLIERS = {
+    # 2026 shadow backtest through 2026-05-16, 60-game sample.
+    # Used only by the visual play-by-play engine, not by betting picks.
+    "home_run": 1.213,
+    "triple": 0.650,
+    "double": 1.219,
+    "single": 1.167,
+    "walk": 1.450,
+    "strikeout": 0.902,
+    "out": 0.900,
+}
 
 
 @dataclass
@@ -101,14 +112,18 @@ def _event_weights(target_runs: float, sandbox: SandboxPredictionV4 | None, *, i
     triple = _clamp(0.004 * run_factor, 0.001, 0.009)
     strikeout = _clamp(0.232 - ((run_factor - 1.0) * 0.035) - (umpire_impact * 0.006), 0.170, 0.290)
     generic_out = max(0.280, 1.0 - (hr + double + walk + single + triple + strikeout))
+    base_weights = {
+        "home_run": hr,
+        "triple": triple,
+        "double": double,
+        "single": single,
+        "walk": walk,
+        "strikeout": strikeout,
+        "out": generic_out,
+    }
     return [
-        ("home_run", hr),
-        ("triple", triple),
-        ("double", double),
-        ("single", single),
-        ("walk", walk),
-        ("strikeout", strikeout),
-        ("out", generic_out),
+        (name, max(0.001, base_weights[name] * PBP_SHADOW_MULTIPLIERS.get(name, 1.0)))
+        for name in SIM_OUTCOMES
     ]
 
 
@@ -420,6 +435,11 @@ def simulate_play_by_play(db: Session, game_id: int) -> dict[str, Any]:
             "home_runs": home_target,
             "total": projected_total,
             "source": "latest_active_prediction" if prediction else "fallback_league_average",
+            "pbp_calibration": {
+                "mode": "shadow",
+                "sample": "2026 through 2026-05-16, 60 completed games",
+                "multipliers": PBP_SHADOW_MULTIPLIERS,
+            },
         },
         "simulated_final": {"away": score_away, "home": score_home, "total": simulated_total},
         "projection_drift": projection_drift,
@@ -636,6 +656,7 @@ def backtest_play_by_play_weights(db: Session, season: int, limit: int = 120) ->
         "games_processed": processed,
         "errors": errors[:12],
         "calibration": finished,
+        "active_shadow_multipliers": PBP_SHADOW_MULTIPLIERS,
         "recommended_overall_multipliers": finished.get("overall", {}).get("recommended_multipliers", {}),
     }
 
