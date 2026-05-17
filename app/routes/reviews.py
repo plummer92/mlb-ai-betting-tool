@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.schema import Game, GameOutcomeReview
+from app.services.market_audit_service import get_movement_backtest_report
 from app.services.profitability_report_service import get_profitability_report
 from app.services.review_service import get_accuracy_segmented, resolve_completed_games
 
@@ -157,3 +158,11 @@ def profitability_report(
     db: Session = Depends(get_db),
 ):
     return get_profitability_report(db, min_sample=min_sample)
+
+
+@router.get("/movement-report")
+def movement_report(
+    min_sample: int = Query(default=3, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    return get_movement_backtest_report(db, min_sample=min_sample)
