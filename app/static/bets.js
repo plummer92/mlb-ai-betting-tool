@@ -1,45 +1,105 @@
-const $=id=>document.getElementById(id);
-const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-const fmt=(n,d=1)=>n==null?'—':(+n).toFixed(d);
-function gameTime(iso){if(!iso)return '—'; try{const d=new Date(iso); if(isNaN(d)) return iso; return d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZoneName:'short'});}catch{return iso;}}
-function edgeChip(confidence, edgePct){const pctStr=edgePct!=null?` ${(edgePct*100).toFixed(1)}%`:''; if(!confidence||confidence==='weak') return `<span class="chip c-weak">WEAK${pctStr}</span>`; const cls=confidence==='strong'?'c-strong':'c-medium'; return `<span class="chip ${cls}">${confidence.toUpperCase()}${pctStr}</span>`;}
-function marketRespectChip(respect){if(!respect)return ''; const score=respect.score??50; const tag=(respect.tags||[])[0]||'MARKET NEUTRAL'; const cls=score>=70?'c-strong':score>=50?'c-medium':'c-loss'; return `<span class="chip ${cls}">MRS ${score} ${esc(tag)}</span>`;}
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const fmt = (n, d = 1) => n == null ? '---' : (+n).toFixed(d);
 
-async function loadRecords(){
+function gameTime(iso) {
+  if (!iso) return '---';
+  try {
+    const d = new Date(iso);
+    if (isNaN(d)) return iso;
+    return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+  } catch {
+    return iso;
+  }
+}
+
+function edgeChip(confidence, edgePct) {
+  const pctStr = edgePct != null ? ` ${(edgePct * 100).toFixed(1)}%` : '';
+  if (!confidence || confidence === 'weak') return `<span class="chip c-weak">WEAK${pctStr}</span>`;
+  const cls = confidence === 'strong' ? 'c-strong' : 'c-medium';
+  return `<span class="chip ${cls}">${confidence.toUpperCase()}${pctStr}</span>`;
+}
+
+function marketRespectChip(respect) {
+  if (!respect) return '';
+  const score = respect.score ?? 50;
+  const tag = (respect.tags || [])[0] || 'MARKET NEUTRAL';
+  const cls = score >= 70 ? 'c-strong' : score >= 50 ? 'c-medium' : 'c-loss';
+  return `<span class="chip ${cls}">MRS ${score} ${esc(tag)}</span>`;
+}
+
+function marketTrustMeter(adjustment) {
+  if (!adjustment) return '';
+  const score = adjustment.score ?? 50;
+  const color = score >= 70 ? 'var(--green)' : score >= 50 ? 'var(--yellow)' : 'var(--red)';
+  return `<div title="${esc(adjustment.explanation || '')}" style="min-width:120px">
+    <div style="display:flex;justify-content:space-between;font-family:monospace;font-size:9px;color:var(--muted);text-transform:uppercase">
+      <span>Trust</span><span>${score}</span>
+    </div>
+    <div style="height:6px;border-radius:4px;background:var(--surface2);overflow:hidden;border:1px solid var(--border);margin-top:3px">
+      <div style="height:100%;width:${Math.max(0, Math.min(100, score))}%;background:${color}"></div>
+    </div>
+  </div>`;
+}
+
+function adjustedEdgeHtml(row) {
+  const raw = row.edge_pct ?? row.raw_edge_pct;
+  const adj = row.adjusted_edge_pct;
+  if (raw == null) return '---';
+  if (adj == null || Math.abs(adj - raw) < 0.0001) return `${(raw * 100).toFixed(1)}%`;
+  return `<span class="muted">${(raw * 100).toFixed(1)}%</span> <span class="${adj >= raw ? 'green' : 'yellow'}">-> ${(adj * 100).toFixed(1)}%</span>`;
+}
+
+async function loadRecords() {
   const [reviewRes, paperRes] = await Promise.all([fetch('/api/reviews/summary'), fetch('/api/bets/summary')]);
   const review = await reviewRes.json();
   const paper = await paperRes.json();
-  $('record-badge').textContent = `${review.wins||0}W-${review.losses||0}L-${review.pushes||0}P`;
+  $('record-badge').textContent = `${review.wins || 0}W-${review.losses || 0}L-${review.pushes || 0}P`;
   $('record-summary').innerHTML = `
     <div class="summary-bar">
       <div class="s-stat"><div class="s-stat-val">${review.total_predictions ?? 0}</div><div class="s-stat-lbl">Flagged Bets Reviewed</div></div>
       <div class="s-stat"><div class="s-stat-val green">${review.wins ?? 0}</div><div class="s-stat-lbl">Wins</div></div>
       <div class="s-stat"><div class="s-stat-val red">${review.losses ?? 0}</div><div class="s-stat-lbl">Losses</div></div>
-      <div class="s-stat"><div class="s-stat-val">${review.win_rate != null ? (review.win_rate*100).toFixed(1)+'%' : '—'}</div><div class="s-stat-lbl">Win Rate</div></div>
-      <div class="s-stat"><div class="s-stat-val">${review.roi_flat_110 != null ? (review.roi_flat_110*100).toFixed(1)+'%' : '—'}</div><div class="s-stat-lbl">ROI (-110 flat)</div></div>
+      <div class="s-stat"><div class="s-stat-val">${review.win_rate != null ? (review.win_rate * 100).toFixed(1) + '%' : '---'}</div><div class="s-stat-lbl">Win Rate</div></div>
+      <div class="s-stat"><div class="s-stat-val">${review.roi_flat_110 != null ? (review.roi_flat_110 * 100).toFixed(1) + '%' : '---'}</div><div class="s-stat-lbl">ROI (-110 flat)</div></div>
     </div>`;
-  $('paper-badge').textContent = `${paper.wins||0}W-${paper.losses||0}L-${paper.pushes||0}P`;
+  $('paper-badge').textContent = `${paper.wins || 0}W-${paper.losses || 0}L-${paper.pushes || 0}P`;
   $('paper-summary').innerHTML = `
     <div class="summary-bar" style="border-left-color:var(--purple);">
-      <div class="s-stat"><div class="s-stat-val">${paper.bankroll != null ? '$'+paper.bankroll.toFixed(2) : '—'}</div><div class="s-stat-lbl">Paper Bankroll</div></div>
-      <div class="s-stat"><div class="s-stat-val">${paper.pl_today != null ? '$'+paper.pl_today.toFixed(2) : '—'}</div><div class="s-stat-lbl">P/L Today</div></div>
-      <div class="s-stat"><div class="s-stat-val">${paper.pl_all_time != null ? '$'+paper.pl_all_time.toFixed(2) : '—'}</div><div class="s-stat-lbl">P/L All Time</div></div>
-      <div class="s-stat"><div class="s-stat-val">${paper.win_rate != null ? (paper.win_rate*100).toFixed(1)+'%' : '—'}</div><div class="s-stat-lbl">Paper Win Rate</div></div>
+      <div class="s-stat"><div class="s-stat-val">${paper.bankroll != null ? '$' + paper.bankroll.toFixed(2) : '---'}</div><div class="s-stat-lbl">Paper Bankroll</div></div>
+      <div class="s-stat"><div class="s-stat-val">${paper.pl_today != null ? '$' + paper.pl_today.toFixed(2) : '---'}</div><div class="s-stat-lbl">P/L Today</div></div>
+      <div class="s-stat"><div class="s-stat-val">${paper.pl_all_time != null ? '$' + paper.pl_all_time.toFixed(2) : '---'}</div><div class="s-stat-lbl">P/L All Time</div></div>
+      <div class="s-stat"><div class="s-stat-val">${paper.win_rate != null ? (paper.win_rate * 100).toFixed(1) + '%' : '---'}</div><div class="s-stat-lbl">Paper Win Rate</div></div>
       <div class="s-stat"><div class="s-stat-val">${paper.open_bets ?? 0}</div><div class="s-stat-lbl">Open Bets</div></div>
     </div>`;
 }
 
-async function loadBets(){
+async function loadBets() {
   const res = await fetch('/api/ranked/bets?limit=10&active_only=true');
   const rows = await res.json();
   $('bets-badge').textContent = rows.length ? `${rows.length} LIVE RANKS` : 'NO LIVE BETS';
-  if(!rows.length){$('bets-table').innerHTML = '<div class="empty">No ranked bets for today.</div>'; return;}
-  $('bets-table').innerHTML = `<table><thead><tr><th>Rank</th><th>Matchup</th><th>Play</th><th>Edge</th><th>EV</th><th>Market</th><th>Confidence</th><th>Book</th><th>Start</th></tr></thead><tbody>${
-    rows.map(r=>`<tr><td class="mono green">#${r.rank}</td><td style="font-weight:600">${esc(r.matchup)}</td><td class="mono">${esc((r.play||'—').replace('_',' ').toUpperCase())}</td><td class="mono green">${(r.edge_pct*100).toFixed(1)}%</td><td class="mono ${r.ev >= 0 ? 'green' : 'red'}">${fmt(r.ev,3)}</td><td>${marketRespectChip(r.market_respect)}</td><td>${edgeChip(r.confidence,r.edge_pct)}</td><td class="mono">${esc(r.sportsbook||'—')}</td><td class="mono">${gameTime(r.start_time)}</td></tr>`).join('')
-  }</tbody></table>`;
+  if (!rows.length) {
+    $('bets-table').innerHTML = '<div class="empty">No ranked bets for today.</div>';
+    return;
+  }
+
+  const body = rows.map(r => `
+    <tr>
+      <td class="mono green">#${r.rank}</td>
+      <td style="font-weight:600">${esc(r.matchup)}</td>
+      <td class="mono">${esc((r.play || '---').replace('_', ' ').toUpperCase())}</td>
+      <td class="mono">${adjustedEdgeHtml(r)}</td>
+      <td class="mono ${(r.adjusted_ev ?? r.ev) >= 0 ? 'green' : 'red'}">${fmt(r.adjusted_ev ?? r.ev, 3)}</td>
+      <td>${marketTrustMeter(r.market_respect_adjustment)}${marketRespectChip(r.market_respect)}</td>
+      <td>${edgeChip(r.adjusted_confidence || r.confidence, r.adjusted_edge_pct ?? r.edge_pct)}</td>
+      <td class="mono">${esc(r.sportsbook || '---')}</td>
+      <td class="mono">${gameTime(r.start_time)}</td>
+    </tr>`).join('');
+
+  $('bets-table').innerHTML = `<table><thead><tr><th>Rank</th><th>Matchup</th><th>Play</th><th>Raw -> Adj Edge</th><th>Adj EV</th><th>Market Trust</th><th>Confidence</th><th>Book</th><th>Start</th></tr></thead><tbody>${body}</tbody></table>`;
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
-  $('hdr-date').textContent = new Date().toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'}).toUpperCase();
+  $('hdr-date').textContent = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }).toUpperCase();
   await Promise.all([loadRecords(), loadBets()]);
 });

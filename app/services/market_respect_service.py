@@ -7,7 +7,7 @@ from statistics import pstdev
 from sqlalchemy.orm import Session
 
 from app.models.schema import EdgeResult, Game, GameOdds, LineMovement, SnapshotType
-from app.services.ev_math import implied_prob_raw
+from app.services.ev_math import american_to_decimal, implied_prob_raw, kelly_fraction
 
 
 PRODUCTIVE_TOTAL_PLAYS = {"over", "under"}
@@ -26,6 +26,151 @@ class MarketRespect:
             "tags": self.tags,
             "components": self.components,
         }
+
+
+def market_respect_bucket(score: int | None) -> str:
+    if score is None:
+        return "unknown"
+    if score >= 75:
+        return "strong_market_agreement"
+    if score >= 60:
+        return "market_agreement"
+    if score >= 41:
+        return "mixed_market"
+    return "market_rejection"
+
+
+def market_respect_adjustment(
+    *,
+    edge_pct: float | None,
+    ev: float | None,
+    confidence: str | None,
+    market_respect: dict | None,
+    odds_american: int | None = None,
+) -> dict:
+    """Turn market respect into an actionable calibration layer.
+
+    The raw model edge remains visible, but live ranking, alerting, and risk
+    controls can use these adjusted values so market confirmation acts like a
+    probabilistic prior instead of a decorative label.
+    """
+    raw_edge = float(edge_pct or 0.0)
+    raw_ev = float(ev or 0.0)
+    respect = market_respect or {"score": 50, "tags": ["MARKET NEUTRAL"], "components": {}}
+    tags = list(respect.get("tags") or [])
+    score = int(respect.get("score", 50))
+    score_bucket = market_respect_bucket(score)
+    stale = "STALE OPEN" in tags
+    rejected = "MARKET REJECTED" in tags or score_bucket == "market_rejection"
+    effective_bucket = "stale_open" if stale else score_bucket
+
+    profile = {
+        "strong_market_agreement": (1.25, 1.18, 1.25),
+        "market_agreement": (1.12, 1.08, 1.10),
+        "mixed_market": (1.00, 1.00, 1.00),
+        "market_rejection": (0.35, 0.40, 0.00),
+        "stale_open": (0.70, 0.75, 0.00),
+        "unknown": (0.85, 0.85, 0.50),
+    }.get(effective_bucket, (1.0, 1.0, 1.0))
+
+    edge_multiplier, ev_multiplier, kelly_multiplier = profile
+    adjusted_edge = round(raw_edge * edge_multiplier, 4)
+    adjusted_ev = round(raw_ev * ev_multiplier, 4)
+    adjusted_confidence = _adjust_confidence(confidence, effective_bucket, score)
+    adjusted_kelly = _adjusted_kelly_fraction(adjusted_ev, odds_american, kelly_multiplier)
+
+    suppress_reasons: list[str] = []
+    if stale:
+        suppress_reasons.append("stale odds: refresh required before alerting")
+    if rejected:
+        suppress_reasons.append("market rejected the model side")
+    if adjusted_edge <= 0:
+        suppress_reasons.append("adjusted edge is not positive")
+    if adjusted_ev <= 0:
+        suppress_reasons.append("adjusted EV is not positive")
+
+    alert_allowed = not suppress_reasons
+    return {
+        "bucket": effective_bucket,
+        "score_bucket": score_bucket,
+        "score": score,
+        "tags": tags,
+        "raw_edge_pct": round(raw_edge, 4),
+        "adjusted_edge_pct": adjusted_edge,
+        "raw_ev": round(raw_ev, 4),
+        "adjusted_ev": adjusted_ev,
+        "raw_confidence": confidence,
+        "adjusted_confidence": adjusted_confidence,
+        "adjusted_kelly_fraction": adjusted_kelly,
+        "edge_multiplier": edge_multiplier,
+        "ev_multiplier": ev_multiplier,
+        "kelly_multiplier": kelly_multiplier,
+        "alert_allowed": alert_allowed,
+        "suppress_alert": not alert_allowed,
+        "suppress_reasons": suppress_reasons,
+        "explanation": _adjustment_explanation(
+            effective_bucket,
+            edge_multiplier=edge_multiplier,
+            ev_multiplier=ev_multiplier,
+            adjusted_confidence=adjusted_confidence,
+            raw_confidence=confidence,
+            alert_allowed=alert_allowed,
+            suppress_reasons=suppress_reasons,
+        ),
+    }
+
+
+def _adjust_confidence(confidence: str | None, bucket: str, score: int) -> str | None:
+    levels = [None, "weak", "medium", "strong"]
+    current = (confidence or "").lower().strip() or None
+    idx = levels.index(current) if current in levels else 0
+    if bucket == "strong_market_agreement" and score >= 82:
+        idx += 1
+    elif bucket == "market_agreement" and idx == 1:
+        idx += 1
+    elif bucket == "market_rejection":
+        idx -= 2
+    elif bucket == "stale_open":
+        idx -= 1
+    idx = max(0, min(idx, len(levels) - 1))
+    return levels[idx]
+
+
+def _adjusted_kelly_fraction(adjusted_ev: float, odds_american: int | None, multiplier: float) -> float:
+    if adjusted_ev <= 0 or multiplier <= 0:
+        return 0.0
+    if odds_american is None:
+        return round(min(0.05, adjusted_ev * 0.25 * multiplier), 4)
+    decimal_odds = american_to_decimal(int(odds_american))
+    if decimal_odds <= 1:
+        return 0.0
+    model_prob = max(0.0, min(1.0, (adjusted_ev + 1) / decimal_odds))
+    return round(min(0.08, kelly_fraction(model_prob, decimal_odds) * multiplier), 4)
+
+
+def _adjustment_explanation(
+    bucket: str,
+    *,
+    edge_multiplier: float,
+    ev_multiplier: float,
+    adjusted_confidence: str | None,
+    raw_confidence: str | None,
+    alert_allowed: bool,
+    suppress_reasons: list[str],
+) -> str:
+    label = {
+        "strong_market_agreement": "Market strongly agreed with the model side",
+        "market_agreement": "Market modestly agreed with the model side",
+        "mixed_market": "Market gave a neutral read",
+        "market_rejection": "Market moved against or rejected the model side",
+        "stale_open": "Odds are stale",
+        "unknown": "Market read is incomplete",
+    }.get(bucket, "Market read is neutral")
+    confidence_note = ""
+    if adjusted_confidence != raw_confidence:
+        confidence_note = f"; confidence {raw_confidence or 'none'} -> {adjusted_confidence or 'none'}"
+    gate_note = "" if alert_allowed else f"; suppressed: {', '.join(suppress_reasons)}"
+    return f"{label}: edge x{edge_multiplier:.2f}, EV x{ev_multiplier:.2f}{confidence_note}{gate_note}."
 
 
 def market_respect_for_edge(

@@ -14,7 +14,7 @@ from app.middleware.limiter import limiter
 from app.models.schema import EdgeResult, Game, GameOdds
 from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.edge_service import get_trustworthy_active_edges
-from app.services.market_respect_service import market_respect_for_edge
+from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
 
 router = APIRouter(prefix="/api/ranked", tags=["ranked"])
 
@@ -33,6 +33,19 @@ def _pick_ev(edge: EdgeResult) -> float:
     if play == "under":
         return float(edge.ev_under or 0)
     return 0.0
+
+
+def _pick_odds(edge: EdgeResult, odds: GameOdds | None) -> int | None:
+    play = (edge.recommended_play or "").lower()
+    if play == "away_ml":
+        return edge.away_ml if edge.away_ml is not None else (odds.away_ml if odds else None)
+    if play == "home_ml":
+        return edge.home_ml if edge.home_ml is not None else (odds.home_ml if odds else None)
+    if play == "over":
+        return edge.over_odds if edge.over_odds is not None else (odds.over_odds if odds else None)
+    if play == "under":
+        return edge.under_odds if edge.under_odds is not None else (odds.under_odds if odds else None)
+    return None
 
 
 def _build_ranked_rows(
@@ -56,6 +69,13 @@ def _build_ranked_rows(
     for edge, game, odds in latest_by_game.values():
         ev = _pick_ev(edge)
         market_respect = market_respect_for_edge(db, edge, odds=odds, game=game)
+        adjustment = market_respect_adjustment(
+            edge_pct=float(edge.edge_pct or 0),
+            ev=ev,
+            confidence=edge.confidence_tier,
+            market_respect=market_respect,
+            odds_american=_pick_odds(edge, odds),
+        )
         ranked.append(
             {
                 "game_id": game.game_id,
@@ -70,6 +90,12 @@ def _build_ranked_rows(
                 "play": edge.recommended_play,
                 "edge_pct": float(edge.edge_pct or 0),
                 "ev": ev,
+                "raw_edge_pct": adjustment["raw_edge_pct"],
+                "raw_ev": adjustment["raw_ev"],
+                "adjusted_edge_pct": adjustment["adjusted_edge_pct"],
+                "adjusted_ev": adjustment["adjusted_ev"],
+                "adjusted_confidence": adjustment["adjusted_confidence"],
+                "adjusted_kelly_fraction": adjustment["adjusted_kelly_fraction"],
                 "confidence": edge.confidence_tier,
                 "sportsbook": odds.sportsbook if odds else None,
                 "snapshot_type": odds.snapshot_type.value if odds and odds.snapshot_type else None,
@@ -77,17 +103,20 @@ def _build_ranked_rows(
                 "market_respect": market_respect,
                 "market_respect_score": market_respect["score"],
                 "market_respect_tags": market_respect["tags"],
+                "market_trust_bucket": adjustment["bucket"],
+                "market_respect_adjustment": adjustment,
+                "market_respect_alert_allowed": adjustment["alert_allowed"],
                 "calculated_at": edge.calculated_at.isoformat() if edge.calculated_at else None,
                 "policy_qualified": qualifies_for_bet_policy(
                     play=edge.recommended_play,
-                    edge_pct=float(edge.edge_pct or 0),
-                    ev=ev,
-                    confidence=edge.confidence_tier,
+                    edge_pct=adjustment["adjusted_edge_pct"],
+                    ev=adjustment["adjusted_ev"],
+                    confidence=adjustment["adjusted_confidence"],
                 ),
             }
         )
 
-    ranked.sort(key=lambda x: (x["edge_pct"], x["ev"]), reverse=True)
+    ranked.sort(key=lambda x: (x["adjusted_edge_pct"], x["adjusted_ev"], x["edge_pct"]), reverse=True)
 
     for i, row in enumerate(ranked, start=1):
         row["rank"] = i
@@ -102,11 +131,22 @@ def _build_discord_lines(bets: list[dict], title: str = "📊 **Ranked MLB Bets*
         move = f" ↕{bet['movement_direction']}" if bet.get("movement_direction") else ""
         lines.append(
             f"#{bet['rank']} {bet['matchup']} | {bet['play']}{snap}{move} | "
-            f"edge={bet['edge_pct']:.4f} | ev={bet['ev']:.4f} | "
-            f"{bet['confidence'] or 'n/a'} | MRS={bet.get('market_respect_score', 50)} "
+            f"edge={bet['edge_pct']:.4f}->{bet.get('adjusted_edge_pct', bet['edge_pct']):.4f} | "
+            f"ev={bet['ev']:.4f}->{bet.get('adjusted_ev', bet['ev']):.4f} | "
+            f"{bet.get('adjusted_confidence') or bet['confidence'] or 'n/a'} | MRS={bet.get('market_respect_score', 50)} "
             f"{','.join(bet.get('market_respect_tags', [])[:2])}"
         )
     return lines
+
+
+def _alertable_ranked_bets(bets: list[dict]) -> list[dict]:
+    return [
+        bet
+        for bet in bets
+        if bet.get("market_respect_alert_allowed")
+        and float(bet.get("adjusted_edge_pct") or 0) > 0
+        and float(bet.get("adjusted_ev") or 0) > 0
+    ]
 
 
 @router.get("/bets")
@@ -130,7 +170,7 @@ def send_ranked_bets_to_discord(
     if not webhook:
         raise HTTPException(status_code=400, detail="DISCORD_WEBHOOK_URL is not set")
 
-    bets = _build_ranked_rows(db=db, limit=limit, active_only=active_only)
+    bets = _alertable_ranked_bets(_build_ranked_rows(db=db, limit=50, active_only=active_only))[:limit]
     if not bets:
         return {"sent": 0, "message": "No ranked bets found"}
 
@@ -164,11 +204,15 @@ def send_single_game_discord_alert(
         raise HTTPException(status_code=404, detail=f"No edge data found for game {game_id} today")
 
     bet = match[0]
+    if not bet.get("market_respect_alert_allowed"):
+        raise HTTPException(status_code=409, detail="Market respect gate suppressed this alert")
     snap = f" [{bet['snapshot_type']}]" if bet.get("snapshot_type") else ""
     move = f" ↕{bet['movement_direction']}" if bet.get("movement_direction") else ""
     content = (
         f"⚾ **Pregame Alert** — {bet['matchup']}{snap}\n"
-        f"Play: **{bet['play']}**{move} | edge={bet['edge_pct']:.4f} | ev={bet['ev']:.4f} | {bet['confidence'] or 'n/a'}\n"
+        f"Play: **{bet['play']}**{move} | edge={bet['edge_pct']:.4f}->{bet['adjusted_edge_pct']:.4f} | "
+        f"ev={bet['ev']:.4f}->{bet['adjusted_ev']:.4f} | {bet['adjusted_confidence'] or bet['confidence'] or 'n/a'}\n"
+        f"MRS: {bet.get('market_respect_score', 50)} | {', '.join(bet.get('market_respect_tags', [])[:2])}\n"
         f"Start: {bet['start_time']} | {bet.get('away_probable_pitcher', '?')} vs {bet.get('home_probable_pitcher', '?')}"
     )
 

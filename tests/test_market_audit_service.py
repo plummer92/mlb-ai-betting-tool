@@ -19,7 +19,7 @@ from app.models.schema import (
     SnapshotType,
 )
 from app.services.market_audit_service import get_clv_report, get_movement_backtest_report
-from app.services.market_respect_service import market_respect_for_edge
+from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
 
 
 class MarketAuditServiceTests(unittest.TestCase):
@@ -178,7 +178,18 @@ class MarketAuditServiceTests(unittest.TestCase):
             total_steam_over=True,
             total_steam_under=False,
         )
-        self.db.add(movement)
+        close = GameOdds(
+            game_id=game.game_id,
+            sportsbook="draftkings",
+            snapshot_type=SnapshotType.pregame,
+            fetched_at=datetime.now(timezone.utc),
+            away_ml=100,
+            home_ml=-120,
+            total_line=8.5,
+            over_odds=-110,
+            under_odds=-110,
+        )
+        self.db.add_all([movement, close])
         self.db.commit()
         self.db.refresh(movement)
         edge.movement_id = movement.id
@@ -214,6 +225,9 @@ class MarketAuditServiceTests(unittest.TestCase):
         self.assertEqual(report["by_movement_direction"][0]["movement_direction"], "toward_model")
         self.assertEqual(report["by_movement_bucket"][0]["movement_bucket"], "ml_steam")
         self.assertEqual(report["by_market_respect_tag"][0]["market_respect_tag"], "MARKET AGREED")
+        self.assertIn("market_respect_weighting_backtest", report)
+        self.assertIn("new_metrics", report)
+        self.assertEqual(report["market_respect_weighting_backtest"]["after"]["bets"], 1)
 
     def test_market_respect_scores_late_sharp_buy(self) -> None:
         game, _prediction, _entry_odds, edge, _alert = self._base_rows(game_id=3)
@@ -301,6 +315,42 @@ class MarketAuditServiceTests(unittest.TestCase):
 
         self.assertLessEqual(respect["score"], 35)
         self.assertIn("MARKET REJECTED", respect["tags"])
+
+    def test_market_respect_adjustment_boosts_and_suppresses(self) -> None:
+        agreed = market_respect_adjustment(
+            edge_pct=0.08,
+            ev=0.1,
+            confidence="medium",
+            market_respect={"score": 82, "tags": ["MARKET AGREED"], "components": {}},
+            odds_american=-110,
+        )
+        rejected = market_respect_adjustment(
+            edge_pct=0.08,
+            ev=0.1,
+            confidence="strong",
+            market_respect={"score": 25, "tags": ["MARKET REJECTED"], "components": {}},
+            odds_american=-110,
+        )
+        stale = market_respect_adjustment(
+            edge_pct=0.08,
+            ev=0.1,
+            confidence="strong",
+            market_respect={"score": 60, "tags": ["STALE OPEN"], "components": {}},
+            odds_american=-110,
+        )
+
+        self.assertEqual(agreed["bucket"], "strong_market_agreement")
+        self.assertGreater(agreed["adjusted_edge_pct"], agreed["raw_edge_pct"])
+        self.assertEqual(agreed["adjusted_confidence"], "strong")
+        self.assertTrue(agreed["alert_allowed"])
+
+        self.assertEqual(rejected["bucket"], "market_rejection")
+        self.assertLess(rejected["adjusted_ev"], rejected["raw_ev"])
+        self.assertFalse(rejected["alert_allowed"])
+
+        self.assertEqual(stale["bucket"], "stale_open")
+        self.assertFalse(stale["alert_allowed"])
+        self.assertIn("stale", stale["suppress_reasons"][0])
 
 
 if __name__ == "__main__":

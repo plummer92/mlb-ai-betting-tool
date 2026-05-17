@@ -13,6 +13,7 @@ from app.models.schema import BetAlert, EdgeResult, Game, Prediction, GameOdds, 
 from app.services.explanation_service import generate_pick_explanation
 from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.edge_service import get_trustworthy_active_edges, TOTAL_STD_DEV
+from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
 from app.services.notification_service import send_alert_message
 from app.services.paper_trade_service import log_alert_as_paper_trade
 from app.services.odds_service import is_odds_snapshot_fresh
@@ -73,7 +74,33 @@ def get_average_odds(db: Session, game_id: int, play: str) -> str:
     return "N/A"
 
 
-def qualifies_for_alert(edge: EdgeResult) -> bool:
+def _pick_play_odds(edge: EdgeResult, odds: GameOdds | None) -> int | None:
+    play = (edge.recommended_play or "").lower()
+    if play == "away_ml":
+        return edge.away_ml if edge.away_ml is not None else (odds.away_ml if odds else None)
+    if play == "home_ml":
+        return edge.home_ml if edge.home_ml is not None else (odds.home_ml if odds else None)
+    if play == "over":
+        return edge.over_odds if edge.over_odds is not None else (odds.over_odds if odds else None)
+    if play == "under":
+        return edge.under_odds if edge.under_odds is not None else (odds.under_odds if odds else None)
+    return None
+
+
+def _edge_ev(edge: EdgeResult) -> float:
+    play = (edge.recommended_play or "").lower()
+    if play == "away_ml":
+        return float(edge.ev_away or 0)
+    if play == "home_ml":
+        return float(edge.ev_home or 0)
+    if play == "under":
+        return float(edge.ev_under or 0)
+    if play == "over":
+        return float(edge.ev_over or 0)
+    return 0.0
+
+
+def qualifies_for_alert(edge: EdgeResult, market_adjustment: dict | None = None) -> bool:
     """
     Sniper Alert Criteria:
     - Totals: Confidence >= 72.0%
@@ -95,11 +122,17 @@ def qualifies_for_alert(edge: EdgeResult) -> bool:
 
     sniper_confidence = get_sniper_confidence(edge)
 
+    adjusted_edge = float((market_adjustment or {}).get("adjusted_edge_pct", float(edge.edge_pct or 0)))
+    adjusted_ev = float((market_adjustment or {}).get("adjusted_ev", ev))
+    adjusted_confidence = (market_adjustment or {}).get("adjusted_confidence", edge.confidence_tier)
+    if market_adjustment and not market_adjustment.get("alert_allowed", False):
+        return False
+
     if not qualifies_for_bet_policy(
         play=play,
-        edge_pct=float(edge.edge_pct or 0),
-        ev=ev,
-        confidence=edge.confidence_tier,
+        edge_pct=adjusted_edge,
+        ev=adjusted_ev,
+        confidence=adjusted_confidence,
         confidence_score=sniper_confidence,
     ):
         return False
@@ -232,13 +265,12 @@ def build_sniper_alert_message(game: Game, edge: EdgeResult, db: Session) -> str
 def create_and_send_alerts_for_today(db: Session) -> dict:
     today = datetime.now(ET).date()
     trusted_rows = get_trustworthy_active_edges(db, game_date=today)
-    rows = [(edge, game, prediction) for edge, game, prediction, _odds in trusted_rows]
 
     # keep only latest edge per game
     latest_by_game = {}
-    for edge, game, prediction in rows:
+    for edge, game, prediction, odds in trusted_rows:
         if game.game_id not in latest_by_game:
-            latest_by_game[game.game_id] = (edge, game, prediction)
+            latest_by_game[game.game_id] = (edge, game, prediction, odds)
 
     edges = list(latest_by_game.values())
     print(f"[alerts] Evaluating {len(edges)} edges for {today} for Sniper Alerts", flush=True)
@@ -249,7 +281,7 @@ def create_and_send_alerts_for_today(db: Session) -> dict:
     failed = 0
     qualified = 0
 
-    for edge, game, prediction in edges:
+    for edge, game, prediction, odds in edges:
         # Dedupe on game_id and prediction_id
         existing = (
             db.query(BetAlert)
@@ -263,7 +295,16 @@ def create_and_send_alerts_for_today(db: Session) -> dict:
             skipped += 1
             continue
 
-        if not qualifies_for_alert(edge):
+        market_respect = market_respect_for_edge(db, edge, odds=odds, game=game)
+        adjustment = market_respect_adjustment(
+            edge_pct=float(edge.edge_pct or 0),
+            ev=_edge_ev(edge),
+            confidence=edge.confidence_tier,
+            market_respect=market_respect,
+            odds_american=_pick_play_odds(edge, odds),
+        )
+
+        if not qualifies_for_alert(edge, adjustment):
             skipped += 1
             continue
 
@@ -279,6 +320,8 @@ def create_and_send_alerts_for_today(db: Session) -> dict:
         elif edge.recommended_play == "home_ml": ev = float(edge.ev_home or 0)
         elif edge.recommended_play == "under": ev = float(edge.ev_under or 0)
         elif edge.recommended_play == "over": ev = float(edge.ev_over or 0)
+        adjusted_ev = adjustment["adjusted_ev"]
+        adjusted_confidence = adjustment["adjusted_confidence"] or edge.confidence_tier or "sniper"
 
         alert = BetAlert(
             game_id=game.game_id,
@@ -286,9 +329,9 @@ def create_and_send_alerts_for_today(db: Session) -> dict:
             edge_result_id=edge.id,
             game_date=game.game_date,
             play=edge.recommended_play or "none",
-            edge_pct=edge.edge_pct,
-            ev=ev,
-            confidence=edge.confidence_tier or "sniper",
+            edge_pct=adjustment["adjusted_edge_pct"],
+            ev=adjusted_ev,
+            confidence=adjusted_confidence,
             synopsis=message,  # Use the sniper message as synopsis
             rationale_json=json.dumps(rationale),
             sent_to=ALERT_DESTINATION,
@@ -330,8 +373,8 @@ def create_and_send_alert_for_game(db: Session, game_id: int) -> dict:
     trusted_rows = get_trustworthy_active_edges(db, game_date=today)
     row = next(
         (
-            (edge, game, prediction)
-            for edge, game, prediction, _odds in trusted_rows
+            (edge, game, prediction, odds)
+            for edge, game, prediction, odds in trusted_rows
             if game.game_id == game_id
         ),
         None,
@@ -340,7 +383,7 @@ def create_and_send_alert_for_game(db: Session, game_id: int) -> dict:
     if not row:
         return {"created": 0, "sent": 0, "skipped": 1, "reason": "no edge found for game"}
 
-    edge, game, prediction = row
+    edge, game, prediction, odds = row
 
     # Dedupe: skip if this game/prediction combo was already alerted
     already = (
@@ -354,8 +397,23 @@ def create_and_send_alert_for_game(db: Session, game_id: int) -> dict:
     if already:
         return {"created": 0, "sent": 0, "skipped": 1, "reason": "already alerted for this prediction"}
 
-    if not qualifies_for_alert(edge):
-        return {"created": 0, "sent": 0, "skipped": 1, "reason": "does not meet sniper criteria"}
+    market_respect = market_respect_for_edge(db, edge, odds=odds, game=game)
+    adjustment = market_respect_adjustment(
+        edge_pct=float(edge.edge_pct or 0),
+        ev=_edge_ev(edge),
+        confidence=edge.confidence_tier,
+        market_respect=market_respect,
+        odds_american=_pick_play_odds(edge, odds),
+    )
+    if not qualifies_for_alert(edge, adjustment):
+        return {
+            "created": 0,
+            "sent": 0,
+            "skipped": 1,
+            "reason": "market respect gate or sniper criteria suppressed this alert",
+            "market_respect": market_respect,
+            "market_respect_adjustment": adjustment,
+        }
 
     message = build_sniper_alert_message(game, edge, db)
     from app.services.synopsis_service import build_edge_synopsis
@@ -366,6 +424,8 @@ def create_and_send_alert_for_game(db: Session, game_id: int) -> dict:
     elif edge.recommended_play == "home_ml": ev = float(edge.ev_home or 0)
     elif edge.recommended_play == "under": ev = float(edge.ev_under or 0)
     elif edge.recommended_play == "over": ev = float(edge.ev_over or 0)
+    adjusted_ev = adjustment["adjusted_ev"]
+    adjusted_confidence = adjustment["adjusted_confidence"] or edge.confidence_tier or "sniper"
 
     alert = BetAlert(
         game_id=game.game_id,
@@ -373,9 +433,9 @@ def create_and_send_alert_for_game(db: Session, game_id: int) -> dict:
         edge_result_id=edge.id,
         game_date=game.game_date,
         play=edge.recommended_play or "none",
-        edge_pct=edge.edge_pct,
-        ev=ev,
-        confidence=edge.confidence_tier or "sniper",
+        edge_pct=adjustment["adjusted_edge_pct"],
+        ev=adjusted_ev,
+        confidence=adjusted_confidence,
         synopsis=message,
         rationale_json=json.dumps(rationale),
         sent_to=ALERT_DESTINATION,

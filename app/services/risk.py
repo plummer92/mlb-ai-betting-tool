@@ -84,17 +84,26 @@ def evaluate_bet_for_execution(
         return RiskDecision(approved=False, reasons=[r])
 
     # ── EV floor ─────────────────────────────────────────────────────────
-    ev = float(bet.get("ev") or 0)
+    adjustment = bet.get("market_respect_adjustment") or {}
+    respect_tags = set(bet.get("market_respect_tags") or adjustment.get("tags") or [])
+    if bet.get("market_respect_alert_allowed") is False or adjustment.get("alert_allowed") is False:
+        block_reasons.extend(adjustment.get("suppress_reasons") or ["Market respect gate blocked this bet"])
+    if "MARKET REJECTED" in respect_tags:
+        block_reasons.append("Market respect rejected the model side")
+    if "STALE OPEN" in respect_tags:
+        block_reasons.append("Stale odds detected; refresh before execution")
+
+    ev = float(bet.get("adjusted_ev", bet.get("ev")) or 0)
     if ev < MIN_EV:
         block_reasons.append(f"EV {ev:.4f} < MIN_EV {MIN_EV:.4f}")
 
     # ── Edge floor ────────────────────────────────────────────────────────
-    edge = float(bet.get("edge_pct") or 0)
+    edge = float(bet.get("adjusted_edge_pct", bet.get("edge_pct")) or 0)
     if edge < MIN_EDGE:
         block_reasons.append(f"Edge {edge:.4f} < MIN_EDGE {MIN_EDGE:.4f}")
 
     # ── Confidence requirement ────────────────────────────────────────────
-    conf = (bet.get("confidence") or "").lower().strip()
+    conf = (bet.get("adjusted_confidence") or bet.get("confidence") or "").lower().strip()
     required_conf = (REQUIRE_CONFIDENCE or "").lower().strip()
     if required_conf and conf != required_conf:
         block_reasons.append(

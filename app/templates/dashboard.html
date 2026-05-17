@@ -1140,7 +1140,7 @@ function fmtAmericanOdds(n) {
 
 function strongestEdge(rows) {
   if (!rows || !rows.length) return null;
-  return [...rows].sort((a, b) => (b.edge_pct ?? -999) - (a.edge_pct ?? -999))[0];
+  return [...rows].sort((a, b) => (b.adjusted_edge_pct ?? b.edge_pct ?? -999) - (a.adjusted_edge_pct ?? a.edge_pct ?? -999))[0];
 }
 
 function fatigueCounts(reports) {
@@ -1167,6 +1167,29 @@ function marketRespectChip(respect) {
   const tag = (respect.tags || [])[0] || 'MARKET NEUTRAL';
   const cls = score >= 70 ? 'c-strong' : score >= 50 ? 'c-medium' : 'c-loss';
   return `<span class="chip ${cls}">MRS ${score} ${esc(tag)}</span>`;
+}
+
+function marketTrustMeter(adjustment) {
+  if (!adjustment) return '';
+  const score = adjustment.score ?? 50;
+  const cls = score >= 70 ? 'green' : score >= 50 ? 'yellow' : 'red';
+  return `<div title="${esc(adjustment.explanation || '')}" style="min-width:130px">
+    <div style="display:flex;justify-content:space-between;font-family:monospace;font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.7px;">
+      <span>Market Trust</span><span class="${cls}">${score}</span>
+    </div>
+    <div style="height:6px;border-radius:4px;background:var(--surface2);overflow:hidden;border:1px solid var(--border);margin-top:3px;">
+      <div style="height:100%;width:${Math.max(0, Math.min(100, score))}%;background:${score >= 70 ? 'var(--green)' : score >= 50 ? 'var(--yellow)' : 'var(--red)'};"></div>
+    </div>
+  </div>`;
+}
+
+function adjustedEdgeHtml(row) {
+  const raw = row.edge_pct ?? row.raw_edge_pct;
+  const adj = row.adjusted_edge_pct;
+  if (raw == null) return '---';
+  if (adj == null || Math.abs(adj - raw) < 0.0001) return `${(raw * 100).toFixed(1)}%`;
+  const cls = adj >= raw ? 'green' : 'yellow';
+  return `<span class="muted">${(raw * 100).toFixed(1)}%</span> <span class="${cls}">-> ${(adj * 100).toFixed(1)}%</span>`;
 }
 
 async function loadTodayRead() {
@@ -1204,8 +1227,8 @@ async function loadTodayRead() {
         </div>
         <div class="read-tile">
           <div class="read-label">Top Edge</div>
-          <div class="read-main ${top ? 'green' : 'muted'}">${top ? `${(top.edge_pct * 100).toFixed(1)}%` : 'None'}</div>
-          <div class="read-sub">${top ? esc(`${top.play || 'play'} | MRS ${top.market_respect_score ?? '--'} | ${top.matchup || ''}`) : 'No ranked bet yet'}</div>
+          <div class="read-main ${top ? 'green' : 'muted'}">${top ? `${((top.adjusted_edge_pct ?? top.edge_pct) * 100).toFixed(1)}%` : 'None'}</div>
+          <div class="read-sub">${top ? esc(`${top.play || 'play'} | raw ${(top.edge_pct * 100).toFixed(1)}% | MRS ${top.market_respect_score ?? '--'} | ${top.matchup || ''}`) : 'No ranked bet yet'}</div>
         </div>
         <div class="read-tile">
           <div class="read-label">Market Health</div>
@@ -1430,7 +1453,7 @@ async function loadTopBets() {
     $('top-bets-table').innerHTML = `
       <table>
         <thead><tr>
-          <th>Rank</th><th>Matchup</th><th>Play</th><th>Edge</th><th>EV</th><th>Market</th><th>Confidence</th><th>Book</th><th>Start</th>
+          <th>Rank</th><th>Matchup</th><th>Play</th><th>Raw -> Adj Edge</th><th>Adj EV</th><th>Market Trust</th><th>Confidence</th><th>Why</th><th>Book</th><th>Start</th>
         </tr></thead>
         <tbody>
           ${rows.map(r => `
@@ -1438,10 +1461,11 @@ async function loadTopBets() {
               <td class="mono" style="font-weight:700;color:var(--cyan)">#${r.rank}</td>
               <td style="font-weight:600">${esc(r.matchup)}</td>
               <td class="mono">${esc((r.play || '—').replace('_', ' ').toUpperCase())}</td>
-              <td class="mono green">${(r.edge_pct * 100).toFixed(1)}%</td>
-              <td class="mono ${r.ev >= 0 ? 'green' : 'red'}">${fmt(r.ev, 3)}</td>
-              <td>${marketRespectChip(r.market_respect)}</td>
-              <td>${edgeChip(r.confidence, r.edge_pct)}</td>
+              <td class="mono">${adjustedEdgeHtml(r)}</td>
+              <td class="mono ${(r.adjusted_ev ?? r.ev) >= 0 ? 'green' : 'red'}">${fmt(r.adjusted_ev ?? r.ev, 3)}</td>
+              <td>${marketTrustMeter(r.market_respect_adjustment)}${marketRespectChip(r.market_respect)}</td>
+              <td>${edgeChip(r.adjusted_confidence || r.confidence, r.adjusted_edge_pct ?? r.edge_pct)}</td>
+              <td style="max-width:260px;font-size:11px;color:var(--muted);line-height:1.35">${esc(r.market_respect_adjustment?.explanation || '')}</td>
               <td class="mono">${esc(r.sportsbook || '—')}</td>
               <td class="mono">${gameTime(r.start_time)}</td>
             </tr>
@@ -1514,12 +1538,18 @@ async function loadMarketAudit() {
     const byPlay = clv.by_play || [];
     const movementRows = movement.by_play_movement_bucket || [];
     const respectRows = movement.by_market_respect_tag || [];
+    const weighting = movement.market_respect_weighting_backtest || {};
+    const metrics = movement.new_metrics || {};
 
     const beatRate = clvSummary.beat_close_rate != null ? (clvSummary.beat_close_rate * 100).toFixed(1) + '%' : '---';
     const avgLineClv = clvSummary.avg_line_clv != null ? fmt(clvSummary.avg_line_clv, 2) : '---';
     const avgPriceClv = clvSummary.avg_price_clv != null ? (clvSummary.avg_price_clv * 100).toFixed(2) + ' pts' : '---';
     const roi = moveSummary.roi_per_bet != null ? fmt(moveSummary.roi_per_bet, 3) : '---';
     const moveBets = moveSummary.bets ?? 0;
+    const afterRoi = weighting.after?.roi_per_bet != null ? fmt(weighting.after.roi_per_bet, 3) : '---';
+    const roiDelta = weighting.roi_delta != null ? fmt(weighting.roi_delta, 3) : '---';
+    const drawdownCut = weighting.drawdown_reduction != null ? fmt(weighting.drawdown_reduction, 2) : '---';
+    const sharpFollow = metrics.sharp_follow_accuracy != null ? (metrics.sharp_follow_accuracy * 100).toFixed(1) + '%' : '---';
     const priced = clvSummary.priced ?? 0;
     const lined = clvSummary.lined ?? 0;
     const sampleNote = priced < 30
@@ -1544,6 +1574,22 @@ async function loadMarketAudit() {
         <div class="s-stat">
           <div class="s-stat-val ${moveSummary.roi_per_bet > 0 ? 'green' : moveSummary.roi_per_bet < 0 ? 'red' : 'muted'}">${roi}</div>
           <div class="s-stat-lbl">Movement ROI / Bet</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val ${weighting.after?.roi_per_bet > 0 ? 'green' : weighting.after?.roi_per_bet < 0 ? 'red' : 'muted'}">${afterRoi}</div>
+          <div class="s-stat-lbl">MRS Weighted ROI</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val ${weighting.roi_delta > 0 ? 'green' : weighting.roi_delta < 0 ? 'red' : 'muted'}">${roiDelta}</div>
+          <div class="s-stat-lbl">ROI Delta</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val green">${drawdownCut}</div>
+          <div class="s-stat-lbl">Drawdown Cut</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val ${colorClass((metrics.sharp_follow_accuracy || 0) * 100, 55, 48)}">${sharpFollow}</div>
+          <div class="s-stat-lbl">Sharp-Follow Accuracy</div>
         </div>
       </div>
       <div class="audit-note">${esc(sampleNote)}</div>`;
@@ -1876,6 +1922,10 @@ async function loadIntel() {
       const mvHtml = movementHtml(edge?.movement_direction);
       const actChip = actionChip(edge, pred, isFinal);
       const respectHtml = marketRespectChip(edge?.market_respect);
+      const trustHtml = marketTrustMeter(edge?.market_respect_adjustment);
+      const adjustedRead = edge?.adjusted_edge_pct != null
+        ? `<div>Adj Edge: <strong>${adjustedEdgeHtml(edge)}</strong></div>`
+        : '';
 
       const cls = isLive ? 'game-card is-live' : isFinal ? 'game-card is-final' : 'game-card';
 
@@ -1894,10 +1944,12 @@ async function loadIntel() {
         <div class="gc-footer">
           <div class="gc-totals">
             ${totLines.map(l => `<div>${l}</div>`).join('')}
+            ${adjustedRead}
             ${playHtml}
           </div>
           <div class="gc-right">
             ${actChip}
+            ${trustHtml}
             ${respectHtml}
             ${echip}
             ${mvHtml}
