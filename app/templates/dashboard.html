@@ -190,6 +190,30 @@ body::after {
   padding: 28px 32px;
 }
 
+.quick-tabs {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+  font-family: monospace;
+}
+.quick-tab {
+  color: var(--muted);
+  text-decoration: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}
+.quick-tab:hover {
+  color: var(--cyan);
+  border-color: var(--border-glow);
+  background: rgba(6,182,212,0.05);
+}
+
 /* ── Section ── */
 .section { margin-bottom: 36px; }
 
@@ -269,6 +293,46 @@ body::after {
   letter-spacing: 0.8px;
   margin-top: 2px;
 }
+
+.today-read {
+  display: grid;
+  grid-template-columns: 1.2fr repeat(5, minmax(130px, 1fr));
+  gap: 0;
+  background: linear-gradient(180deg, var(--surface2) 0%, var(--surface3) 100%);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--cyan);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.read-tile {
+  padding: 13px 16px;
+  border-right: 1px solid var(--border);
+  min-height: 78px;
+}
+.read-tile:last-child { border-right: none; }
+.read-label {
+  font-family: monospace;
+  font-size: 9px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+}
+.read-main {
+  font-family: monospace;
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.15;
+}
+.read-sub {
+  color: var(--muted);
+  font-family: monospace;
+  font-size: 10px;
+  margin-top: 5px;
+  line-height: 1.35;
+}
+@media (max-width: 1200px) { .today-read { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 720px) { .today-read { grid-template-columns: 1fr; } .read-tile { border-right: none; border-bottom: 1px solid var(--border); } }
 
 /* ── Table ── */
 .tbl-wrap { overflow-x: auto; }
@@ -764,6 +828,18 @@ tr:hover td { background: rgba(6,182,212,0.025); }
   padding: 24px;
   text-align: center;
 }
+.empty.compact {
+  padding: 12px 16px;
+  text-align: left;
+  border-left: 3px solid var(--border);
+}
+.audit-note {
+  margin-top: -6px;
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-family: monospace;
+  font-size: 10px;
+}
 
 /* ── Color utils ── */
 .green  { color: var(--green); }
@@ -818,7 +894,27 @@ tr:hover td { background: rgba(6,182,212,0.025); }
 
 <div class="container">
 
-  <div class="section">
+  <div class="quick-tabs">
+    <a class="quick-tab" href="#today-read-section">Today</a>
+    <a class="quick-tab" href="#market-audit-section">Markets</a>
+    <a class="quick-tab" href="#debrief-section">Debrief</a>
+    <a class="quick-tab" href="#active-intel-section">Intel</a>
+    <a class="quick-tab" href="#signals-section">Model</a>
+    <a class="quick-tab" href="#bullpen-section">Bullpen</a>
+  </div>
+
+  <div class="section" id="today-read-section">
+    <div class="section-head">
+      <div class="section-label">Today's Read</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="today-read-badge">LOADING</div>
+    </div>
+    <div id="today-read">
+      <div class="loading">Loading board read</div>
+    </div>
+  </div>
+
+  <div class="section" id="record-section">
     <div class="section-head">
       <div class="section-label">Betting Record</div>
       <div class="section-rule"></div>
@@ -827,7 +923,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <div id="betting-record"></div>
   </div>
 
-  <div class="section">
+  <div class="section" id="top-bets-section">
     <div class="section-head">
       <div class="section-label">Top 10 Bets</div>
       <div class="section-rule"></div>
@@ -840,7 +936,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     </div>
   </div>
 
-  <div class="section">
+  <div class="section" id="best-week-section">
     <div class="section-head">
       <div class="section-label">Best Plays This Week</div>
       <div class="section-rule"></div>
@@ -853,7 +949,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     </div>
   </div>
 
-  <div class="section">
+  <div class="section" id="market-audit-section">
     <div class="section-head">
       <div class="section-label">Market Audit</div>
       <div class="section-rule"></div>
@@ -868,7 +964,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
   </div>
 
   <!-- ═══════════════ 1. YESTERDAY'S DEBRIEF ═══════════════ -->
-  <div class="section">
+  <div class="section" id="debrief-section">
     <div class="section-head">
       <div class="section-label" id="debrief-title">Debrief</div>
       <div class="section-rule"></div>
@@ -885,7 +981,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
   </div>
 
   <!-- ═══════════════ 2. TODAY'S ACTIVE INTEL ═══════════════ -->
-  <div class="section">
+  <div class="section" id="commentary-section">
     <div class="section-head">
       <div class="section-label">AI Commentary</div>
       <div class="section-rule"></div>
@@ -900,7 +996,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
   </div>
 
   <!-- ═══════════════ 3. TODAY'S ACTIVE INTEL ═══════════════ -->
-  <div class="section">
+  <div class="section" id="active-intel-section">
     <div class="section-head">
       <div class="section-label">Today's Active Intel</div>
       <div class="section-rule"></div>
@@ -912,7 +1008,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
   </div>
 
   <!-- ═══════════════ 4. v0.5 SIGNAL INTELLIGENCE ═══════════════ -->
-  <div class="section">
+  <div class="section" id="signals-section">
     <div class="section-head">
       <div class="section-label">v0.5 Signal Intelligence</div>
       <div class="section-rule"></div>
@@ -925,7 +1021,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
   </div>
 
   <!-- ═══════════════ 5. BULLPEN INTELLIGENCE ═══════════════ -->
-  <div class="section">
+  <div class="section" id="bullpen-section">
     <div class="section-head">
       <div class="section-label">Bullpen Intelligence</div>
       <div class="section-rule"></div>
@@ -1042,6 +1138,94 @@ function fmtAmericanOdds(n) {
   return n > 0 ? `+${n}` : `${n}`;
 }
 
+function strongestEdge(rows) {
+  if (!rows || !rows.length) return null;
+  return [...rows].sort((a, b) => (b.edge_pct ?? -999) - (a.edge_pct ?? -999))[0];
+}
+
+function fatigueCounts(reports) {
+  const counts = { exhausted: 0, tired: 0, fresh: 0, rested: 0, alerts: 0 };
+  (reports || []).forEach(r => {
+    if (counts[r.fatigue_signal] != null) counts[r.fatigue_signal]++;
+    if (['exhausted', 'tired'].includes(r.fatigue_signal) || (r.b2b_usage_rate ?? 0) >= 0.38) counts.alerts++;
+  });
+  return counts;
+}
+
+function actionChip(edge, pred, isFinal) {
+  if (isFinal) return '<span class="chip c-none">FINAL</span>';
+  if (!pred) return '<span class="chip sig-orange">NO MODEL</span>';
+  if (!edge) return '<span class="chip c-none">NO LINE</span>';
+  if (edge.confidence === 'strong') return '<span class="chip c-strong">EDGE</span>';
+  if (edge.confidence === 'medium') return '<span class="chip c-medium">WATCH</span>';
+  return '<span class="chip c-weak">NO BET</span>';
+}
+
+async function loadTodayRead() {
+  try {
+    const [gamesRes, rankedRes, clvRes, bullpenRes, signalsRes] = await Promise.all([
+      fetch('/api/games/today'),
+      fetch('/api/ranked/bets?limit=10&active_only=true'),
+      fetch('/api/paper/clv'),
+      fetch('/api/bullpen/today'),
+      fetch('/api/sandbox/signals/today'),
+    ]);
+    const games = await gamesRes.json();
+    const ranked = await rankedRes.json();
+    const clv = await clvRes.json();
+    const bullpen = await bullpenRes.json();
+    const signals = await signalsRes.json();
+
+    const top = strongestEdge(ranked);
+    const bpc = fatigueCounts(bullpen);
+    const agreementRows = (signals || []).filter(p => p.v3_v4_agreement === true || p.v3_v4_agreement === false);
+    const agreement = agreementRows.length
+      ? (agreementRows.filter(p => p.v3_v4_agreement === true).length / agreementRows.length * 100).toFixed(0) + '%'
+      : '---';
+    const beatClose = clv.summary?.beat_close_rate != null ? (clv.summary.beat_close_rate * 100).toFixed(1) + '%' : '---';
+    const lineClv = clv.summary?.avg_line_clv != null ? fmt(clv.summary.avg_line_clv, 2) : '---';
+    const nextGame = [...games].sort((a, b) => String(a.start_time || '').localeCompare(String(b.start_time || '')))[0];
+
+    $('today-read-badge').textContent = `${games.length} GAMES`;
+    $('today-read').innerHTML = `
+      <div class="today-read">
+        <div class="read-tile">
+          <div class="read-label">Next First Pitch</div>
+          <div class="read-main">${nextGame ? esc(`${nextGame.away_team} @ ${nextGame.home_team}`) : 'No Games'}</div>
+          <div class="read-sub">${nextGame ? gameTime(nextGame.start_time) : 'Board is empty'}</div>
+        </div>
+        <div class="read-tile">
+          <div class="read-label">Top Edge</div>
+          <div class="read-main ${top ? 'green' : 'muted'}">${top ? `${(top.edge_pct * 100).toFixed(1)}%` : 'None'}</div>
+          <div class="read-sub">${top ? esc(`${top.play || 'play'} | ${top.matchup || ''}`) : 'No ranked bet yet'}</div>
+        </div>
+        <div class="read-tile">
+          <div class="read-label">Market Health</div>
+          <div class="read-main ${colorClass((clv.summary?.beat_close_rate || 0) * 100, 52, 45)}">${beatClose}</div>
+          <div class="read-sub">Beat close | line CLV ${lineClv}</div>
+        </div>
+        <div class="read-tile">
+          <div class="read-label">Model Agreement</div>
+          <div class="read-main ${agreementRows.length ? colorClass(parseFloat(agreement), 70, 50) : 'muted'}">${agreement}</div>
+          <div class="read-sub">${agreementRows.length} sandbox comparisons</div>
+        </div>
+        <div class="read-tile">
+          <div class="read-label">Bullpen Alerts</div>
+          <div class="read-main ${bpc.alerts ? 'yellow' : 'green'}">${bpc.alerts}</div>
+          <div class="read-sub">${bpc.exhausted} exhausted | ${bpc.tired} tired</div>
+        </div>
+        <div class="read-tile">
+          <div class="read-label">Board State</div>
+          <div class="read-main ${ranked.length ? 'green' : 'muted'}">${ranked.length ? `${ranked.length} Live` : 'Standby'}</div>
+          <div class="read-sub">${games.length} games loaded</div>
+        </div>
+      </div>`;
+  } catch(e) {
+    $('today-read-badge').textContent = 'ERROR';
+    $('today-read').innerHTML = `<div class="empty compact">Today read unavailable: ${esc(e.message)}</div>`;
+  }
+}
+
 async function loadCommentary() {
   try {
     const res = await fetch('/api/commentary/today');
@@ -1072,7 +1256,7 @@ async function loadCommentary() {
     if (!items.length) {
       $('commentary-grid').innerHTML = `
         <div class="card">
-          <div class="empty">No commentary yet. This panel will populate from today’s alerts or live edge reads as the board develops.</div>
+          <div class="empty compact">No commentary yet. This panel will populate from today’s alerts or live edge reads as the board develops.</div>
         </div>`;
       return;
     }
@@ -1231,7 +1415,7 @@ async function loadTopBets() {
     const rows = await res.json();
     $('top-bets-badge').textContent = rows.length ? `${rows.length} LIVE RANKS` : 'NO LIVE BETS';
     if (!rows.length) {
-      $('top-bets-table').innerHTML = '<div class="empty">No current ranked bets for today.</div>';
+      $('top-bets-table').innerHTML = '<div class="empty compact">No current ranked bets for today.</div>';
       return;
     }
 
@@ -1278,7 +1462,7 @@ async function loadBestPlaysWeek() {
     $('best-week-badge').textContent = plays.length ? `${plays.length} PLAY${plays.length !== 1 ? 'S' : ''}` : 'NO DATA';
 
     if (!plays.length) {
-      $('best-week-table').innerHTML = '<div class="empty">No graded EV plays in the last 7 days.</div>';
+      $('best-week-table').innerHTML = '<div class="empty compact">No graded EV plays in the last 7 days.</div>';
       return;
     }
 
@@ -1326,6 +1510,11 @@ async function loadMarketAudit() {
     const avgPriceClv = clvSummary.avg_price_clv != null ? (clvSummary.avg_price_clv * 100).toFixed(2) + ' pts' : '---';
     const roi = moveSummary.roi_per_bet != null ? fmt(moveSummary.roi_per_bet, 3) : '---';
     const moveBets = moveSummary.bets ?? 0;
+    const priced = clvSummary.priced ?? 0;
+    const lined = clvSummary.lined ?? 0;
+    const sampleNote = priced < 30
+      ? `Price CLV sample is thin (${priced} priced / ${lined} lined), so line CLV is the better read for now.`
+      : `${priced} priced / ${lined} lined trades available for CLV.`;
 
     $('market-audit-badge').textContent = `${clvSummary.bets ?? 0} CLV / ${moveBets} MOVES`;
     $('market-audit-summary').innerHTML = `
@@ -1346,7 +1535,8 @@ async function loadMarketAudit() {
           <div class="s-stat-val ${moveSummary.roi_per_bet > 0 ? 'green' : moveSummary.roi_per_bet < 0 ? 'red' : 'muted'}">${roi}</div>
           <div class="s-stat-lbl">Movement ROI / Bet</div>
         </div>
-      </div>`;
+      </div>
+      <div class="audit-note">${esc(sampleNote)}</div>`;
 
     const playRows = byPlay.map(row => {
       const rowBeat = row.beat_close_rate != null ? (row.beat_close_rate * 100).toFixed(1) + '%' : '---';
@@ -1362,7 +1552,10 @@ async function loadMarketAudit() {
       </tr>`;
     }).join('');
 
-    const topMovement = movementRows.slice(0, 8).map(row => {
+    const topMovement = [...movementRows]
+      .sort((a, b) => (b.bets ?? 0) - (a.bets ?? 0) || Math.abs(b.roi_per_bet ?? 0) - Math.abs(a.roi_per_bet ?? 0))
+      .slice(0, 8)
+      .map(row => {
       const wr = row.win_rate != null ? (row.win_rate * 100).toFixed(1) + '%' : '---';
       return `<tr>
         <td class="mono">${esc((row.play || '---').toUpperCase())}</td>
@@ -1498,7 +1691,12 @@ async function loadDebrief() {
       const away = r.away_team || (r.matchup || '').split(' @ ')[0] || finalTeams?.[1] || '?';
       const home = r.home_team || (r.matchup || '').split(' @ ')[1] || finalTeams?.[2] || '?';
       const matchup = r.matchup || `${away} @ ${home}`;
-      const predicted = resolveTeam(r.predicted_side || r.recommended_play, away, home);
+      const modelCalledRaw = r.model_called || r.predicted_winner || ((summary.match(/Model called:\s([^(\.]+)(?:\s|\.)/) || [])[1] || '').trim();
+      const winnerPick = modelCalledRaw === 'away' ? away
+                       : modelCalledRaw === 'home' ? home
+                       : (['over', 'under'].includes(String(modelCalledRaw).toLowerCase()) ? 'â€”' : (modelCalledRaw || 'â€”'));
+      const pickRaw = String(r.predicted_side || r.recommended_play || '').toLowerCase();
+      const totalPick = ['over', 'under'].includes(pickRaw) ? resolveTeam(pickRaw, away, home) : 'â€”';
       const actualWinner = r.actual_winner || ((summary.match(/Winner:\s([^\.]+)\./) || [])[1]) || null;
       const actual = actualWinner === 'away' ? away
                    : actualWinner === 'home' ? home
@@ -1529,9 +1727,10 @@ async function loadDebrief() {
 
       return `<tr>
         <td style="font-weight:600;white-space:nowrap">${esc(matchup||'—')}</td>
-        <td class="mono" style="font-size:12px">${esc(predicted)}</td>
+        <td class="mono" style="font-size:12px">${esc(winnerPick)}</td>
         <td class="mono" style="font-size:12px">${esc(actual)}</td>
         <td style="text-align:center">${ci}</td>
+        <td class="mono" style="font-size:12px">${esc(totalPick)}</td>
         <td class="mono" style="font-size:12px">${totStr}</td>
         <td class="mono ${epCls}" style="font-size:12px">${epStr}</td>
         <td class="mono" style="font-size:12px">${scoreDisplay}</td>
@@ -1543,9 +1742,9 @@ async function loadDebrief() {
     $('debrief-table').innerHTML = `
       <table>
         <thead><tr>
-          <th>Matchup</th><th>Predicted</th><th>Actual</th>
+          <th>Matchup</th><th>Winner Pick</th><th>Actual Winner</th>
           <th style="text-align:center">✓/✗</th>
-          <th>Proj→Act Total</th><th>Edge %</th>
+          <th>Total Pick</th><th>Proj-Act Total</th><th>Edge %</th>
           <th>Score</th><th>Bet</th><th>Note</th>
         </tr></thead>
         <tbody>${trows}</tbody>
@@ -1577,7 +1776,7 @@ async function loadIntel() {
     $('intel-badge').textContent = `${games.length} GAME${games.length !== 1 ? 'S' : ''}`;
 
     if (!games.length) {
-      $('game-grid').innerHTML = '<div class="empty">No games scheduled today.</div>';
+      $('game-grid').innerHTML = '<div class="empty compact">No games scheduled today.</div>';
       return;
     }
 
@@ -1644,6 +1843,7 @@ async function loadIntel() {
         playHtml = `<span class="mono" style="font-size:10px;color:var(--cyan)">${pl}</span>`;
       }
       const mvHtml = movementHtml(edge?.movement_direction);
+      const actChip = actionChip(edge, pred, isFinal);
 
       const cls = isLive ? 'game-card is-live' : isFinal ? 'game-card is-final' : 'game-card';
 
@@ -1665,6 +1865,7 @@ async function loadIntel() {
             ${playHtml}
           </div>
           <div class="gc-right">
+            ${actChip}
             ${echip}
             ${mvHtml}
           </div>
@@ -1776,7 +1977,7 @@ async function loadSignals() {
 
     if (!items.length) {
       $('signals-summary').innerHTML = '';
-      $('signals-grid').innerHTML = '<div class="empty">No sandbox predictions for today yet.</div>';
+      $('signals-grid').innerHTML = '<div class="empty compact">No sandbox predictions for today yet.</div>';
       return;
     }
 
@@ -1871,7 +2072,7 @@ async function loadBullpen() {
       : 'NO DATA';
 
     if (!reports.length) {
-      $('bullpen-grid').innerHTML = '<div class="empty">No bullpen data available yet. Collected daily at 9:15am ET.</div>';
+      $('bullpen-grid').innerHTML = '<div class="empty compact">No bullpen data available yet. Collected daily at 9:15am ET.</div>';
       return;
     }
 
@@ -1942,7 +2143,7 @@ async function loadBullpen() {
 }
 
 async function loadAll() {
-  await Promise.all([loadAccuracy(), loadTopBets(), loadBestPlaysWeek(), loadMarketAudit(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
+  await Promise.all([loadTodayRead(), loadAccuracy(), loadTopBets(), loadBestPlaysWeek(), loadMarketAudit(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
 }
 
 let countdown = 60;
