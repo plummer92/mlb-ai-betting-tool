@@ -8,6 +8,7 @@ import requests
 
 from app.db import SessionLocal
 from app.models.schema import EdgeResult, Game, GameOdds
+from app.services.edge_service import get_trustworthy_active_edges
 
 ET = ZoneInfo("America/New_York")
 FINAL_STATUSES = {"Final", "Completed Early", "Cancelled"}
@@ -31,18 +32,11 @@ def _build_ranked_rows(limit: int = 10, active_only: bool = True) -> list[dict]:
     try:
         today = datetime.now(ET).date()
 
-        rows = (
-            db.query(EdgeResult, Game, GameOdds)
-            .join(Game, EdgeResult.game_id == Game.game_id)
-            .outerjoin(GameOdds, EdgeResult.odds_id == GameOdds.id)
-            .filter(Game.game_date == today)
-            .order_by(EdgeResult.calculated_at.desc())
-            .all()
-        )
+        rows = get_trustworthy_active_edges(db, game_date=today)
 
         latest_by_game: dict[int, tuple] = {}
 
-        for edge, game, odds in rows:
+        for edge, game, _prediction, odds in rows:
             if active_only and (game.status in FINAL_STATUSES):
                 continue
             if edge.game_id not in latest_by_game:

@@ -498,11 +498,20 @@ def calculate_edge_for_game(
         model_away=model_away,
         model_home=model_home,
     )
-    max_edge = max(abs(edge_away), abs(edge_home), abs(edge_over or 0.0), abs(edge_under or 0.0))
-    max_ev = max(ev_away_final, ev_home_final, ev_over or 0.0, ev_under or 0.0)
-    tier = confidence_tier(max_edge, max_ev)
     if not play:
         return _invalid_result(game_id=game_id, run_stage=run_stage, reason="no_qualifying_play")
+
+    play_metrics = {
+        "away_ml": (edge_away, ev_away_final),
+        "home_ml": (edge_home, ev_home_final),
+        "over": (edge_over or 0.0, ev_over or 0.0),
+        "under": (edge_under or 0.0, ev_under or 0.0),
+    }
+    selected_edge, selected_ev = play_metrics[play]
+    selected_edge_abs = abs(selected_edge)
+    tier = confidence_tier(selected_edge_abs, selected_ev)
+    if not tier:
+        return _invalid_result(game_id=game_id, run_stage=run_stage, reason="selected_play_below_confidence_threshold")
 
     # ── Movement direction relative to model recommendation ──
     movement_direction: str | None = None
@@ -558,7 +567,7 @@ def calculate_edge_for_game(
         existing_edge.ev_under = round(ev_under, 4) if ev_under is not None else None
         existing_edge.recommended_play = play
         existing_edge.confidence_tier = tier
-        existing_edge.edge_pct = round(max_edge, 4)
+        existing_edge.edge_pct = round(selected_edge_abs, 4)
         existing_edge.movement_direction = movement_direction
         existing_edge.sportsbook = odds.sportsbook
         existing_edge.odds_snapshot_type = odds.snapshot_type.value if odds.snapshot_type else None
@@ -611,7 +620,7 @@ def calculate_edge_for_game(
         ev_under=round(ev_under, 4) if ev_under is not None else None,
         recommended_play=play,
         confidence_tier=tier,
-        edge_pct=round(max_edge, 4),
+        edge_pct=round(selected_edge_abs, 4),
         movement_direction=movement_direction,
         sportsbook=odds.sportsbook,
         odds_snapshot_type=odds.snapshot_type.value if odds.snapshot_type else None,

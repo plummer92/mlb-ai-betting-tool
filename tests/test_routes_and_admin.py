@@ -12,6 +12,7 @@ from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOd
 from app.routes.commentary import commentary_today
 from app.routes.admin import admin_backfill_prediction_dashboard_metrics, admin_freshness
 from app.routes.model import get_today_predictions, run_model
+from app.routes.ranked import _build_ranked_rows
 from app.routes.reviews import get_review_summary, profitability_report
 from app.services.betting_policy import qualifies_for_bet_policy
 
@@ -331,6 +332,62 @@ class RouteAndAdminTests(unittest.TestCase):
                 confidence="strong",
             )
         )
+
+    def test_ranked_bets_use_trustworthy_active_edges_only(self) -> None:
+        game = self._game(6)
+        active_prediction = self._prediction(game.game_id)
+        inactive_prediction = self._prediction(game.game_id)
+        odds = self._odds(game.game_id)
+
+        self.db.add_all(
+            [
+                EdgeResult(
+                    game_id=game.game_id,
+                    prediction_id=active_prediction.prediction_id,
+                    odds_id=odds.id,
+                    run_stage="daily_open",
+                    is_active=True,
+                    calculated_at=datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc),
+                    model_away_win_pct=0.46,
+                    model_home_win_pct=0.54,
+                    implied_away_pct=0.45,
+                    implied_home_pct=0.55,
+                    edge_away=0.01,
+                    edge_home=0.06,
+                    ev_away=0.02,
+                    ev_home=0.08,
+                    recommended_play="home_ml",
+                    confidence_tier="medium",
+                    edge_pct=0.06,
+                ),
+                EdgeResult(
+                    game_id=game.game_id,
+                    prediction_id=inactive_prediction.prediction_id,
+                    odds_id=odds.id,
+                    run_stage="daily_open",
+                    is_active=False,
+                    calculated_at=datetime.now(timezone.utc),
+                    model_away_win_pct=0.90,
+                    model_home_win_pct=0.10,
+                    implied_away_pct=0.45,
+                    implied_home_pct=0.55,
+                    edge_away=0.45,
+                    edge_home=-0.45,
+                    ev_away=0.50,
+                    ev_home=-0.70,
+                    recommended_play="away_ml",
+                    confidence_tier="strong",
+                    edge_pct=0.45,
+                ),
+            ]
+        )
+        self.db.commit()
+
+        rows = _build_ranked_rows(db=self.db, limit=10, active_only=True)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["play"], "home_ml")
+        self.assertEqual(rows[0]["edge_pct"], 0.06)
 
 
 class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):

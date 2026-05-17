@@ -246,6 +246,37 @@ class EdgeHardeningTests(unittest.TestCase):
         self.assertEqual(result["status"], "skipped")
         self.assertEqual(result["reason"], "invalid_model_probability")
 
+    def test_edge_pct_tracks_selected_play_not_largest_board_edge(self) -> None:
+        self._game(13, date.today())
+        self._prediction(
+            13,
+            away_win_pct=0.49,
+            home_win_pct=0.51,
+        )
+        odds = self._odds(
+            13,
+            away_ml=300,
+            home_ml=-500,
+            total_line=8.5,
+            over_odds=-110,
+            under_odds=-110,
+        )
+
+        result = calculate_edge_for_game(
+            self.db,
+            13,
+            run_stage="daily_open",
+            snapshot_type=SnapshotType.open,
+            odds_snapshot=odds,
+            fallback_policy="none",
+        )
+
+        self.assertEqual(result["status"], "created")
+        edge = result["edge"]
+        self.assertEqual(edge.recommended_play, "over")
+        self.assertLess(edge.edge_pct, abs(edge.edge_away))
+        self.assertGreater(edge.ev_over, 0)
+
     def test_edges_top_defaults_to_today_only(self) -> None:
         today = date.today()
         old_day = today - timedelta(days=2)

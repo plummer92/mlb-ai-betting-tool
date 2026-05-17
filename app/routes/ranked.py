@@ -13,6 +13,7 @@ from app.middleware.auth import verify_api_key
 from app.middleware.limiter import limiter
 from app.models.schema import EdgeResult, Game, GameOdds
 from app.services.betting_policy import qualifies_for_bet_policy
+from app.services.edge_service import get_trustworthy_active_edges
 
 router = APIRouter(prefix="/api/ranked", tags=["ranked"])
 
@@ -40,18 +41,11 @@ def _build_ranked_rows(
 ) -> list[dict]:
     today = datetime.now(ET).date()
 
-    rows = (
-        db.query(EdgeResult, Game, GameOdds)
-        .join(Game, EdgeResult.game_id == Game.game_id)
-        .outerjoin(GameOdds, EdgeResult.odds_id == GameOdds.id)
-        .filter(Game.game_date == today)
-        .order_by(EdgeResult.calculated_at.desc())
-        .all()
-    )
+    rows = get_trustworthy_active_edges(db, game_date=today)
 
     latest_by_game: dict[int, tuple[EdgeResult, Game, GameOdds | None]] = {}
 
-    for edge, game, odds in rows:
+    for edge, game, _prediction, odds in rows:
         if active_only and (game.status in FINAL_STATUSES):
             continue
         if edge.game_id not in latest_by_game:
