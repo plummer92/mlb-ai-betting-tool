@@ -853,6 +853,20 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     </div>
   </div>
 
+  <div class="section">
+    <div class="section-head">
+      <div class="section-label">Market Audit</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="market-audit-badge">---</div>
+    </div>
+    <div id="market-audit-summary"></div>
+    <div class="card" style="padding:0;margin-top:12px">
+      <div class="tbl-wrap" id="market-audit-table">
+        <div class="loading">Loading CLV and movement audit</div>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══════════════ 1. YESTERDAY'S DEBRIEF ═══════════════ -->
   <div class="section">
     <div class="section-head">
@@ -1291,6 +1305,94 @@ async function loadBestPlaysWeek() {
       </table>`;
   } catch(e) {
     $('best-week-table').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+async function loadMarketAudit() {
+  try {
+    const [clvRes, movementRes] = await Promise.all([
+      fetch('/api/paper/clv'),
+      fetch('/api/reviews/movement-report?min_sample=1'),
+    ]);
+    const clv = await clvRes.json();
+    const movement = await movementRes.json();
+    const clvSummary = clv.summary || {};
+    const moveSummary = movement.summary || {};
+    const byPlay = clv.by_play || [];
+    const movementRows = movement.by_play_movement_bucket || [];
+
+    const beatRate = clvSummary.beat_close_rate != null ? (clvSummary.beat_close_rate * 100).toFixed(1) + '%' : '---';
+    const avgLineClv = clvSummary.avg_line_clv != null ? fmt(clvSummary.avg_line_clv, 2) : '---';
+    const avgPriceClv = clvSummary.avg_price_clv != null ? (clvSummary.avg_price_clv * 100).toFixed(2) + ' pts' : '---';
+    const roi = moveSummary.roi_per_bet != null ? fmt(moveSummary.roi_per_bet, 3) : '---';
+    const moveBets = moveSummary.bets ?? 0;
+
+    $('market-audit-badge').textContent = `${clvSummary.bets ?? 0} CLV / ${moveBets} MOVES`;
+    $('market-audit-summary').innerHTML = `
+      <div class="summary-bar" style="border-left-color: var(--orange); background: var(--surface3);">
+        <div class="s-stat">
+          <div class="s-stat-val ${colorClass((clvSummary.beat_close_rate || 0) * 100, 52, 45)}">${beatRate}</div>
+          <div class="s-stat-lbl">Beat Close Rate</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val ${clvSummary.avg_line_clv > 0 ? 'green' : clvSummary.avg_line_clv < 0 ? 'red' : 'muted'}">${avgLineClv}</div>
+          <div class="s-stat-lbl">Avg Line CLV</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val ${clvSummary.avg_price_clv > 0 ? 'green' : clvSummary.avg_price_clv < 0 ? 'red' : 'muted'}">${avgPriceClv}</div>
+          <div class="s-stat-lbl">Avg Price CLV</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val ${moveSummary.roi_per_bet > 0 ? 'green' : moveSummary.roi_per_bet < 0 ? 'red' : 'muted'}">${roi}</div>
+          <div class="s-stat-lbl">Movement ROI / Bet</div>
+        </div>
+      </div>`;
+
+    const playRows = byPlay.map(row => {
+      const rowBeat = row.beat_close_rate != null ? (row.beat_close_rate * 100).toFixed(1) + '%' : '---';
+      const lineClv = row.avg_line_clv != null ? fmt(row.avg_line_clv, 2) : '---';
+      const priceClv = row.avg_price_clv != null ? (row.avg_price_clv * 100).toFixed(2) + ' pts' : '---';
+      const beatCls = row.beat_close_rate == null ? 'muted' : row.beat_close_rate >= 0.5 ? 'green' : row.beat_close_rate >= 0.4 ? 'yellow' : 'red';
+      return `<tr>
+        <td class="mono">${esc((row.play || '---').toUpperCase())}</td>
+        <td class="mono">${row.bets ?? 0}</td>
+        <td class="mono ${beatCls}">${rowBeat}</td>
+        <td class="mono ${row.avg_line_clv > 0 ? 'green' : row.avg_line_clv < 0 ? 'red' : 'muted'}">${lineClv}</td>
+        <td class="mono ${row.avg_price_clv > 0 ? 'green' : row.avg_price_clv < 0 ? 'red' : 'muted'}">${priceClv}</td>
+      </tr>`;
+    }).join('');
+
+    const topMovement = movementRows.slice(0, 8).map(row => {
+      const wr = row.win_rate != null ? (row.win_rate * 100).toFixed(1) + '%' : '---';
+      return `<tr>
+        <td class="mono">${esc((row.play || '---').toUpperCase())}</td>
+        <td class="mono">${esc(row.movement_bucket || '---')}</td>
+        <td class="mono">${row.bets ?? 0}</td>
+        <td class="mono ${row.roi_per_bet > 0 ? 'green' : row.roi_per_bet < 0 ? 'red' : 'muted'}">${fmt(row.roi_per_bet, 3)}</td>
+        <td class="mono">${wr}</td>
+      </tr>`;
+    }).join('');
+
+    $('market-audit-table').innerHTML = `
+      <table>
+        <thead><tr>
+          <th colspan="5">CLV by Play</th>
+        </tr><tr>
+          <th>Play</th><th>Bets</th><th>Beat Close</th><th>Line CLV</th><th>Price CLV</th>
+        </tr></thead>
+        <tbody>${playRows || '<tr><td colspan="5" class="empty">No CLV rows yet.</td></tr>'}</tbody>
+      </table>
+      <table style="margin-top:14px;">
+        <thead><tr>
+          <th colspan="5">Movement Buckets</th>
+        </tr><tr>
+          <th>Play</th><th>Bucket</th><th>Bets</th><th>ROI / Bet</th><th>Win Rate</th>
+        </tr></thead>
+        <tbody>${topMovement || '<tr><td colspan="5" class="empty">No movement rows yet.</td></tr>'}</tbody>
+      </table>`;
+  } catch(e) {
+    $('market-audit-summary').innerHTML = '';
+    $('market-audit-table').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
   }
 }
 
@@ -1840,7 +1942,7 @@ async function loadBullpen() {
 }
 
 async function loadAll() {
-  await Promise.all([loadAccuracy(), loadTopBets(), loadBestPlaysWeek(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
+  await Promise.all([loadAccuracy(), loadTopBets(), loadBestPlaysWeek(), loadMarketAudit(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
 }
 
 let countdown = 60;
