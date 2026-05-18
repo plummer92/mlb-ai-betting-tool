@@ -5,7 +5,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from scipy.stats import norm
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -14,10 +14,15 @@ from app.db import get_db
 from app.config import DEBUG
 from app.middleware.auth import verify_api_key
 from app.middleware.limiter import limiter
-from app.models.schema import EdgeResult, Game, GameOdds, Prediction
+from app.models.schema import EdgeResult, Game, GameOdds, Prediction, SnapshotType
 from app.scheduler import scheduler
 from app.services.betting_policy import get_betting_profile, qualifies_for_bet_policy
-from app.services.edge_service import TOTAL_STD_DEV, get_edge_persistence_failures
+from app.services.edge_service import (
+    TOTAL_STD_DEV,
+    calculate_all_edges_today,
+    get_edge_persistence_failures,
+    validate_active_edge_lineage,
+)
 from app.services.ev_math import calc_edge, implied_prob_raw, remove_vig
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
 from app.services.odds_service import odds_freshness_metadata
@@ -509,6 +514,82 @@ def _edge_schema_diagnostics() -> dict:
     }
 
 
+def _edge_retrieval_diagnostics(db: Session, *, limit: int = 50) -> dict:
+    today = datetime.now(ET).date()
+    rows = (
+        db.query(EdgeResult, Game, Prediction, GameOdds)
+        .outerjoin(Game, Game.game_id == EdgeResult.game_id)
+        .outerjoin(Prediction, Prediction.prediction_id == EdgeResult.prediction_id)
+        .outerjoin(GameOdds, GameOdds.id == EdgeResult.odds_id)
+        .order_by(EdgeResult.calculated_at.desc(), EdgeResult.id.desc())
+        .limit(limit)
+        .all()
+    )
+    diagnostics = []
+    reason_counts: Counter[str] = Counter()
+    for edge, game, prediction, odds in rows:
+        reasons: list[str] = []
+        if game is None:
+            reasons.append("missing_game_linkage")
+        elif game.game_date != today:
+            reasons.append("not_today")
+        if prediction is None:
+            reasons.append("missing_prediction_linkage")
+        elif not prediction.is_active:
+            reasons.append("inactive_prediction")
+        if not edge.is_active:
+            reasons.append("inactive_edge")
+        if odds is None:
+            reasons.append("missing_odds_linkage")
+        if prediction is not None and odds is not None and game is not None:
+            is_valid, lineage_reason = validate_active_edge_lineage(edge, prediction, odds, db=db, game=game)
+            if not is_valid:
+                if lineage_reason == "stale_odds_snapshot":
+                    reasons.append("stale_odds_linkage")
+                reasons.append(lineage_reason or "failed_lineage_validation")
+        if not reasons:
+            reasons.append("ranked_query_eligible")
+        for reason in set(reasons):
+            reason_counts[reason] += 1
+        diagnostics.append({
+            **_edge_result_sample(edge, game),
+            "prediction_is_active": prediction.is_active if prediction else None,
+            "prediction_run_stage": prediction.run_stage if prediction else None,
+            "odds_snapshot_id": odds.id if odds else None,
+            "odds_snapshot_type": odds.snapshot_type.value if odds and odds.snapshot_type else None,
+            "odds_fetched_at": odds.fetched_at.isoformat() if odds and odds.fetched_at else None,
+            "retrieval_reasons": reasons,
+        })
+    return {
+        "date": today.isoformat(),
+        "rows_checked": len(diagnostics),
+        "reason_counts": [{"reason": reason, "count": count} for reason, count in reason_counts.most_common()],
+        "edges": diagnostics,
+    }
+
+
+def build_edge_db_state(db: Session) -> dict:
+    latest_rows = (
+        db.query(EdgeResult, Game)
+        .outerjoin(Game, Game.game_id == EdgeResult.game_id)
+        .order_by(EdgeResult.calculated_at.desc(), EdgeResult.id.desc())
+        .limit(20)
+        .all()
+    )
+    return {
+        "latest_edge_results": [
+            _edge_result_sample(edge, game)
+            for edge, game in latest_rows
+        ],
+        "retrieval_diagnostics": _edge_retrieval_diagnostics(db),
+    }
+
+
+@router.get("/edge-db-state")
+def edge_db_state(db: Session = Depends(get_db)):
+    return build_edge_db_state(db)
+
+
 def build_edge_persistence_report(db: Session) -> dict:
     today = datetime.now(ET).date()
     raw_board = build_raw_edge_board(db)
@@ -518,19 +599,19 @@ def build_edge_persistence_report(db: Session) -> dict:
     persisted_rows = (
         db.query(EdgeResult, Game)
         .join(Game, Game.game_id == EdgeResult.game_id)
-        .filter(
-            Game.game_date == today,
-            EdgeResult.is_active.is_(True),
-            EdgeResult.recommended_play.isnot(None),
-            EdgeResult.edge_pct.isnot(None),
-            EdgeResult.edge_pct > 0,
-        )
+        .filter(Game.game_date == today)
         .order_by(EdgeResult.calculated_at.desc(), EdgeResult.id.desc())
         .all()
     )
     persisted_by_game: dict[int, EdgeResult] = {}
     for edge, _game in persisted_rows:
         persisted_by_game.setdefault(edge.game_id, edge)
+
+    active_positive_rows = [
+        (edge, game)
+        for edge, game in persisted_rows
+        if edge.is_active and edge.recommended_play and edge.edge_pct is not None and float(edge.edge_pct) > 0
+    ]
 
     latest_persisted = (
         db.query(func.max(EdgeResult.calculated_at))
@@ -571,12 +652,15 @@ def build_edge_persistence_report(db: Session) -> dict:
 
     computed_count = len(computed_rows)
     persisted_count = len({edge.game_id for edge, _game in persisted_rows if edge.game_id in computed_by_game})
-    failed_count = max(computed_count - persisted_count, 0)
+    active_positive_count = len({edge.game_id for edge, _game in active_positive_rows if edge.game_id in computed_by_game})
+    missing_persist_count = max(computed_count - persisted_count, 0)
+    retrieval = _edge_retrieval_diagnostics(db)
     report = {
         "date": today.isoformat(),
         "computed_edge_count": computed_count,
         "persisted_edge_count": persisted_count,
-        "failed_persist_count": failed_count,
+        "active_positive_edge_count": active_positive_count,
+        "failed_persist_count": missing_persist_count,
         "latest_persisted_edge_timestamp": latest_persisted.isoformat() if latest_persisted else None,
         "latest_computed_edge_timestamp": datetime.now(timezone.utc).isoformat() if computed_rows else None,
         "recorded_persistence_failures": failures[-10:],
@@ -585,13 +669,14 @@ def build_edge_persistence_report(db: Session) -> dict:
             for edge, game in persisted_rows[:5]
         ],
         "sample_missing_edges": sample_missing[:5],
+        "retrieval_diagnostics": retrieval,
         "schema_diagnostics": _edge_schema_diagnostics(),
     }
     logger.warning(
         "[edge persist] computed=%s persisted=%s failed=%s",
         computed_count,
         persisted_count,
-        failed_count,
+        missing_persist_count,
         extra={"event": "edge_persist_diagnostic", "edge_persist": report},
     )
     return report
@@ -600,6 +685,40 @@ def build_edge_persistence_report(db: Session) -> dict:
 @router.get("/edge-persistence")
 def edge_persistence(db: Session = Depends(get_db)):
     return build_edge_persistence_report(db)
+
+
+@router.post("/rebuild-edge-results")
+def rebuild_edge_results(
+    run_stage: str = Query("daily_open"),
+    snapshot_type: str = Query("open"),
+    db: Session = Depends(get_db),
+):
+    try:
+        snapshot = SnapshotType(snapshot_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Unsupported snapshot_type: {snapshot_type}") from exc
+    results = calculate_all_edges_today(
+        db,
+        run_stage=run_stage,
+        snapshot_type=snapshot,
+        fallback_policy="reuse_fresh_same_stage",
+    )
+    persisted = sum(1 for row in results if row.get("status") == "created")
+    failed = sum(1 for row in results if row.get("reason") == "edge_persist_failed")
+    skipped = sum(1 for row in results if row.get("status") == "skipped")
+    return {
+        "run_stage": run_stage,
+        "snapshot_type": snapshot.value,
+        "computed_attempts": persisted + failed,
+        "persisted": persisted,
+        "failed": failed,
+        "skipped": skipped,
+        "results": [
+            {key: value for key, value in row.items() if key != "edge"}
+            for row in results
+        ],
+        "edge_persistence": build_edge_persistence_report(db),
+    }
 
 
 def _moneyline_probabilities(prediction: Prediction | None, odds: GameOdds | None) -> dict:

@@ -3,8 +3,8 @@ import logging
 from zoneinfo import ZoneInfo
 
 from scipy.stats import norm
-from sqlalchemy import desc
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import desc, func
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.schema import EdgeResult, Game, GameOdds, LineMovement, Prediction
@@ -71,36 +71,154 @@ def _record_edge_persistence_failure(edge: EdgeResult, exc: Exception, *, action
     return payload
 
 
+def _today_edge_count(db: Session) -> int:
+    today = datetime.now(ET).date()
+    return (
+        db.query(func.count(EdgeResult.id))
+        .join(Game, Game.game_id == EdgeResult.game_id)
+        .filter(Game.game_date == today)
+        .scalar()
+        or 0
+    )
+
+
 def _persist_edge_result(db: Session, edge: EdgeResult, *, action: str, add: bool = False) -> tuple[bool, dict | None]:
+    logger.info(
+        "[edge persist] commit_attempted game_id=%s prediction_id=%s play_type=%s edge_pct=%s path=%s",
+        edge.game_id,
+        edge.prediction_id,
+        edge.recommended_play,
+        float(edge.edge_pct or 0),
+        action,
+        extra={
+            "event": "edge_persist_commit_attempted",
+            "edge_persist": {
+                "game_id": edge.game_id,
+                "prediction_id": edge.prediction_id,
+                "odds_id": edge.odds_id,
+                "run_stage": edge.run_stage,
+                "play_type": edge.recommended_play,
+                "edge_pct": float(edge.edge_pct or 0),
+                "path": action,
+                "commit_attempted": True,
+            },
+        },
+    )
     try:
         if add:
             db.add(edge)
+        db.flush()
+        logger.info(
+            "[edge persist] flush_succeeded game_id=%s prediction_id=%s edge_id=%s path=%s",
+            edge.game_id,
+            edge.prediction_id,
+            edge.id,
+            action,
+            extra={
+                "event": "edge_persist_flush_succeeded",
+                "edge_persist": {
+                    "game_id": edge.game_id,
+                    "prediction_id": edge.prediction_id,
+                    "edge_id": edge.id,
+                    "path": action,
+                },
+            },
+        )
         db.commit()
         db.refresh(edge)
+        today_count = _today_edge_count(db)
         logger.info(
-            "[edge persist] saved game_id=%s edge_id=%s play_type=%s edge_pct=%s action=%s",
+            "[edge persist] saved game_id=%s edge_id=%s play_type=%s edge_pct=%s action=%s today_edge_rows=%s",
             edge.game_id,
             edge.id,
             edge.recommended_play,
             float(edge.edge_pct or 0),
             action,
+            today_count,
             extra={
                 "event": "edge_persist_saved",
                 "edge_persist": {
                     "game_id": edge.game_id,
+                    "prediction_id": edge.prediction_id,
                     "edge_id": edge.id,
                     "play_type": edge.recommended_play,
                     "edge_pct": float(edge.edge_pct or 0),
                     "action": action,
+                    "commit_succeeded": True,
+                    "today_edge_rows_after_commit": today_count,
                 },
             },
         )
+        if today_count == 0:
+            logger.warning(
+                "[edge persist] no rows returned after commit game_id=%s prediction_id=%s edge_id=%s",
+                edge.game_id,
+                edge.prediction_id,
+                edge.id,
+                extra={
+                    "event": "edge_persist_no_rows_after_commit",
+                    "edge_persist": {
+                        "game_id": edge.game_id,
+                        "prediction_id": edge.prediction_id,
+                        "edge_id": edge.id,
+                    },
+                },
+            )
         return True, None
     except SQLAlchemyError as exc:
+        if isinstance(exc, IntegrityError):
+            logger.warning(
+                "[edge persist] duplicate constraint hit game_id=%s prediction_id=%s path=%s error=%s",
+                edge.game_id,
+                edge.prediction_id,
+                action,
+                str(exc),
+                extra={
+                    "event": "edge_persist_duplicate_constraint",
+                    "edge_persist": {
+                        "game_id": edge.game_id,
+                        "prediction_id": edge.prediction_id,
+                        "path": action,
+                        "error": str(exc),
+                    },
+                },
+            )
+        logger.warning(
+            "[edge persist] rollback triggered game_id=%s prediction_id=%s path=%s error=%s",
+            edge.game_id,
+            edge.prediction_id,
+            action,
+            str(exc),
+            extra={
+                "event": "edge_persist_rollback",
+                "edge_persist": {
+                    "game_id": edge.game_id,
+                    "prediction_id": edge.prediction_id,
+                    "path": action,
+                    "error": str(exc),
+                },
+            },
+        )
         db.rollback()
         failure = _record_edge_persistence_failure(edge, exc, action=action)
         return False, failure
     except Exception as exc:
+        logger.warning(
+            "[edge persist] rollback triggered game_id=%s prediction_id=%s path=%s error=%s",
+            edge.game_id,
+            edge.prediction_id,
+            action,
+            str(exc),
+            extra={
+                "event": "edge_persist_rollback",
+                "edge_persist": {
+                    "game_id": edge.game_id,
+                    "prediction_id": edge.prediction_id,
+                    "path": action,
+                    "error": str(exc),
+                },
+            },
+        )
         db.rollback()
         failure = _record_edge_persistence_failure(edge, exc, action=action)
         return False, failure
@@ -639,6 +757,29 @@ def calculate_edge_for_game(
         )
         .first()
     )
+    logger.info(
+        "[edge persist] lifecycle game_id=%s prediction_id=%s edge_pct=%s path=%s existing_found=%s existing_is_active=%s existing_edge_id=%s",
+        game_id,
+        prediction.prediction_id,
+        round(selected_edge_abs, 4),
+        "update" if existing_edge else "insert",
+        bool(existing_edge),
+        existing_edge.is_active if existing_edge else None,
+        existing_edge.id if existing_edge else None,
+        extra={
+            "event": "edge_persist_lifecycle",
+            "edge_persist": {
+                "game_id": game_id,
+                "prediction_id": prediction.prediction_id,
+                "odds_id": odds.id,
+                "edge_pct": round(selected_edge_abs, 4),
+                "path": "update" if existing_edge else "insert",
+                "existing_row_found": bool(existing_edge),
+                "existing_row_is_active": existing_edge.is_active if existing_edge else None,
+                "existing_edge_id": existing_edge.id if existing_edge else None,
+            },
+        },
+    )
 
     if existing_edge:
         existing_edge.odds_id = odds.id
@@ -688,9 +829,23 @@ def calculate_edge_for_game(
             "odds_id": odds.id,
         }
 
+    logger.warning(
+        "[edge persist] update path skipped game_id=%s prediction_id=%s reason=no_existing_edge",
+        game_id,
+        prediction.prediction_id,
+        extra={
+            "event": "edge_persist_update_path_skipped",
+            "edge_persist": {
+                "game_id": game_id,
+                "prediction_id": prediction.prediction_id,
+                "reason": "no_existing_edge",
+            },
+        },
+    )
+
     # No existing edge for this prediction — deactivate any stale active edges
     # for this game+stage (from a different prediction_id), then insert fresh.
-    (
+    deactivated = (
         db.query(EdgeResult)
         .filter(
             EdgeResult.game_id == game_id,
@@ -699,6 +854,21 @@ def calculate_edge_for_game(
         )
         .update({"is_active": False}, synchronize_session=False)
     )
+    if deactivated:
+        logger.warning(
+            "[edge persist] deactivated stale active edges game_id=%s run_stage=%s count=%s",
+            game_id,
+            run_stage,
+            deactivated,
+            extra={
+                "event": "edge_persist_deactivated_stale",
+                "edge_persist": {
+                    "game_id": game_id,
+                    "run_stage": run_stage,
+                    "deactivated": deactivated,
+                },
+            },
+        )
     edge = EdgeResult(
         game_id=game_id,
         prediction_id=prediction.prediction_id,
