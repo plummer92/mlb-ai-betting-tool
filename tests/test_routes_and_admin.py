@@ -11,11 +11,18 @@ from app.db import Base
 from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, Prediction, SnapshotType
 from app.routes.commentary import commentary_today
 from app.routes.admin import admin_backfill_prediction_dashboard_metrics, admin_freshness
-from app.routes.debug import _raw_edge_acceptance, build_decision_pipeline_diagnostics, build_odds_freshness_report, build_raw_edge_board
+from app.routes.debug import (
+    _raw_edge_acceptance,
+    build_decision_pipeline_diagnostics,
+    build_edge_persistence_report,
+    build_odds_freshness_report,
+    build_raw_edge_board,
+)
 from app.routes.model import get_today_predictions, run_model
 from app.routes.ranked import _build_ranked_rows, _decision_row_from_ranked
 from app.routes.reviews import get_review_summary, profitability_report
 from app.services.betting_policy import qualifies_for_bet_policy
+from app.services.edge_service import clear_edge_persistence_failures
 
 
 class RouteAndAdminTests(unittest.TestCase):
@@ -24,6 +31,7 @@ class RouteAndAdminTests(unittest.TestCase):
         testing_session_local = sessionmaker(bind=self.engine, autocommit=False, autoflush=False)
         Base.metadata.create_all(bind=self.engine)
         self.db = testing_session_local()
+        clear_edge_persistence_failures()
 
     def tearDown(self) -> None:
         self.db.close()
@@ -578,6 +586,7 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertIn("/api/debug/routes", paths)
         self.assertIn("/api/debug/odds-freshness", paths)
         self.assertIn("/api/debug/raw-edge-board", paths)
+        self.assertIn("/api/debug/edge-persistence", paths)
 
     def test_raw_edge_board_returns_all_games(self) -> None:
         self._game(97)
@@ -613,6 +622,29 @@ class RouteAndAdminTests(unittest.TestCase):
 
         self.assertEqual(board["summary"]["count_edges_above_2"], 1)
         self.assertEqual(board["games"][0]["best_raw_play"], "home_ml")
+
+    def test_edge_persistence_report_tracks_missing_persisted_edges(self) -> None:
+        self._game(101)
+        self._prediction(101, home_win_pct=0.65, away_win_pct=0.35)
+        self._odds(101)
+
+        report = build_edge_persistence_report(self.db)
+
+        self.assertEqual(report["computed_edge_count"], 1)
+        self.assertEqual(report["persisted_edge_count"], 0)
+        self.assertEqual(report["failed_persist_count"], 1)
+        self.assertEqual(report["sample_missing_edges"][0]["game_id"], 101)
+        self.assertEqual(report["sample_missing_edges"][0]["reason"], "missing_persisted_edge_result")
+
+    def test_edge_persistence_report_counts_persisted_edges(self) -> None:
+        self._pipeline_edge_game(102)
+
+        report = build_edge_persistence_report(self.db)
+
+        self.assertEqual(report["computed_edge_count"], 1)
+        self.assertEqual(report["persisted_edge_count"], 1)
+        self.assertEqual(report["failed_persist_count"], 0)
+        self.assertEqual(report["sample_persisted_edges"][0]["game_id"], 102)
 
     def test_raw_edge_threshold_comparisons(self) -> None:
         self.assertFalse(_raw_edge_acceptance({"best_raw_edge_pct": 0.0})["accepted"])

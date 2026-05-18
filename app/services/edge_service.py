@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 
 from scipy.stats import norm
 from sqlalchemy import desc
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.schema import EdgeResult, Game, GameOdds, LineMovement, Prediction
@@ -29,6 +30,80 @@ ALLOWED_ACTIVE_EDGE_STAGES: dict[str, SnapshotType] = {
     "daily_open": SnapshotType.open,
     "pregame": SnapshotType.pregame,
 }
+MAX_EDGE_PERSISTENCE_FAILURES = 100
+EDGE_PERSISTENCE_FAILURES: list[dict] = []
+
+
+def get_edge_persistence_failures() -> list[dict]:
+    return list(EDGE_PERSISTENCE_FAILURES)
+
+
+def clear_edge_persistence_failures() -> None:
+    EDGE_PERSISTENCE_FAILURES.clear()
+
+
+def _edge_failure_payload(edge: EdgeResult, exc: Exception, *, action: str) -> dict:
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "action": action,
+        "game_id": edge.game_id,
+        "prediction_id": edge.prediction_id,
+        "odds_id": edge.odds_id,
+        "run_stage": edge.run_stage,
+        "play_type": edge.recommended_play,
+        "edge_pct": float(edge.edge_pct or 0),
+        "db_exception": str(exc),
+    }
+
+
+def _record_edge_persistence_failure(edge: EdgeResult, exc: Exception, *, action: str) -> dict:
+    payload = _edge_failure_payload(edge, exc, action=action)
+    EDGE_PERSISTENCE_FAILURES.append(payload)
+    del EDGE_PERSISTENCE_FAILURES[:-MAX_EDGE_PERSISTENCE_FAILURES]
+    logger.warning(
+        "[edge persist] failed game_id=%s play_type=%s edge_pct=%s error=%s",
+        payload["game_id"],
+        payload["play_type"],
+        payload["edge_pct"],
+        payload["db_exception"],
+        extra={"event": "edge_persist_failed", "edge_persist_failure": payload},
+    )
+    return payload
+
+
+def _persist_edge_result(db: Session, edge: EdgeResult, *, action: str, add: bool = False) -> tuple[bool, dict | None]:
+    try:
+        if add:
+            db.add(edge)
+        db.commit()
+        db.refresh(edge)
+        logger.info(
+            "[edge persist] saved game_id=%s edge_id=%s play_type=%s edge_pct=%s action=%s",
+            edge.game_id,
+            edge.id,
+            edge.recommended_play,
+            float(edge.edge_pct or 0),
+            action,
+            extra={
+                "event": "edge_persist_saved",
+                "edge_persist": {
+                    "game_id": edge.game_id,
+                    "edge_id": edge.id,
+                    "play_type": edge.recommended_play,
+                    "edge_pct": float(edge.edge_pct or 0),
+                    "action": action,
+                },
+            },
+        )
+        return True, None
+    except SQLAlchemyError as exc:
+        db.rollback()
+        failure = _record_edge_persistence_failure(edge, exc, action=action)
+        return False, failure
+    except Exception as exc:
+        db.rollback()
+        failure = _record_edge_persistence_failure(edge, exc, action=action)
+        return False, failure
 
 
 def _compile_query_sql(db: Session, query) -> str:
@@ -595,8 +670,16 @@ def calculate_edge_for_game(
         existing_edge.home_ml = odds.home_ml
         existing_edge.over_odds = odds.over_odds
         existing_edge.under_odds = odds.under_odds
-        db.commit()
-        db.refresh(existing_edge)
+        persisted, failure = _persist_edge_result(db, existing_edge, action="update")
+        if not persisted:
+            return {
+                "status": "error",
+                "game_id": game_id,
+                "run_stage": run_stage,
+                "reason": "edge_persist_failed",
+                "persistence_failure": failure,
+                "odds_id": odds.id,
+            }
         return {
             "status": "created",
             "game_id": game_id,
@@ -649,9 +732,16 @@ def calculate_edge_for_game(
         over_odds=odds.over_odds,
         under_odds=odds.under_odds,
     )
-    db.add(edge)
-    db.commit()
-    db.refresh(edge)
+    persisted, failure = _persist_edge_result(db, edge, action="insert", add=True)
+    if not persisted:
+        return {
+            "status": "error",
+            "game_id": game_id,
+            "run_stage": run_stage,
+            "reason": "edge_persist_failed",
+            "persistence_failure": failure,
+            "odds_id": odds.id,
+        }
 
     return {
         "status": "created",
@@ -693,4 +783,23 @@ def calculate_all_edges_today(
             fallback_policy=fallback_policy,
         )
         results.append(result)
+    persisted = sum(1 for row in results if row.get("status") == "created")
+    failed = sum(1 for row in results if row.get("reason") == "edge_persist_failed")
+    computed = persisted + failed
+    log_method = logger.warning if failed else logger.info
+    log_method(
+        "[edge persist] computed=%s persisted=%s failed=%s",
+        computed,
+        persisted,
+        failed,
+        extra={
+            "event": "edge_persist_summary",
+            "edge_persist": {
+                "computed": computed,
+                "persisted": persisted,
+                "failed": failed,
+                "run_stage": run_stage,
+            },
+        },
+    )
     return results

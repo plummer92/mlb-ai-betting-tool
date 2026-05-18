@@ -85,6 +85,32 @@ Optional:
 5. Check `/api/admin/freshness` for the latest pipeline timestamps
 6. Use `POST /api/admin/backfill/prediction-dashboard-metrics` if dashboard-derived fields need a backfill
 
+## Edge Persistence Checks
+
+Use `/api/debug/edge-persistence` to compare computed raw edges with active `edge_results` rows. For manual database verification, inspect the newest persisted edges:
+
+SQLite:
+
+```sql
+SELECT id, game_id, prediction_id, odds_id, run_stage, is_active,
+       recommended_play, edge_pct, confidence_tier, calculated_at
+FROM edge_results
+ORDER BY calculated_at DESC
+LIMIT 20;
+```
+
+Postgres:
+
+```sql
+SELECT g.game_date, g.away_team, g.home_team,
+       e.recommended_play, e.edge_pct, e.run_stage, e.calculated_at
+FROM edge_results e
+JOIN games g ON g.game_id = e.game_id
+WHERE g.game_date = CURRENT_DATE
+ORDER BY e.calculated_at DESC
+LIMIT 20;
+```
+
 ## Tests
 
 The app loads configuration on import, so set `DATABASE_URL` before running tests.

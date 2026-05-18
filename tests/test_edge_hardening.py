@@ -2,15 +2,23 @@ from __future__ import annotations
 
 import unittest
 from datetime import date, datetime, timedelta, timezone
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.models.schema import BacktestResult, EdgeResult, Game, GameOdds, Prediction, SnapshotType
 from app.routes.edges import get_top_edges
 from app.services.backtest_service import apply_calibration
-from app.services.edge_service import calculate_all_edges_today, calculate_edge_for_game
+from app.services.edge_service import (
+    calculate_all_edges_today,
+    calculate_edge_for_game,
+    clear_edge_persistence_failures,
+    get_edge_persistence_failures,
+    get_trustworthy_active_edges,
+)
 from app.services.odds_service import is_odds_snapshot_fresh, is_odds_snapshot_usable
 
 
@@ -20,6 +28,7 @@ class EdgeHardeningTests(unittest.TestCase):
         TestingSessionLocal = sessionmaker(bind=self.engine, autocommit=False, autoflush=False)
         Base.metadata.create_all(bind=self.engine)
         self.db = TestingSessionLocal()
+        clear_edge_persistence_failures()
 
     def tearDown(self) -> None:
         self.db.close()
@@ -152,6 +161,52 @@ class EdgeHardeningTests(unittest.TestCase):
             fallback_policy="reuse_fresh_same_stage",
         )
         self.assertEqual(result["status"], "created")
+
+    def test_edge_result_insert_works_and_survives_retrieval(self) -> None:
+        today = date.today()
+        self._game(115, today)
+        self._prediction(115, home_win_pct=0.65, away_win_pct=0.35)
+        odds = self._odds(115, fetched_at=datetime.now(timezone.utc) - timedelta(minutes=5))
+
+        result = calculate_edge_for_game(
+            self.db,
+            115,
+            run_stage="daily_open",
+            snapshot_type=SnapshotType.open,
+            odds_snapshot=odds,
+            fallback_policy="none",
+        )
+
+        self.assertEqual(result["status"], "created")
+        persisted = self.db.query(EdgeResult).filter(EdgeResult.game_id == 115).one()
+        self.assertEqual(persisted.recommended_play, result["edge"].recommended_play)
+        self.assertGreater(float(persisted.edge_pct), 0)
+        trusted = get_trustworthy_active_edges(self.db, game_date=today)
+        self.assertEqual(len(trusted), 1)
+        self.assertEqual(trusted[0][0].id, persisted.id)
+
+    def test_persistence_failures_are_logged_and_recorded(self) -> None:
+        self._game(116, date.today())
+        self._prediction(116, home_win_pct=0.65, away_win_pct=0.35)
+        odds = self._odds(116, fetched_at=datetime.now(timezone.utc) - timedelta(minutes=5))
+
+        with patch.object(self.db, "commit", side_effect=SQLAlchemyError("boom")):
+            with self.assertLogs("app.services.edge_service", level="WARNING") as logs:
+                result = calculate_edge_for_game(
+                    self.db,
+                    116,
+                    run_stage="daily_open",
+                    snapshot_type=SnapshotType.open,
+                    odds_snapshot=odds,
+                    fallback_policy="none",
+                )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["reason"], "edge_persist_failed")
+        self.assertIn("[edge persist] failed", "\n".join(logs.output))
+        failures = get_edge_persistence_failures()
+        self.assertEqual(failures[-1]["game_id"], 116)
+        self.assertIn("boom", failures[-1]["db_exception"])
 
     def test_pregame_opening_lines_survive_early_day_processing(self) -> None:
         game = self._game(114, date.today())

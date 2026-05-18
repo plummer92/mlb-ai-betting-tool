@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Request
 from scipy.stats import norm
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -16,7 +17,7 @@ from app.middleware.limiter import limiter
 from app.models.schema import EdgeResult, Game, GameOdds, Prediction
 from app.scheduler import scheduler
 from app.services.betting_policy import get_betting_profile, qualifies_for_bet_policy
-from app.services.edge_service import TOTAL_STD_DEV
+from app.services.edge_service import TOTAL_STD_DEV, get_edge_persistence_failures
 from app.services.ev_math import calc_edge, implied_prob_raw, remove_vig
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
 from app.services.odds_service import odds_freshness_metadata
@@ -458,6 +459,147 @@ def build_odds_freshness_report(db: Session) -> dict:
 @router.get("/odds-freshness")
 def odds_freshness(db: Session = Depends(get_db)):
     return build_odds_freshness_report(db)
+
+
+def _edge_result_sample(edge: EdgeResult, game: Game | None = None) -> dict:
+    return {
+        "edge_id": edge.id,
+        "game_id": edge.game_id,
+        "matchup": f"{game.away_team} @ {game.home_team}" if game else None,
+        "prediction_id": edge.prediction_id,
+        "odds_id": edge.odds_id,
+        "run_stage": edge.run_stage,
+        "is_active": edge.is_active,
+        "play_type": edge.recommended_play,
+        "edge_pct": float(edge.edge_pct or 0),
+        "confidence_tier": edge.confidence_tier,
+        "sportsbook": edge.sportsbook,
+        "odds_snapshot_type": edge.odds_snapshot_type,
+        "calculated_at": edge.calculated_at.isoformat() if edge.calculated_at else None,
+    }
+
+
+def _edge_schema_diagnostics() -> dict:
+    table = EdgeResult.__table__
+    return {
+        "required_columns": [
+            column.name
+            for column in table.columns
+            if not column.nullable and not column.primary_key
+        ],
+        "nullable_columns": [
+            column.name
+            for column in table.columns
+            if column.nullable and not column.primary_key
+        ],
+        "unique_constraints": [
+            {
+                "name": constraint.name,
+                "columns": [column.name for column in constraint.columns],
+            }
+            for constraint in table.constraints
+            if constraint.__class__.__name__ == "UniqueConstraint"
+        ],
+        "retrieval_filters": [
+            "EdgeResult.is_active == true",
+            "Prediction.is_active == true",
+            "Game.game_date == today",
+            "validate_active_edge_lineage(edge, prediction, odds)",
+        ],
+    }
+
+
+def build_edge_persistence_report(db: Session) -> dict:
+    today = datetime.now(ET).date()
+    raw_board = build_raw_edge_board(db)
+    computed_rows = [row for row in raw_board["games"] if row.get("raw_edge_accepted")]
+    computed_by_game = {row["game_id"]: row for row in computed_rows}
+
+    persisted_rows = (
+        db.query(EdgeResult, Game)
+        .join(Game, Game.game_id == EdgeResult.game_id)
+        .filter(
+            Game.game_date == today,
+            EdgeResult.is_active.is_(True),
+            EdgeResult.recommended_play.isnot(None),
+            EdgeResult.edge_pct.isnot(None),
+            EdgeResult.edge_pct > 0,
+        )
+        .order_by(EdgeResult.calculated_at.desc(), EdgeResult.id.desc())
+        .all()
+    )
+    persisted_by_game: dict[int, EdgeResult] = {}
+    for edge, _game in persisted_rows:
+        persisted_by_game.setdefault(edge.game_id, edge)
+
+    latest_persisted = (
+        db.query(func.max(EdgeResult.calculated_at))
+        .join(Game, Game.game_id == EdgeResult.game_id)
+        .filter(Game.game_date == today)
+        .scalar()
+    )
+    failures = get_edge_persistence_failures()
+    latest_failure_by_game = {
+        int(row["game_id"]): row
+        for row in failures
+        if row.get("game_id") is not None
+    }
+
+    sample_missing = []
+    for row in computed_rows:
+        if row["game_id"] in persisted_by_game:
+            continue
+        failure = latest_failure_by_game.get(row["game_id"])
+        missing = {
+            "game_id": row["game_id"],
+            "matchup": row.get("matchup"),
+            "play_type": row.get("best_raw_play"),
+            "edge_pct": row.get("best_raw_edge_pct"),
+            "reason": "missing_persisted_edge_result",
+            "db_exception": failure.get("db_exception") if failure else None,
+            "failure_timestamp": failure.get("timestamp") if failure else None,
+        }
+        logger.warning(
+            "[edge persist] missing game_id=%s play_type=%s edge_pct=%s error=%s",
+            missing["game_id"],
+            missing["play_type"],
+            missing["edge_pct"],
+            missing["db_exception"],
+            extra={"event": "edge_persist_missing", "edge_persist_missing": missing},
+        )
+        sample_missing.append(missing)
+
+    computed_count = len(computed_rows)
+    persisted_count = len({edge.game_id for edge, _game in persisted_rows if edge.game_id in computed_by_game})
+    failed_count = max(computed_count - persisted_count, 0)
+    report = {
+        "date": today.isoformat(),
+        "computed_edge_count": computed_count,
+        "persisted_edge_count": persisted_count,
+        "failed_persist_count": failed_count,
+        "latest_persisted_edge_timestamp": latest_persisted.isoformat() if latest_persisted else None,
+        "latest_computed_edge_timestamp": datetime.now(timezone.utc).isoformat() if computed_rows else None,
+        "recorded_persistence_failures": failures[-10:],
+        "sample_persisted_edges": [
+            _edge_result_sample(edge, game)
+            for edge, game in persisted_rows[:5]
+        ],
+        "sample_missing_edges": sample_missing[:5],
+        "schema_diagnostics": _edge_schema_diagnostics(),
+    }
+    logger.warning(
+        "[edge persist] computed=%s persisted=%s failed=%s",
+        computed_count,
+        persisted_count,
+        failed_count,
+        extra={"event": "edge_persist_diagnostic", "edge_persist": report},
+    )
+    return report
+
+
+@router.get("/edge-persistence")
+def edge_persistence(db: Session = Depends(get_db)):
+    return build_edge_persistence_report(db)
 
 
 def _moneyline_probabilities(prediction: Prediction | None, odds: GameOdds | None) -> dict:
