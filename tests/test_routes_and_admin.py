@@ -11,7 +11,7 @@ from app.db import Base
 from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, Prediction, SnapshotType
 from app.routes.commentary import commentary_today
 from app.routes.admin import admin_backfill_prediction_dashboard_metrics, admin_freshness
-from app.routes.debug import build_decision_pipeline_diagnostics, build_odds_freshness_report, build_raw_edge_board
+from app.routes.debug import _raw_edge_acceptance, build_decision_pipeline_diagnostics, build_odds_freshness_report, build_raw_edge_board
 from app.routes.model import get_today_predictions, run_model
 from app.routes.ranked import _build_ranked_rows, _decision_row_from_ranked
 from app.routes.reviews import get_review_summary, profitability_report
@@ -575,6 +575,7 @@ class RouteAndAdminTests(unittest.TestCase):
         from app.main import app
 
         paths = {route.path for route in app.routes}
+        self.assertIn("/api/debug/routes", paths)
         self.assertIn("/api/debug/odds-freshness", paths)
         self.assertIn("/api/debug/raw-edge-board", paths)
 
@@ -612,6 +613,20 @@ class RouteAndAdminTests(unittest.TestCase):
 
         self.assertEqual(board["summary"]["count_edges_above_2"], 1)
         self.assertEqual(board["games"][0]["best_raw_play"], "home_ml")
+
+    def test_raw_edge_threshold_comparisons(self) -> None:
+        self.assertFalse(_raw_edge_acceptance({"best_raw_edge_pct": 0.0})["accepted"])
+        accepted = _raw_edge_acceptance({"best_raw_edge_pct": 0.0001})
+        self.assertTrue(accepted["accepted"])
+        self.assertEqual(accepted["raw_edge_status"], "RAW_POSITIVE_EDGE")
+
+    def test_raw_edge_debug_near_edge_behavior(self) -> None:
+        with patch("app.routes.debug.DEBUG", True):
+            accepted = _raw_edge_acceptance({"best_raw_edge_pct": -0.004})
+
+        self.assertTrue(accepted["accepted"])
+        self.assertEqual(accepted["raw_edge_status"], "DEBUG_NEAR_EDGE")
+        self.assertEqual(accepted["reason"], "debug_near_edge")
 
     def test_decision_pipeline_tracks_policy_rejection_reasons(self) -> None:
         self._pipeline_edge_game(94, ev_home=0.01)

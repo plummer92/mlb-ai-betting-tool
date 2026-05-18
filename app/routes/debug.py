@@ -25,6 +25,8 @@ router = APIRouter(prefix="/api/debug", tags=["debug"])
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 MIN_DIAGNOSTIC_KELLY_FRACTION = 0.001
+RAW_EDGE_THRESHOLD = 0.0
+DEBUG_NEAR_EDGE_THRESHOLD = -0.005
 
 
 @router.get("/jobs", dependencies=[Depends(verify_api_key)])
@@ -44,6 +46,21 @@ def list_scheduler_jobs(request: Request):
 @router.get("/flags")
 def debug_flags():
     return {"debug": DEBUG}
+
+
+@router.get("/routes")
+def debug_routes(request: Request):
+    routes = []
+    for route in request.app.routes:
+        path = getattr(route, "path", "")
+        if not path.startswith("/api/debug"):
+            continue
+        routes.append({
+            "path": path,
+            "name": getattr(route, "name", None),
+            "methods": sorted(getattr(route, "methods", []) or []),
+        })
+    return {"count": len(routes), "routes": sorted(routes, key=lambda row: row["path"])}
 
 
 def _stage_payload(filtered: list[dict]) -> dict:
@@ -127,8 +144,10 @@ def _reject_sample(
     edge: EdgeResult | None = None,
     adjustment: dict | None = None,
     freshness: dict | None = None,
+    raw: dict | None = None,
 ) -> dict:
     freshness = freshness or {}
+    raw = raw or {}
     return {
         "game_id": game.game_id,
         "matchup": f"{game.away_team} @ {game.home_team}",
@@ -144,6 +163,10 @@ def _reject_sample(
         "closing_line_timestamp": freshness.get("closing_line_timestamp"),
         "freshness_threshold_minutes": freshness.get("freshness_threshold_minutes"),
         "freshness_status": freshness.get("status"),
+        "best_raw_edge_pct": raw.get("best_raw_edge_pct"),
+        "best_raw_play": raw.get("best_raw_play"),
+        "raw_edge_threshold": raw.get("raw_edge_threshold"),
+        "raw_edge_status": raw.get("raw_edge_status"),
         "reasons": reasons,
     }
 
@@ -155,6 +178,8 @@ def build_decision_pipeline_diagnostics(db: Session) -> dict:
     odds_by_game: dict[int, GameOdds] = {}
     projection_by_game: dict[int, Prediction] = {}
     edge_by_game: dict[int, EdgeResult] = {}
+    raw_board = build_raw_edge_board(db)
+    raw_by_game = {row["game_id"]: row for row in raw_board["games"]}
 
     if game_ids:
         odds_rows = (
@@ -187,17 +212,31 @@ def build_decision_pipeline_diagnostics(db: Session) -> dict:
     missing_odds = []
     missing_projection = []
     raw_rejected = []
+    raw_accepted = []
     raw_positive = []
     for game in games:
         odds = odds_by_game.get(game.game_id)
         projection = projection_by_game.get(game.game_id)
         edge = edge_by_game.get(game.game_id)
+        raw = raw_by_game.get(game.game_id, {})
+        raw_status = _raw_edge_acceptance(raw)
         if odds is None:
-            missing_odds.append(_reject_sample(game, ["missing_odds"], edge))
+            missing_odds.append(_reject_sample(game, ["missing_odds"], edge, raw=raw))
         if projection is None:
-            missing_projection.append(_reject_sample(game, ["missing_projection"], edge))
+            missing_projection.append(_reject_sample(game, ["missing_projection"], edge, raw=raw))
+        if raw_status["accepted"]:
+            raw_accepted.append((game, raw_status))
         if not edge or not edge.recommended_play or float(edge.edge_pct or 0) <= 0:
-            raw_rejected.append(_reject_sample(game, ["no_positive_raw_edge"], edge))
+            reasons = []
+            if not raw_status["accepted"]:
+                reasons.append(raw_status["reason"])
+            elif not edge:
+                reasons.append("missing_persisted_edge_result")
+            elif not edge.recommended_play:
+                reasons.append("missing_persisted_recommended_play")
+            else:
+                reasons.append("persisted_edge_non_positive")
+            raw_rejected.append(_reject_sample(game, reasons, edge, raw=raw_status))
             continue
         raw_positive.append((game, edge, odds, projection))
 
@@ -284,7 +323,9 @@ def build_decision_pipeline_diagnostics(db: Session) -> dict:
         "total_games": len(games),
         "games_with_odds": len({game_id for game_id in game_ids if game_id in odds_by_game}),
         "games_with_model_projection": len({game_id for game_id in game_ids if game_id in projection_by_game}),
-        "raw_positive_edges": len(raw_positive),
+        "raw_positive_edges": len(raw_accepted),
+        "persisted_raw_positive_edges": len(raw_positive),
+        "debug_near_edges": len([_game for _game, status in raw_accepted if status["status"] == "DEBUG_NEAR_EDGE"]),
         "after_market_respect_filter": len(market_survivors),
         "after_stale_odds_filter": len(stale_survivors),
         "after_confidence_filter": len(confidence_survivors),
@@ -302,7 +343,12 @@ def build_decision_pipeline_diagnostics(db: Session) -> dict:
         "after_kelly_filter": _stage_payload(kelly_rejected),
         "final_ranked_plays": _stage_payload([]),
     }
-    report = {"date": today.isoformat(), "counts": counts, "stages": stages}
+    report = {
+        "date": today.isoformat(),
+        "counts": counts,
+        "stages": stages,
+        "raw_edge_summary": raw_board["summary"],
+    }
     if counts["final_ranked_plays"] == 0:
         logger.warning(
             "No plays survived decision pipeline",
@@ -489,6 +535,37 @@ def _best_raw_play(row: dict) -> tuple[str | None, float | None]:
     return max(usable, key=lambda item: item[1])
 
 
+def _raw_edge_acceptance(row: dict) -> dict:
+    edge = row.get("best_raw_edge_pct")
+    threshold = DEBUG_NEAR_EDGE_THRESHOLD if DEBUG else RAW_EDGE_THRESHOLD
+    if edge is None:
+        accepted = False
+        status = "REJECTED"
+        reason = "missing_raw_edge"
+    else:
+        edge_value = float(edge)
+        if edge_value > RAW_EDGE_THRESHOLD:
+            accepted = True
+            status = "RAW_POSITIVE_EDGE"
+            reason = "raw_positive_edge"
+        elif DEBUG and edge_value > DEBUG_NEAR_EDGE_THRESHOLD:
+            accepted = True
+            status = "DEBUG_NEAR_EDGE"
+            reason = "debug_near_edge"
+        else:
+            accepted = False
+            status = "REJECTED"
+            reason = "no_positive_raw_edge"
+    return {
+        **row,
+        "accepted": accepted,
+        "reason": reason,
+        "raw_edge_status": status,
+        "status": status,
+        "raw_edge_threshold": threshold,
+    }
+
+
 def _raw_board_summary(rows: list[dict]) -> dict:
     values = [float(row["best_raw_edge_pct"]) for row in rows if row.get("best_raw_edge_pct") is not None]
     closest = None
@@ -553,6 +630,30 @@ def build_raw_edge_board(db: Session) -> dict:
         best_play, best_edge = _best_raw_play(row)
         row["best_raw_play"] = best_play
         row["best_raw_edge_pct"] = round(best_edge, 4) if best_edge is not None else None
+        raw_status = _raw_edge_acceptance(row)
+        row["raw_edge_threshold"] = raw_status["raw_edge_threshold"]
+        row["raw_edge_accepted"] = raw_status["accepted"]
+        row["raw_edge_status"] = raw_status["raw_edge_status"]
+        row["raw_edge_rejection_reason"] = None if raw_status["accepted"] else raw_status["reason"]
+        logger.info(
+            "[raw edge] game=%s best_raw_edge_pct=%s threshold=%s accepted=%s reason=%s",
+            game.game_id,
+            row["best_raw_edge_pct"],
+            row["raw_edge_threshold"],
+            row["raw_edge_accepted"],
+            raw_status["reason"],
+            extra={
+                "event": "raw_edge_diagnostic",
+                "raw_edge": {
+                    "game_id": game.game_id,
+                    "best_raw_edge_pct": row["best_raw_edge_pct"],
+                    "threshold": row["raw_edge_threshold"],
+                    "accepted": row["raw_edge_accepted"],
+                    "rejection_reason": row["raw_edge_rejection_reason"],
+                    "status": row["raw_edge_status"],
+                },
+            },
+        )
         rows.append(row)
 
     return {
