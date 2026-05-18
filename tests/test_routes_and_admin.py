@@ -11,7 +11,7 @@ from app.db import Base
 from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, Prediction, SnapshotType
 from app.routes.commentary import commentary_today
 from app.routes.admin import admin_backfill_prediction_dashboard_metrics, admin_freshness
-from app.routes.debug import build_decision_pipeline_diagnostics, build_odds_freshness_report
+from app.routes.debug import build_decision_pipeline_diagnostics, build_odds_freshness_report, build_raw_edge_board
 from app.routes.model import get_today_predictions, run_model
 from app.routes.ranked import _build_ranked_rows, _decision_row_from_ranked
 from app.routes.reviews import get_review_summary, profitability_report
@@ -50,15 +50,22 @@ class RouteAndAdminTests(unittest.TestCase):
         self.db.refresh(game)
         return game
 
-    def _prediction(self, game_id: int, *, run_stage: str = "daily_open") -> Prediction:
+    def _prediction(
+        self,
+        game_id: int,
+        *,
+        run_stage: str = "daily_open",
+        away_win_pct: float = 0.46,
+        home_win_pct: float = 0.54,
+    ) -> Prediction:
         prediction = Prediction(
             game_id=game_id,
             model_version="v-test",
             run_stage=run_stage,
             is_active=True,
             sim_count=1000,
-            away_win_pct=0.46,
-            home_win_pct=0.54,
+            away_win_pct=away_win_pct,
+            home_win_pct=home_win_pct,
             projected_away_score=4.0,
             projected_home_score=4.6,
             projected_total=8.6,
@@ -563,6 +570,48 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(report["total_games"], 1)
         self.assertEqual(report["stale_games"], 1)
         self.assertTrue(any(row["reason"] == "stale_feed" for row in report["stale_reason_counts"]))
+
+    def test_debug_routes_are_registered(self) -> None:
+        from app.main import app
+
+        paths = {route.path for route in app.routes}
+        self.assertIn("/api/debug/odds-freshness", paths)
+        self.assertIn("/api/debug/raw-edge-board", paths)
+
+    def test_raw_edge_board_returns_all_games(self) -> None:
+        self._game(97)
+        self._prediction(97)
+        self._odds(97)
+        self._game(98)
+        self._prediction(98)
+        self._odds(98)
+
+        board = build_raw_edge_board(self.db)
+
+        self.assertEqual(board["total_games"], 2)
+        self.assertEqual({row["game_id"] for row in board["games"]}, {97, 98})
+
+    def test_raw_edge_board_closest_to_positive_edge(self) -> None:
+        self._game(99)
+        self._prediction(99, run_stage="daily_open")
+        self._odds(99)
+
+        board = build_raw_edge_board(self.db)
+
+        closest = board["summary"]["closest_to_positive_edge"]
+        self.assertIsNotNone(closest)
+        self.assertEqual(closest["game_id"], 99)
+        self.assertEqual(closest["best_raw_edge_pct"], board["games"][0]["best_raw_edge_pct"])
+
+    def test_raw_edge_board_positive_edge_count(self) -> None:
+        self._game(100)
+        self._prediction(100, home_win_pct=0.65, away_win_pct=0.35)
+        self._odds(100)
+
+        board = build_raw_edge_board(self.db)
+
+        self.assertEqual(board["summary"]["count_edges_above_2"], 1)
+        self.assertEqual(board["games"][0]["best_raw_play"], "home_ml")
 
     def test_decision_pipeline_tracks_policy_rejection_reasons(self) -> None:
         self._pipeline_edge_game(94, ev_home=0.01)

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Request
+from scipy.stats import norm
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -15,6 +16,8 @@ from app.middleware.limiter import limiter
 from app.models.schema import EdgeResult, Game, GameOdds, Prediction
 from app.scheduler import scheduler
 from app.services.betting_policy import get_betting_profile, qualifies_for_bet_policy
+from app.services.edge_service import TOTAL_STD_DEV
+from app.services.ev_math import calc_edge, implied_prob_raw, remove_vig
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
 from app.services.odds_service import odds_freshness_metadata
 
@@ -409,3 +412,157 @@ def build_odds_freshness_report(db: Session) -> dict:
 @router.get("/odds-freshness")
 def odds_freshness(db: Session = Depends(get_db)):
     return build_odds_freshness_report(db)
+
+
+def _moneyline_probabilities(prediction: Prediction | None, odds: GameOdds | None) -> dict:
+    if prediction is None:
+        return {
+            "model_prob_home": None,
+            "model_prob_away": None,
+            "sportsbook_home_implied_prob": None,
+            "sportsbook_away_implied_prob": None,
+            "home_edge_pct": None,
+            "away_edge_pct": None,
+        }
+    model_home = float(prediction.calibrated_home_win_pct or prediction.home_win_pct)
+    model_away = float(prediction.calibrated_away_win_pct or prediction.away_win_pct)
+    if odds is None or odds.away_ml is None or odds.home_ml is None:
+        return {
+            "model_prob_home": round(model_home, 4),
+            "model_prob_away": round(model_away, 4),
+            "sportsbook_home_implied_prob": None,
+            "sportsbook_away_implied_prob": None,
+            "home_edge_pct": None,
+            "away_edge_pct": None,
+        }
+    raw_away = implied_prob_raw(int(odds.away_ml))
+    raw_home = implied_prob_raw(int(odds.home_ml))
+    implied_away, implied_home = remove_vig(raw_away, raw_home)
+    return {
+        "model_prob_home": round(model_home, 4),
+        "model_prob_away": round(model_away, 4),
+        "sportsbook_home_implied_prob": round(implied_home, 4),
+        "sportsbook_away_implied_prob": round(implied_away, 4),
+        "home_edge_pct": round(calc_edge(model_home, implied_home), 4),
+        "away_edge_pct": round(calc_edge(model_away, implied_away), 4),
+    }
+
+
+def _total_edges(prediction: Prediction | None, odds: GameOdds | None) -> dict:
+    projected_total = float(prediction.projected_total) if prediction is not None and prediction.projected_total is not None else None
+    current_total = float(odds.total_line) if odds is not None and odds.total_line is not None else None
+    if projected_total is None or current_total is None or odds is None or odds.over_odds is None or odds.under_odds is None:
+        return {
+            "total_edge_pct": None,
+            "total_edge_over_pct": None,
+            "total_edge_under_pct": None,
+            "current_total": current_total,
+            "projected_total": projected_total,
+        }
+    model_over = float(1 - norm.cdf(current_total, loc=projected_total, scale=TOTAL_STD_DEV))
+    model_under = 1 - model_over
+    raw_over = implied_prob_raw(int(odds.over_odds))
+    raw_under = implied_prob_raw(int(odds.under_odds))
+    implied_over, implied_under = remove_vig(raw_over, raw_under)
+    edge_over = calc_edge(model_over, implied_over)
+    edge_under = calc_edge(model_under, implied_under)
+    best_total = edge_over if edge_over >= edge_under else edge_under
+    return {
+        "total_edge_pct": round(best_total, 4),
+        "total_edge_over_pct": round(edge_over, 4),
+        "total_edge_under_pct": round(edge_under, 4),
+        "current_total": current_total,
+        "projected_total": projected_total,
+    }
+
+
+def _best_raw_play(row: dict) -> tuple[str | None, float | None]:
+    candidates = [
+        ("home_ml", row.get("home_edge_pct")),
+        ("away_ml", row.get("away_edge_pct")),
+        ("over", row.get("total_edge_over_pct")),
+        ("under", row.get("total_edge_under_pct")),
+    ]
+    usable = [(play, float(edge)) for play, edge in candidates if edge is not None]
+    if not usable:
+        return None, None
+    return max(usable, key=lambda item: item[1])
+
+
+def _raw_board_summary(rows: list[dict]) -> dict:
+    values = [float(row["best_raw_edge_pct"]) for row in rows if row.get("best_raw_edge_pct") is not None]
+    closest = None
+    if rows:
+        rows_with_edge = [row for row in rows if row.get("best_raw_edge_pct") is not None]
+        negative_rows = [row for row in rows_with_edge if float(row["best_raw_edge_pct"]) <= 0]
+        if negative_rows:
+            closest = max(negative_rows, key=lambda row: float(row["best_raw_edge_pct"]))
+        elif rows_with_edge:
+            closest = min(rows_with_edge, key=lambda row: float(row["best_raw_edge_pct"]))
+    return {
+        "max_raw_edge_pct": round(max(values), 4) if values else None,
+        "avg_raw_edge_pct": round(sum(values) / len(values), 4) if values else None,
+        "closest_to_positive_edge": closest,
+        "count_edges_between_-2_and_0": sum(1 for value in values if -0.02 <= value < 0),
+        "count_edges_between_0_and_2": sum(1 for value in values if 0 <= value < 0.02),
+        "count_edges_above_2": sum(1 for value in values if value >= 0.02),
+    }
+
+
+def build_raw_edge_board(db: Session) -> dict:
+    today = datetime.now(ET).date()
+    games = db.query(Game).filter(Game.game_date == today).order_by(Game.start_time.asc(), Game.game_id.asc()).all()
+    game_ids = [game.game_id for game in games]
+    prediction_by_game: dict[int, Prediction] = {}
+    odds_by_game: dict[int, GameOdds] = {}
+
+    if game_ids:
+        predictions = (
+            db.query(Prediction)
+            .filter(Prediction.game_id.in_(game_ids), Prediction.is_active.is_(True))
+            .order_by(Prediction.game_id.asc(), Prediction.prediction_id.desc())
+            .all()
+        )
+        for prediction in predictions:
+            prediction_by_game.setdefault(prediction.game_id, prediction)
+
+        odds_rows = (
+            db.query(GameOdds)
+            .filter(GameOdds.game_id.in_(game_ids))
+            .order_by(GameOdds.game_id.asc(), GameOdds.fetched_at.desc(), GameOdds.id.desc())
+            .all()
+        )
+        for odds in odds_rows:
+            odds_by_game.setdefault(odds.game_id, odds)
+
+    rows: list[dict] = []
+    for game in games:
+        prediction = prediction_by_game.get(game.game_id)
+        odds = odds_by_game.get(game.game_id)
+        row = {
+            "game_id": game.game_id,
+            "matchup": f"{game.away_team} @ {game.home_team}",
+            "current_moneyline": {
+                "away_ml": odds.away_ml if odds else None,
+                "home_ml": odds.home_ml if odds else None,
+                "sportsbook": odds.sportsbook if odds else None,
+            },
+        }
+        row.update(_moneyline_probabilities(prediction, odds))
+        row.update(_total_edges(prediction, odds))
+        best_play, best_edge = _best_raw_play(row)
+        row["best_raw_play"] = best_play
+        row["best_raw_edge_pct"] = round(best_edge, 4) if best_edge is not None else None
+        rows.append(row)
+
+    return {
+        "date": today.isoformat(),
+        "total_games": len(games),
+        "summary": _raw_board_summary(rows),
+        "games": rows,
+    }
+
+
+@router.get("/raw-edge-board")
+def raw_edge_board(db: Session = Depends(get_db)):
+    return build_raw_edge_board(db)
