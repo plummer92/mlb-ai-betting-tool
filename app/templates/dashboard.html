@@ -980,6 +980,17 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     </div>
   </div>
 
+  <div class="section" id="totals-bias-debug-section" style="display:none;">
+    <div class="section-head">
+      <div class="section-label">Totals Bias Debug</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="totals-bias-debug-badge">DEBUG</div>
+    </div>
+    <div id="totals-bias-debug-panel">
+      <div class="loading">Loading totals bias</div>
+    </div>
+  </div>
+
   <div class="section" id="today-read-section">
     <div class="section-head">
       <div class="section-label">Today's Read</div>
@@ -1744,6 +1755,58 @@ async function loadOddsWarehouse() {
   } catch(e) {
     $('odds-warehouse-badge').textContent = 'SLOW';
     $('odds-warehouse-table').innerHTML = `<div class="empty">Odds warehouse is still calculating. Try refresh in a minute.</div>`;
+  }
+}
+
+async function loadTotalsBiasDebug() {
+  try {
+    const flagsRes = await fetch('/api/debug/flags');
+    const flags = await flagsRes.json();
+    const section = $('totals-bias-debug-section');
+    if (!flags.debug) {
+      section.style.display = 'none';
+      return;
+    }
+    section.style.display = '';
+
+    const res = await fetch('/api/debug/totals-bias');
+    const data = await res.json();
+    const hist = data.projected_total_minus_market_distribution?.histogram || [];
+    const maxCount = Math.max(1, ...hist.map(row => row.count || 0));
+    const under = data.under_edge_count || 0;
+    const over = data.over_edge_count || 0;
+    $('totals-bias-debug-badge').textContent = `${under} UNDER / ${over} OVER`;
+    $('totals-bias-debug-panel').innerHTML = `
+      <div class="summary-bar" style="border-left-color: var(--purple); background: var(--surface2);">
+        <div class="s-stat"><div class="s-stat-val">${under}</div><div class="s-stat-lbl">Under Edges</div></div>
+        <div class="s-stat"><div class="s-stat-val">${over}</div><div class="s-stat-lbl">Over Edges</div></div>
+        <div class="s-stat"><div class="s-stat-val">${data.realized_under_winrate != null ? (data.realized_under_winrate * 100).toFixed(1) + '%' : '---'}</div><div class="s-stat-lbl">Under Win</div></div>
+        <div class="s-stat"><div class="s-stat-val">${data.realized_over_winrate != null ? (data.realized_over_winrate * 100).toFixed(1) + '%' : '---'}</div><div class="s-stat-lbl">Over Win</div></div>
+        <div class="s-stat"><div class="s-stat-val">${data.regression_check?.correlation ?? '---'}</div><div class="s-stat-lbl">Proj/Actual Corr</div></div>
+      </div>
+      <div class="card" style="margin-top:10px;padding:14px;">
+        <div class="mini-title">Model Total Delta Distribution</div>
+        <div style="display:grid;gap:8px;margin-top:10px;">
+          ${hist.map(row => `
+            <div style="display:grid;grid-template-columns:170px 1fr 44px;gap:10px;align-items:center;">
+              <div class="muted" style="font-size:11px;">${esc(String(row.bucket || '').replaceAll('_', ' '))}</div>
+              <div style="height:10px;background:var(--surface3);border-radius:6px;overflow:hidden;">
+                <div style="height:10px;width:${Math.round(((row.count || 0) / maxCount) * 100)}%;background:var(--cyan);"></div>
+              </div>
+              <div class="mono">${row.count || 0}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+      <div class="audit-note">
+        Delta avg ${data.projected_total_minus_market_distribution?.summary?.avg ?? '---'} |
+        7d skew ${data.rolling_calibration?.[0]?.directional_skew ?? '---'} |
+        season RMSE ${data.rolling_calibration?.[2]?.rmse ?? '---'}
+      </div>`;
+  } catch(e) {
+    $('totals-bias-debug-section').style.display = '';
+    $('totals-bias-debug-badge').textContent = 'ERROR';
+    $('totals-bias-debug-panel').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
   }
 }
 
@@ -2949,6 +3012,7 @@ const secondaryLoaders = [
   [loadTotalsRegime, 'totals regime'],
   [loadDecisionDebug, 'decision debug'],
   [loadOddsDebug, 'odds freshness'],
+  [loadTotalsBiasDebug, 'totals bias'],
   [loadAccuracy, 'accuracy'],
   [loadBestPlaysWeek, 'best plays week'],
   [loadMarketAudit, 'market audit'],
