@@ -17,7 +17,7 @@ from app.services.ev_math import (
     recommended_play,
     remove_vig,
 )
-from app.services.odds_service import SnapshotType, get_latest_odds_snapshot, is_odds_snapshot_fresh
+from app.services.odds_service import SnapshotType, get_latest_odds_snapshot, is_odds_snapshot_fresh, is_odds_snapshot_usable
 
 ET = ZoneInfo("America/New_York")
 logger = logging.getLogger(__name__)
@@ -115,6 +115,8 @@ def validate_active_edge_lineage(
     edge: EdgeResult,
     prediction: Prediction,
     odds: GameOdds,
+    db: Session | None = None,
+    game: Game | None = None,
 ) -> tuple[bool, str | None]:
     expected_snapshot_type = ALLOWED_ACTIVE_EDGE_STAGES.get(edge.run_stage)
     if expected_snapshot_type is None:
@@ -129,7 +131,11 @@ def validate_active_edge_lineage(
         return False, "odds_snapshot_mismatch"
     if odds.snapshot_type != expected_snapshot_type:
         return False, "odds_snapshot_type_mismatch"
-    if not is_odds_snapshot_fresh(odds):
+    if db is not None and game is not None:
+        odds_ok = is_odds_snapshot_usable(db, game=game, odds_row=odds)
+    else:
+        odds_ok = is_odds_snapshot_fresh(odds)
+    if not odds_ok:
         return False, "stale_odds_snapshot"
     return True, None
 
@@ -152,7 +158,7 @@ def quarantine_untrustworthy_active_edges(
     invalid_ids: list[int] = []
     reasons: dict[str, int] = {}
     for edge, prediction, odds, _game in rows.all():
-        is_valid, reason = validate_active_edge_lineage(edge, prediction, odds)
+        is_valid, reason = validate_active_edge_lineage(edge, prediction, odds, db=db, game=_game)
         if is_valid:
             continue
         invalid_ids.append(edge.id)
@@ -191,7 +197,7 @@ def get_trustworthy_active_edges(
 
     trusted_rows: list[tuple[EdgeResult, Game, Prediction, GameOdds]] = []
     for edge, game, prediction, odds in rows.order_by(EdgeResult.calculated_at.desc()).all():
-        is_valid, _reason = validate_active_edge_lineage(edge, prediction, odds)
+        is_valid, _reason = validate_active_edge_lineage(edge, prediction, odds, db=db, game=game)
         if is_valid:
             trusted_rows.append((edge, game, prediction, odds))
     return trusted_rows
@@ -206,6 +212,7 @@ def _pick_odds_snapshot_for_game(
     run_stage: str,
     fallback_policy: str,
 ) -> tuple[GameOdds | None, str | None]:
+    game = db.query(Game).filter(Game.game_id == game_id).first()
     odds_query = (
         db.query(GameOdds)
         .filter(
@@ -239,7 +246,7 @@ def _pick_odds_snapshot_for_game(
             reason = "explicit_snapshot_game_mismatch" if source == "explicit" else "db_snapshot_game_mismatch"
         elif row.snapshot_type != snapshot_type:
             reason = "explicit_snapshot_type_mismatch" if source == "explicit" else "db_snapshot_type_mismatch"
-        elif not is_odds_snapshot_fresh(row):
+        elif not is_odds_snapshot_usable(db, game=game, odds_row=row):
             reason = "stale_explicit_odds_snapshot" if source == "explicit" else "stale_existing_odds_snapshot"
 
         payload = _odds_row_debug_payload(row, source=source)

@@ -11,7 +11,7 @@ from app.models.schema import BacktestResult, EdgeResult, Game, GameOdds, Predic
 from app.routes.edges import get_top_edges
 from app.services.backtest_service import apply_calibration
 from app.services.edge_service import calculate_all_edges_today, calculate_edge_for_game
-from app.services.odds_service import is_odds_snapshot_fresh
+from app.services.odds_service import is_odds_snapshot_fresh, is_odds_snapshot_usable
 
 
 class EdgeHardeningTests(unittest.TestCase):
@@ -151,6 +151,26 @@ class EdgeHardeningTests(unittest.TestCase):
             odds_snapshot=None,
             fallback_policy="reuse_fresh_same_stage",
         )
+        self.assertEqual(result["status"], "created")
+
+    def test_pregame_opening_lines_survive_early_day_processing(self) -> None:
+        game = self._game(114, date.today())
+        game.start_time = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
+        self.db.commit()
+        self._prediction(114, run_stage="pregame")
+        self._odds(114, snapshot_type=SnapshotType.open, fetched_at=datetime.now(timezone.utc) - timedelta(hours=8))
+        stale_pregame = self._odds(114, snapshot_type=SnapshotType.pregame, fetched_at=datetime.now(timezone.utc) - timedelta(hours=8))
+
+        result = calculate_edge_for_game(
+            self.db,
+            114,
+            run_stage="pregame",
+            snapshot_type=SnapshotType.pregame,
+            odds_snapshot=stale_pregame,
+            fallback_policy="none",
+        )
+
+        self.assertTrue(is_odds_snapshot_usable(self.db, game=game, odds_row=stale_pregame))
         self.assertEqual(result["status"], "created")
 
     def test_fallback_uses_fresh_db_snapshot_when_explicit_snapshot_is_stale(self) -> None:

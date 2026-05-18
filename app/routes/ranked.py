@@ -16,7 +16,7 @@ from app.models.schema import EdgeResult, Game, GameOdds
 from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.edge_service import get_trustworthy_active_edges
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
-from app.services.odds_service import is_odds_snapshot_fresh
+from app.services.odds_service import odds_freshness_metadata
 
 router = APIRouter(prefix="/api/ranked", tags=["ranked"])
 logger = logging.getLogger(__name__)
@@ -86,7 +86,8 @@ def _build_ranked_rows(
             market_respect=market_respect,
             odds_american=_pick_odds(edge, odds),
         )
-        odds_fresh = is_odds_snapshot_fresh(odds) if odds else False
+        freshness = odds_freshness_metadata(db, game=game, odds_row=odds)
+        odds_fresh = freshness["status"] in {"fresh", "quiet_market"}
         ranked.append(
             {
                 "game_id": game.game_id,
@@ -111,7 +112,8 @@ def _build_ranked_rows(
                 "sportsbook": odds.sportsbook if odds else None,
                 "snapshot_type": odds.snapshot_type.value if odds and odds.snapshot_type else None,
                 "odds_fresh": odds_fresh,
-                "odds_freshness_status": "FRESH" if odds_fresh else ("STALE" if odds else "UNKNOWN"),
+                "odds_freshness_status": freshness["status"].upper(),
+                "odds_freshness": freshness,
                 "movement_direction": edge.movement_direction,
                 "market_respect": market_respect,
                 "market_respect_score": market_respect["score"],
@@ -177,7 +179,8 @@ def _decision_row_from_ranked(row: dict) -> dict:
     tags = row.get("market_respect_tags") or adjustment.get("tags") or []
     score = int(row.get("market_respect_score", adjustment.get("score", 50)))
     adjusted_edge = float(row.get("adjusted_edge_pct") or 0)
-    stale = "STALE OPEN" in tags or row.get("odds_freshness_status") != "FRESH"
+    freshness_status = row.get("odds_freshness_status")
+    stale = "STALE OPEN" in tags or freshness_status in {"STALE_FEED", "STALE_OPEN", "MISSING_ODDS"}
     rejected = "MARKET REJECTED" in tags or row.get("market_trust_bucket") == "market_rejection"
 
     if adjusted_edge <= 0:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Request
@@ -16,7 +16,7 @@ from app.models.schema import EdgeResult, Game, GameOdds, Prediction
 from app.scheduler import scheduler
 from app.services.betting_policy import get_betting_profile, qualifies_for_bet_policy
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
-from app.services.odds_service import is_odds_snapshot_fresh
+from app.services.odds_service import odds_freshness_metadata
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
 logger = logging.getLogger(__name__)
@@ -118,7 +118,14 @@ def _play_odds(edge: EdgeResult, odds: GameOdds | None) -> int | None:
     return None
 
 
-def _reject_sample(game: Game, reasons: list[str], edge: EdgeResult | None = None, adjustment: dict | None = None) -> dict:
+def _reject_sample(
+    game: Game,
+    reasons: list[str],
+    edge: EdgeResult | None = None,
+    adjustment: dict | None = None,
+    freshness: dict | None = None,
+) -> dict:
+    freshness = freshness or {}
     return {
         "game_id": game.game_id,
         "matchup": f"{game.away_team} @ {game.home_team}",
@@ -127,6 +134,13 @@ def _reject_sample(game: Game, reasons: list[str], edge: EdgeResult | None = Non
         "adjusted_edge_pct": adjustment.get("adjusted_edge_pct") if adjustment else None,
         "market_trust_score": adjustment.get("score") if adjustment else None,
         "adjusted_kelly_fraction": adjustment.get("adjusted_kelly_fraction") if adjustment else None,
+        "odds_last_updated": freshness.get("odds_last_updated"),
+        "minutes_since_update": freshness.get("minutes_since_update"),
+        "market_last_movement": freshness.get("market_last_movement"),
+        "opening_line_timestamp": freshness.get("opening_line_timestamp"),
+        "closing_line_timestamp": freshness.get("closing_line_timestamp"),
+        "freshness_threshold_minutes": freshness.get("freshness_threshold_minutes"),
+        "freshness_status": freshness.get("status"),
         "reasons": reasons,
     }
 
@@ -210,14 +224,18 @@ def build_decision_pipeline_diagnostics(db: Session) -> dict:
     stale_survivors = []
     for game, edge, odds, projection, respect, adjustment in market_survivors:
         reasons = []
+        freshness = odds_freshness_metadata(db, game=game, odds_row=odds)
         if odds is None:
             reasons.append("missing_odds")
-        elif not is_odds_snapshot_fresh(odds):
-            reasons.append("stale_odds")
-        if "STALE OPEN" in adjustment["tags"]:
+        elif freshness["status"] == "stale_feed":
+            reasons.append("stale_feed")
+        elif freshness["status"] == "stale_open":
             reasons.append("stale_open")
+        if "STALE OPEN" in adjustment["tags"]:
+            reasons.append(freshness["status"] if freshness["status"] in {"stale_feed", "stale_open"} else "stale_open")
+        reasons = list(dict.fromkeys(reasons))
         if reasons:
-            stale_rejected.append(_reject_sample(game, reasons, edge, adjustment))
+            stale_rejected.append(_reject_sample(game, reasons, edge, adjustment, freshness))
         else:
             stale_survivors.append((game, edge, odds, projection, respect, adjustment))
 
@@ -296,3 +314,98 @@ def build_decision_pipeline_diagnostics(db: Session) -> dict:
 @router.get("/decision-pipeline")
 def decision_pipeline(db: Session = Depends(get_db)):
     return build_decision_pipeline_diagnostics(db)
+
+
+def build_odds_freshness_report(db: Session) -> dict:
+    today = datetime.now(ET).date()
+    games = db.query(Game).filter(Game.game_date == today).all()
+    game_ids = [game.game_id for game in games]
+    now_utc = datetime.now(timezone.utc)
+    latest_by_game: dict[int, GameOdds] = {}
+
+    if game_ids:
+        rows = (
+            db.query(GameOdds)
+            .filter(GameOdds.game_id.in_(game_ids))
+            .order_by(GameOdds.game_id.asc(), GameOdds.fetched_at.desc(), GameOdds.id.desc())
+            .all()
+        )
+        for odds in rows:
+            latest_by_game.setdefault(odds.game_id, odds)
+
+    rows_by_book = (
+        db.query(GameOdds)
+        .filter(GameOdds.game_id.in_(game_ids))
+        .all()
+        if game_ids
+        else []
+    )
+    per_book: dict[str, dict] = {}
+    for odds in rows_by_book:
+        book = odds.sportsbook or "unknown"
+        bucket = per_book.setdefault(book, {"rows": 0, "fresh": 0, "quiet_market": 0, "stale": 0, "latest_sync": None})
+        game = next((item for item in games if item.game_id == odds.game_id), None)
+        freshness = odds_freshness_metadata(db, game=game, odds_row=odds, now=now_utc)
+        bucket["rows"] += 1
+        if freshness["status"] == "fresh":
+            bucket["fresh"] += 1
+        elif freshness["status"] == "quiet_market":
+            bucket["quiet_market"] += 1
+        elif freshness["status"] in {"stale_feed", "stale_open"}:
+            bucket["stale"] += 1
+        if odds.fetched_at:
+            fetched = odds.fetched_at.isoformat()
+            bucket["latest_sync"] = max(bucket["latest_sync"] or fetched, fetched)
+
+    freshness_rows = []
+    reason_counts: Counter[str] = Counter()
+    ages = []
+    oldest = None
+    newest = None
+    for game in games:
+        odds = latest_by_game.get(game.game_id)
+        freshness = odds_freshness_metadata(db, game=game, odds_row=odds, now=now_utc)
+        if freshness["status"] not in {"fresh", "quiet_market"}:
+            reason_counts[freshness["reason"]] += 1
+        if freshness["minutes_since_update"] is not None:
+            ages.append(float(freshness["minutes_since_update"]))
+        if freshness["odds_last_updated"]:
+            oldest = min(oldest or freshness["odds_last_updated"], freshness["odds_last_updated"])
+            newest = max(newest or freshness["odds_last_updated"], freshness["odds_last_updated"])
+        freshness_rows.append({
+            "game_id": game.game_id,
+            "matchup": f"{game.away_team} @ {game.home_team}",
+            "sportsbook": odds.sportsbook if odds else None,
+            **freshness,
+        })
+
+    fresh_games = sum(1 for row in freshness_rows if row["status"] == "fresh")
+    quiet_games = sum(1 for row in freshness_rows if row["status"] == "quiet_market")
+    stale_games = sum(1 for row in freshness_rows if row["status"] in {"stale_feed", "stale_open"})
+    report = {
+        "date": today.isoformat(),
+        "total_games": len(games),
+        "fresh_games": fresh_games,
+        "quiet_market_games": quiet_games,
+        "stale_games": stale_games,
+        "avg_minutes_since_update": round(sum(ages) / len(ages), 1) if ages else None,
+        "oldest_line": oldest,
+        "newest_line": newest,
+        "per_book_freshness": per_book,
+        "stale_reason_counts": [{"reason": reason, "count": count} for reason, count in reason_counts.most_common()],
+        "games": freshness_rows,
+    }
+    logger.warning(
+        "[odds freshness] games=%s fresh=%s quiet=%s stale=%s",
+        report["total_games"],
+        report["fresh_games"],
+        report["quiet_market_games"],
+        report["stale_games"],
+        extra={"event": "odds_freshness", "odds_freshness": report},
+    )
+    return report
+
+
+@router.get("/odds-freshness")
+def odds_freshness(db: Session = Depends(get_db)):
+    return build_odds_freshness_report(db)

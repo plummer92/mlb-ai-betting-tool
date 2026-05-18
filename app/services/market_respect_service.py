@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models.schema import EdgeResult, Game, GameOdds, LineMovement, SnapshotType
 from app.services.ev_math import american_to_decimal, implied_prob_raw, kelly_fraction
+from app.services.odds_service import odds_freshness_metadata
 
 
 PRODUCTIVE_TOTAL_PLAYS = {"over", "under"}
@@ -195,6 +196,7 @@ def market_respect_for_edge(
     odds = odds or _odds_for_edge(db, edge)
     open_odds = _open_odds(db, edge, odds)
     close_odds = _close_odds(db, edge, odds)
+    freshness = odds_freshness_metadata(db, game=game, odds_row=odds)
 
     direction = (edge.movement_direction or "none").lower()
     clv = _edge_clv(edge, play, odds, close_odds)
@@ -227,6 +229,7 @@ def market_respect_for_edge(
         movement=movement,
         open_odds=open_odds,
         close_odds=close_odds,
+        freshness_status=freshness["status"],
     )
 
     return MarketRespect(
@@ -245,6 +248,9 @@ def market_respect_for_edge(
             "sportsbook_disagreement": disagreement,
             "open_snapshot_id": open_odds.id if open_odds else None,
             "close_snapshot_id": close_odds.id if close_odds else None,
+            "freshness_status": freshness["status"],
+            "freshness_reason": freshness["reason"],
+            "minutes_since_update": freshness["minutes_since_update"],
         },
     ).as_dict()
 
@@ -459,13 +465,14 @@ def _tags(
     movement: LineMovement | None,
     open_odds: GameOdds | None,
     close_odds: GameOdds | None,
+    freshness_status: str,
 ) -> list[str]:
     tags: list[str] = []
     price = clv.get("price_clv")
     line = clv.get("line_clv")
     positive_clv = (price is not None and price > 0) or (line is not None and line > 0)
     negative_clv = (price is not None and price < 0) or (line is not None and line < 0)
-    stale = movement is None or open_odds is None or close_odds is None
+    stale = freshness_status in {"stale_feed", "stale_open"}
 
     if score >= 65 and (direction == "toward_model" or positive_clv or sharp_match):
         tags.append("MARKET AGREED")
@@ -477,6 +484,8 @@ def _tags(
         tags.append("FAKE PUBLIC MOVE")
     if stale:
         tags.append("STALE OPEN")
+    if freshness_status == "quiet_market":
+        tags.append("QUIET MARKET")
     if not tags:
         tags.append("MARKET NEUTRAL")
     return tags

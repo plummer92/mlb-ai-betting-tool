@@ -11,7 +11,7 @@ from app.db import Base
 from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, Prediction, SnapshotType
 from app.routes.commentary import commentary_today
 from app.routes.admin import admin_backfill_prediction_dashboard_metrics, admin_freshness
-from app.routes.debug import build_decision_pipeline_diagnostics
+from app.routes.debug import build_decision_pipeline_diagnostics, build_odds_freshness_report
 from app.routes.model import get_today_predictions, run_model
 from app.routes.ranked import _build_ranked_rows, _decision_row_from_ranked
 from app.routes.reviews import get_review_summary, profitability_report
@@ -454,8 +454,12 @@ class RouteAndAdminTests(unittest.TestCase):
         stale: bool = False,
         ev_home: float = 0.11,
         edge_pct: float = 0.08,
+        minutes_to_start: int | None = None,
     ) -> None:
         game = self._game(game_id)
+        if minutes_to_start is not None:
+            game.start_time = (datetime.now(timezone.utc) + timedelta(minutes=minutes_to_start)).isoformat()
+            self.db.commit()
         prediction = self._prediction(game.game_id)
         fetched_at = datetime.now(timezone.utc) - (timedelta(hours=4) if stale else timedelta(minutes=5))
         open_odds = self._odds(game.game_id)
@@ -541,7 +545,24 @@ class RouteAndAdminTests(unittest.TestCase):
         market_reasons = report["stages"]["after_market_respect_filter"]["top_rejection_reasons"]
         stale_reasons = report["stages"]["after_stale_odds_filter"]["top_rejection_reasons"]
         self.assertIn("market_rejection", {row["reason"] for row in market_reasons})
-        self.assertIn("stale_odds", {row["reason"] for row in stale_reasons})
+        self.assertIn("stale_feed", {row["reason"] for row in stale_reasons})
+
+    def test_decision_pipeline_quiet_market_not_filtered_as_stale(self) -> None:
+        self._pipeline_edge_game(95, stale=True, minutes_to_start=240)
+
+        report = build_decision_pipeline_diagnostics(self.db)
+
+        self.assertEqual(report["counts"]["after_stale_odds_filter"], 1)
+        self.assertEqual(report["counts"]["final_ranked_plays"], 1)
+
+    def test_odds_freshness_report_tracks_stale_feed(self) -> None:
+        self._pipeline_edge_game(96, stale=True, minutes_to_start=30)
+
+        report = build_odds_freshness_report(self.db)
+
+        self.assertEqual(report["total_games"], 1)
+        self.assertEqual(report["stale_games"], 1)
+        self.assertTrue(any(row["reason"] == "stale_feed" for row in report["stale_reason_counts"]))
 
     def test_decision_pipeline_tracks_policy_rejection_reasons(self) -> None:
         self._pipeline_edge_game(94, ev_home=0.01)

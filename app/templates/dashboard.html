@@ -928,6 +928,17 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     </div>
   </div>
 
+  <div class="section" id="odds-debug-section" style="display:none;">
+    <div class="section-head">
+      <div class="section-label">Odds Feed Debug</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="odds-debug-badge">DEBUG</div>
+    </div>
+    <div id="odds-debug-panel">
+      <div class="loading">Loading odds freshness</div>
+    </div>
+  </div>
+
   <div class="section" id="today-read-section">
     <div class="section-head">
       <div class="section-label">Today's Read</div>
@@ -1314,6 +1325,42 @@ async function loadDecisionDebug() {
     $('decision-debug-section').style.display = '';
     $('decision-debug-badge').textContent = 'ERROR';
     $('decision-debug-panel').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+async function loadOddsDebug() {
+  try {
+    const flagsRes = await fetch('/api/debug/flags');
+    const flags = await flagsRes.json();
+    const section = $('odds-debug-section');
+    if (!flags.debug) {
+      section.style.display = 'none';
+      return;
+    }
+    section.style.display = '';
+
+    const res = await fetch('/api/debug/odds-freshness');
+    const data = await res.json();
+    const total = data.total_games || 0;
+    const stalePct = total ? Math.round(((data.stale_games || 0) / total) * 100) : 0;
+    const status = data.stale_games ? 'STALE' : (data.quiet_market_games ? 'QUIET' : 'FRESH');
+    $('odds-debug-badge').textContent = status;
+    $('odds-debug-panel').innerHTML = `
+      <div class="summary-bar" style="border-left-color: var(--cyan); background: var(--surface2);">
+        <div class="s-stat"><div class="s-stat-val">${esc(status)}</div><div class="s-stat-lbl">Feed</div></div>
+        <div class="s-stat"><div class="s-stat-val">${data.avg_minutes_since_update ?? '---'}</div><div class="s-stat-lbl">Avg Age Min</div></div>
+        <div class="s-stat"><div class="s-stat-val">${stalePct}%</div><div class="s-stat-lbl">Stale</div></div>
+        <div class="s-stat"><div class="s-stat-val">${data.newest_line ? esc(new Date(data.newest_line).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})) : '---'}</div><div class="s-stat-lbl">Last Sync</div></div>
+      </div>
+      <div class="audit-note">
+        ${(data.stale_reason_counts || []).length
+          ? `Reasons: ${(data.stale_reason_counts || []).slice(0, 4).map(r => `${esc(r.reason)} (${r.count})`).join(', ')}`
+          : 'No odds freshness drops detected.'}
+      </div>`;
+  } catch(e) {
+    $('odds-debug-section').style.display = '';
+    $('odds-debug-badge').textContent = 'ERROR';
+    $('odds-debug-panel').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
   }
 }
 
@@ -2353,7 +2400,7 @@ async function loadBullpen() {
 }
 
 async function loadAll() {
-  await Promise.all([loadDecisionQueue(), loadDecisionDebug(), loadTodayRead(), loadAccuracy(), loadTopBets(), loadBestPlaysWeek(), loadMarketAudit(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
+  await Promise.all([loadDecisionQueue(), loadDecisionDebug(), loadOddsDebug(), loadTodayRead(), loadAccuracy(), loadTopBets(), loadBestPlaysWeek(), loadMarketAudit(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
 }
 
 let countdown = 60;

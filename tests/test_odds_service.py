@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.models.schema import Game, GameOdds, SnapshotType
-from app.services.odds_service import _event_game_date, _match_game, compute_line_movement, fetch_and_store_odds
+from app.services.odds_service import _event_game_date, _match_game, compute_line_movement, fetch_and_store_odds, odds_freshness_metadata
 
 
 class _FakeResponse:
@@ -247,6 +247,26 @@ class OddsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(float(movement.away_prob_move), 0.04)
         self.assertTrue(movement.sharp_away)
         self.assertTrue(movement.total_steam_over)
+
+    def test_active_line_update_is_fresh(self) -> None:
+        game = self._game(5, date.today(), "Toronto Blue Jays", "Chicago White Sox")
+        game.start_time = (datetime.now(timezone.utc) + timedelta(minutes=45)).isoformat()
+        self.db.commit()
+        odds = self._odds(5, fetched_at=datetime.now(timezone.utc) - timedelta(minutes=5), away_ml=120, home_ml=-140)
+
+        freshness = odds_freshness_metadata(self.db, game=game, odds_row=odds)
+
+        self.assertEqual(freshness["status"], "fresh")
+
+    def test_quiet_market_open_is_not_stale_early(self) -> None:
+        game = self._game(6, date.today(), "Toronto Blue Jays", "Chicago White Sox")
+        game.start_time = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
+        self.db.commit()
+        odds = self._odds(6, fetched_at=datetime.now(timezone.utc) - timedelta(hours=6))
+
+        freshness = odds_freshness_metadata(self.db, game=game, odds_row=odds)
+
+        self.assertEqual(freshness["status"], "quiet_market")
 
 
 if __name__ == "__main__":

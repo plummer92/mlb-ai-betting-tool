@@ -24,6 +24,7 @@ ODDS_FRESHNESS_MINUTES: dict[SnapshotType, int] = {
     SnapshotType.pregame: 90,
     SnapshotType.live: 15,
 }
+NEAR_START_MINUTES = 120
 
 
 @dataclass(frozen=True)
@@ -221,6 +222,85 @@ def is_odds_snapshot_fresh(
     return 0 <= age_seconds <= (max_age * 60)
 
 
+def odds_freshness_metadata(
+    db: Session,
+    *,
+    game: Game | None,
+    odds_row: GameOdds | None,
+    now: datetime | None = None,
+    max_age_minutes: int | None = None,
+) -> dict:
+    now_utc = now or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+    threshold = max_age_minutes or (
+        ODDS_FRESHNESS_MINUTES.get(odds_row.snapshot_type, 60) if odds_row else 60
+    )
+    open_odds = _latest_snapshot_for_game(db, game_id=game.game_id, snapshot_type=SnapshotType.open) if game else None
+    close_odds = _latest_snapshot_for_game(db, game_id=game.game_id, snapshot_type=SnapshotType.pregame) if game else None
+    movement = db.query(LineMovement).filter(LineMovement.game_id == game.game_id).first() if game else None
+
+    if odds_row is None or odds_row.fetched_at is None:
+        return {
+            "status": "missing_odds",
+            "reason": "missing_odds",
+            "odds_last_updated": None,
+            "minutes_since_update": None,
+            "market_last_movement": _iso(movement.calculated_at if movement else None),
+            "opening_line_timestamp": _iso(open_odds.fetched_at if open_odds else None),
+            "closing_line_timestamp": _iso(close_odds.fetched_at if close_odds else None),
+            "freshness_threshold_minutes": threshold,
+            "minutes_to_start": _minutes_to_start(game, now_utc),
+            "near_start": _is_near_start(game, now_utc),
+        }
+
+    fetched_at = _aware_utc_dt(odds_row.fetched_at)
+    minutes_since = (now_utc - fetched_at).total_seconds() / 60
+    stale_by_age = minutes_since > threshold or minutes_since < 0
+    near_start = _is_near_start(game, now_utc)
+    same_as_open = _same_line(odds_row, open_odds)
+    missing_market_close = odds_row.snapshot_type == SnapshotType.open and close_odds is None
+
+    if not stale_by_age:
+        status = "fresh"
+        reason = "fresh"
+    elif not near_start and same_as_open:
+        status = "quiet_market"
+        reason = "quiet_market"
+    elif near_start and missing_market_close:
+        status = "stale_open"
+        reason = "stale_open"
+    else:
+        status = "stale_feed"
+        reason = "stale_feed"
+
+    return {
+        "status": status,
+        "reason": reason,
+        "odds_last_updated": _iso(fetched_at),
+        "minutes_since_update": round(minutes_since, 1),
+        "market_last_movement": _iso(movement.calculated_at if movement else None),
+        "opening_line_timestamp": _iso(open_odds.fetched_at if open_odds else None),
+        "closing_line_timestamp": _iso(close_odds.fetched_at if close_odds else None),
+        "freshness_threshold_minutes": threshold,
+        "minutes_to_start": _minutes_to_start(game, now_utc),
+        "near_start": near_start,
+        "same_as_open": same_as_open,
+    }
+
+
+def is_odds_snapshot_usable(
+    db: Session,
+    *,
+    game: Game | None,
+    odds_row: GameOdds | None,
+    now: datetime | None = None,
+) -> bool:
+    status = odds_freshness_metadata(db, game=game, odds_row=odds_row, now=now)["status"]
+    return status in {"fresh", "quiet_market"}
+
+
 def get_latest_odds_snapshot(
     db: Session,
     *,
@@ -236,6 +316,61 @@ def get_latest_odds_snapshot(
         .order_by(GameOdds.fetched_at.desc(), GameOdds.id.desc())
         .first()
     )
+
+
+def _latest_snapshot_for_game(
+    db: Session,
+    *,
+    game_id: int,
+    snapshot_type: SnapshotType,
+) -> GameOdds | None:
+    return (
+        db.query(GameOdds)
+        .filter(GameOdds.game_id == game_id, GameOdds.snapshot_type == snapshot_type)
+        .order_by(GameOdds.fetched_at.desc(), GameOdds.id.desc())
+        .first()
+    )
+
+
+def _same_line(left: GameOdds | None, right: GameOdds | None) -> bool:
+    if left is None or right is None:
+        return False
+    return (
+        left.away_ml == right.away_ml
+        and left.home_ml == right.home_ml
+        and (float(left.total_line) if left.total_line is not None else None)
+        == (float(right.total_line) if right.total_line is not None else None)
+        and left.over_odds == right.over_odds
+        and left.under_odds == right.under_odds
+    )
+
+
+def _minutes_to_start(game: Game | None, now_utc: datetime) -> float | None:
+    if game is None or not game.start_time:
+        return None
+    start = _aware_utc_dt(game.start_time)
+    return round((start - now_utc).total_seconds() / 60, 1)
+
+
+def _is_near_start(game: Game | None, now_utc: datetime) -> bool:
+    minutes = _minutes_to_start(game, now_utc)
+    if minutes is None:
+        return True
+    return minutes <= NEAR_START_MINUTES
+
+
+def _aware_utc_dt(value: datetime | str) -> datetime:
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _iso(value: datetime | str | None) -> str | None:
+    if value is None:
+        return None
+    return _aware_utc_dt(value).isoformat()
 
 
 def get_market_home_probability(odds_row: GameOdds | None) -> float | None:
