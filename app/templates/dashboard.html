@@ -895,12 +895,26 @@ tr:hover td { background: rgba(6,182,212,0.025); }
 <div class="container">
 
   <div class="quick-tabs">
+    <a class="quick-tab" href="#decision-queue-section">Action</a>
     <a class="quick-tab" href="#today-read-section">Today</a>
     <a class="quick-tab" href="#market-audit-section">Markets</a>
     <a class="quick-tab" href="#debrief-section">Debrief</a>
     <a class="quick-tab" href="#active-intel-section">Intel</a>
     <a class="quick-tab" href="#signals-section">Model</a>
     <a class="quick-tab" href="#bullpen-section">Bullpen</a>
+  </div>
+
+  <div class="section" id="decision-queue-section">
+    <div class="section-head">
+      <div class="section-label">Decision Queue</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="decision-queue-badge">LOADING</div>
+    </div>
+    <div class="card" style="padding:0;">
+      <div class="tbl-wrap" id="decision-queue-table">
+        <div class="loading">Loading action queue</div>
+      </div>
+    </div>
   </div>
 
   <div class="section" id="today-read-section">
@@ -1190,6 +1204,58 @@ function adjustedEdgeHtml(row) {
   if (adj == null || Math.abs(adj - raw) < 0.0001) return `${(raw * 100).toFixed(1)}%`;
   const cls = adj >= raw ? 'green' : 'yellow';
   return `<span class="muted">${(raw * 100).toFixed(1)}%</span> <span class="${cls}">-> ${(adj * 100).toFixed(1)}%</span>`;
+}
+
+function decisionStatusChip(status) {
+  const map = {
+    'FIRE': 'c-strong',
+    'WATCH': 'c-medium',
+    'WAIT FOR ODDS': 'sig-blue',
+    'BLOCKED': 'c-loss',
+    'NO BET': 'c-none',
+  };
+  return `<span class="chip ${map[status] || 'c-none'}">${esc(status || 'UNKNOWN')}</span>`;
+}
+
+async function loadDecisionQueue() {
+  try {
+    const res = await fetch('/api/ranked/decision-queue?limit=20&active_only=true');
+    const rows = await res.json();
+    const fire = rows.filter(r => r.decision_status === 'FIRE').length;
+    const watch = rows.filter(r => r.decision_status === 'WATCH').length;
+    $('decision-queue-badge').textContent = rows.length ? `${fire} FIRE / ${watch} WATCH` : 'NO ACTION';
+
+    if (!rows.length) {
+      $('decision-queue-table').innerHTML = '<div class="empty compact">No ranked decisions available yet.</div>';
+      return;
+    }
+
+    $('decision-queue-table').innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Rank</th><th>Game</th><th>Play</th><th>Raw Edge</th><th>Adjusted Edge</th><th>Market Trust</th><th>Respect Tag</th><th>Odds</th><th>Status</th><th>Reason</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map(r => `
+            <tr>
+              <td class="mono" style="font-weight:700;color:var(--cyan)">#${r.rank}</td>
+              <td style="font-weight:600;white-space:nowrap">${esc(r.game || r.matchup || '---')}</td>
+              <td class="mono">${esc((r.play || '---').replace('_', ' ').toUpperCase())}</td>
+              <td class="mono">${r.raw_edge_pct != null ? (r.raw_edge_pct * 100).toFixed(1) + '%' : '---'}</td>
+              <td class="mono ${r.adjusted_edge_pct > 0 ? 'green' : 'red'}">${r.adjusted_edge_pct != null ? (r.adjusted_edge_pct * 100).toFixed(1) + '%' : '---'}</td>
+              <td>${marketTrustMeter(r.market_respect_adjustment)}</td>
+              <td>${marketRespectChip(r.market_respect)}</td>
+              <td class="mono ${r.odds_freshness_status === 'FRESH' ? 'green' : 'yellow'}">${esc(r.odds_freshness_status || 'UNKNOWN')}</td>
+              <td>${decisionStatusChip(r.decision_status)}</td>
+              <td style="min-width:280px;font-size:11px;color:var(--muted);line-height:1.45">${esc(r.decision_reason || '')}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>`;
+  } catch(e) {
+    $('decision-queue-badge').textContent = 'ERROR';
+    $('decision-queue-table').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
 }
 
 async function loadTodayRead() {
@@ -2228,7 +2294,7 @@ async function loadBullpen() {
 }
 
 async function loadAll() {
-  await Promise.all([loadTodayRead(), loadAccuracy(), loadTopBets(), loadBestPlaysWeek(), loadMarketAudit(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
+  await Promise.all([loadDecisionQueue(), loadTodayRead(), loadAccuracy(), loadTopBets(), loadBestPlaysWeek(), loadMarketAudit(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
 }
 
 let countdown = 60;

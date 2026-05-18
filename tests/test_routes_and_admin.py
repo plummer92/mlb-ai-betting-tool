@@ -12,7 +12,7 @@ from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOd
 from app.routes.commentary import commentary_today
 from app.routes.admin import admin_backfill_prediction_dashboard_metrics, admin_freshness
 from app.routes.model import get_today_predictions, run_model
-from app.routes.ranked import _build_ranked_rows
+from app.routes.ranked import _build_ranked_rows, _decision_row_from_ranked
 from app.routes.reviews import get_review_summary, profitability_report
 from app.services.betting_policy import qualifies_for_bet_policy
 
@@ -388,6 +388,61 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["play"], "home_ml")
         self.assertEqual(rows[0]["edge_pct"], 0.06)
+
+    def _decision_base_row(self, **overrides) -> dict:
+        row = {
+            "rank": 1,
+            "game_id": 99,
+            "matchup": "Away @ Home",
+            "play": "home_ml",
+            "raw_edge_pct": 0.05,
+            "edge_pct": 0.05,
+            "adjusted_edge_pct": 0.07,
+            "market_respect_score": 82,
+            "market_respect_tags": ["MARKET AGREED"],
+            "market_trust_bucket": "strong_market_agreement",
+            "odds_freshness_status": "FRESH",
+            "movement_direction": "toward_model",
+            "market_respect": {"score": 82, "tags": ["MARKET AGREED"], "components": {}},
+            "market_respect_adjustment": {
+                "score": 82,
+                "tags": ["MARKET AGREED"],
+                "explanation": "market agreed",
+            },
+        }
+        row.update(overrides)
+        return row
+
+    def test_decision_queue_blocks_market_rejection(self) -> None:
+        row = _decision_row_from_ranked(
+            self._decision_base_row(
+                market_respect_score=25,
+                market_respect_tags=["MARKET REJECTED"],
+                market_trust_bucket="market_rejection",
+            )
+        )
+
+        self.assertEqual(row["decision_status"], "BLOCKED")
+
+    def test_decision_queue_waits_for_stale_open(self) -> None:
+        row = _decision_row_from_ranked(
+            self._decision_base_row(
+                market_respect_tags=["STALE OPEN"],
+                odds_freshness_status="STALE",
+            )
+        )
+
+        self.assertEqual(row["decision_status"], "WAIT FOR ODDS")
+
+    def test_decision_queue_fires_on_strong_market_agreement(self) -> None:
+        row = _decision_row_from_ranked(self._decision_base_row())
+
+        self.assertEqual(row["decision_status"], "FIRE")
+
+    def test_decision_queue_no_bet_on_negative_adjusted_edge(self) -> None:
+        row = _decision_row_from_ranked(self._decision_base_row(adjusted_edge_pct=-0.01))
+
+        self.assertEqual(row["decision_status"], "NO BET")
 
 
 class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):

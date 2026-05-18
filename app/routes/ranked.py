@@ -15,11 +15,19 @@ from app.models.schema import EdgeResult, Game, GameOdds
 from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.edge_service import get_trustworthy_active_edges
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
+from app.services.odds_service import is_odds_snapshot_fresh
 
 router = APIRouter(prefix="/api/ranked", tags=["ranked"])
 
 ET = ZoneInfo("America/New_York")
 FINAL_STATUSES = {"Final", "Completed Early", "Cancelled"}
+DECISION_ORDER = {
+    "FIRE": 0,
+    "WATCH": 1,
+    "WAIT FOR ODDS": 2,
+    "BLOCKED": 3,
+    "NO BET": 4,
+}
 
 
 def _pick_ev(edge: EdgeResult) -> float:
@@ -76,6 +84,7 @@ def _build_ranked_rows(
             market_respect=market_respect,
             odds_american=_pick_odds(edge, odds),
         )
+        odds_fresh = is_odds_snapshot_fresh(odds) if odds else False
         ranked.append(
             {
                 "game_id": game.game_id,
@@ -99,6 +108,8 @@ def _build_ranked_rows(
                 "confidence": edge.confidence_tier,
                 "sportsbook": odds.sportsbook if odds else None,
                 "snapshot_type": odds.snapshot_type.value if odds and odds.snapshot_type else None,
+                "odds_fresh": odds_fresh,
+                "odds_freshness_status": "FRESH" if odds_fresh else ("STALE" if odds else "UNKNOWN"),
                 "movement_direction": edge.movement_direction,
                 "market_respect": market_respect,
                 "market_respect_score": market_respect["score"],
@@ -122,6 +133,80 @@ def _build_ranked_rows(
         row["rank"] = i
 
     return ranked[:limit]
+
+
+def _decision_reason(row: dict, status: str) -> str:
+    raw = float(row.get("raw_edge_pct", row.get("edge_pct") or 0))
+    adjusted = float(row.get("adjusted_edge_pct") or 0)
+    tag = (row.get("market_respect_tags") or ["MARKET NEUTRAL"])[0]
+    direction = row.get("movement_direction") or "no recorded movement"
+    base = (
+        f"Raw edge was {raw * 100:.1f}%, adjusted to {adjusted * 100:.1f}% "
+        f"because {tag.lower()} and {direction.replace('_', ' ')}."
+    )
+    if status == "FIRE":
+        return base + " Trust is high and odds are fresh."
+    if status == "WATCH":
+        return base + " Edge is positive, but market trust is moderate or sample is thin."
+    if status == "WAIT FOR ODDS":
+        return base + " Waiting because odds are stale or the open/close read is incomplete."
+    if status == "BLOCKED":
+        return base + " Blocked because the market rejected the model side."
+    return base + " No bet because the adjusted edge is not positive."
+
+
+def _decision_row_from_ranked(row: dict) -> dict:
+    adjustment = row.get("market_respect_adjustment") or {}
+    tags = row.get("market_respect_tags") or adjustment.get("tags") or []
+    score = int(row.get("market_respect_score", adjustment.get("score", 50)))
+    adjusted_edge = float(row.get("adjusted_edge_pct") or 0)
+    stale = "STALE OPEN" in tags or row.get("odds_freshness_status") != "FRESH"
+    rejected = "MARKET REJECTED" in tags or row.get("market_trust_bucket") == "market_rejection"
+
+    if adjusted_edge <= 0:
+        status = "NO BET"
+    elif stale:
+        status = "WAIT FOR ODDS"
+    elif rejected:
+        status = "BLOCKED"
+    elif score >= 70:
+        status = "FIRE"
+    else:
+        status = "WATCH"
+
+    reason = _decision_reason(row, status)
+    return {
+        "rank": row.get("rank"),
+        "game_id": row.get("game_id"),
+        "game": row.get("matchup"),
+        "matchup": row.get("matchup"),
+        "play": row.get("play"),
+        "raw_edge_pct": row.get("raw_edge_pct", row.get("edge_pct")),
+        "adjusted_edge_pct": row.get("adjusted_edge_pct"),
+        "market_trust_score": score,
+        "market_respect_tag": tags[0] if tags else "MARKET NEUTRAL",
+        "market_respect_tags": tags,
+        "odds_freshness_status": row.get("odds_freshness_status", "UNKNOWN"),
+        "decision_status": status,
+        "decision_reason": reason,
+        "sportsbook": row.get("sportsbook"),
+        "start_time": row.get("start_time"),
+        "market_respect": row.get("market_respect"),
+        "market_respect_adjustment": adjustment,
+    }
+
+
+def _build_decision_queue(db: Session, limit: int = 20, active_only: bool = True) -> list[dict]:
+    rows = [_decision_row_from_ranked(row) for row in _build_ranked_rows(db=db, limit=50, active_only=active_only)]
+    rows.sort(
+        key=lambda row: (
+            DECISION_ORDER.get(row["decision_status"], 99),
+            -(float(row.get("adjusted_edge_pct") or 0)),
+        )
+    )
+    for i, row in enumerate(rows, start=1):
+        row["rank"] = i
+    return rows[:limit]
 
 
 def _build_discord_lines(bets: list[dict], title: str = "📊 **Ranked MLB Bets**") -> list[str]:
@@ -156,6 +241,15 @@ def get_ranked_bets(
     db: Session = Depends(get_db),
 ):
     return _build_ranked_rows(db=db, limit=limit, active_only=active_only)
+
+
+@router.get("/decision-queue")
+def get_decision_queue(
+    limit: int = Query(20, ge=1, le=50),
+    active_only: bool = Query(True),
+    db: Session = Depends(get_db),
+):
+    return _build_decision_queue(db=db, limit=limit, active_only=active_only)
 
 
 @router.post("/discord", dependencies=[Depends(verify_api_key)])
