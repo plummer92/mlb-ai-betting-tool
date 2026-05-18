@@ -452,6 +452,8 @@ class RouteAndAdminTests(unittest.TestCase):
         movement_direction: str = "toward_model",
         sharp_home: bool = True,
         stale: bool = False,
+        ev_home: float = 0.11,
+        edge_pct: float = 0.08,
     ) -> None:
         game = self._game(game_id)
         prediction = self._prediction(game.game_id)
@@ -504,12 +506,12 @@ class RouteAndAdminTests(unittest.TestCase):
             implied_away_pct=0.45,
             implied_home_pct=0.55,
             edge_away=-0.01,
-            edge_home=0.08,
+            edge_home=edge_pct,
             ev_away=-0.02,
-            ev_home=0.11,
+            ev_home=ev_home,
             recommended_play="home_ml",
             confidence_tier="strong",
-            edge_pct=0.08,
+            edge_pct=edge_pct,
             movement_direction=movement_direction,
             sportsbook="draftkings",
             away_ml=120,
@@ -528,6 +530,7 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(report["counts"]["games_with_model_projection"], 1)
         self.assertEqual(report["counts"]["raw_positive_edges"], 1)
         self.assertEqual(report["counts"]["final_ranked_plays"], 1)
+        self.assertEqual(report["counts"]["fire_ready_plays"], 1)
 
     def test_decision_pipeline_tracks_rejection_reasons(self) -> None:
         self._pipeline_edge_game(92, movement_direction="away_from_model", sharp_home=False)
@@ -539,6 +542,16 @@ class RouteAndAdminTests(unittest.TestCase):
         stale_reasons = report["stages"]["after_stale_odds_filter"]["top_rejection_reasons"]
         self.assertIn("market_rejection", {row["reason"] for row in market_reasons})
         self.assertIn("stale_odds", {row["reason"] for row in stale_reasons})
+
+    def test_decision_pipeline_tracks_policy_rejection_reasons(self) -> None:
+        self._pipeline_edge_game(94, ev_home=0.01)
+
+        report = build_decision_pipeline_diagnostics(self.db)
+
+        confidence_reasons = report["stages"]["after_confidence_filter"]["top_rejection_reasons"]
+        self.assertIn("ev_below_threshold", {row["reason"] for row in confidence_reasons})
+        self.assertEqual(report["counts"]["after_confidence_filter"], 0)
+        self.assertEqual(report["counts"]["final_ranked_plays"], 0)
 
     def test_decision_pipeline_zero_play_state(self) -> None:
         report = build_decision_pipeline_diagnostics(self.db)

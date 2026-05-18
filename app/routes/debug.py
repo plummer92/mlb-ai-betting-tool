@@ -14,7 +14,7 @@ from app.middleware.auth import verify_api_key
 from app.middleware.limiter import limiter
 from app.models.schema import EdgeResult, Game, GameOdds, Prediction
 from app.scheduler import scheduler
-from app.services.betting_policy import qualifies_for_bet_policy
+from app.services.betting_policy import get_betting_profile, qualifies_for_bet_policy
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
 from app.services.odds_service import is_odds_snapshot_fresh
 
@@ -55,6 +55,43 @@ def _stage_payload(filtered: list[dict]) -> dict:
     }
 
 
+def _policy_rejection_reasons(
+    *,
+    play: str | None,
+    edge_pct: float | None,
+    ev: float | None,
+    confidence: str | None,
+    confidence_score: float | None = None,
+) -> list[str]:
+    profile = get_betting_profile(play)
+    if not profile.get("enabled"):
+        return ["disabled_market"]
+
+    reasons: list[str] = []
+    edge = float(edge_pct or 0.0)
+    expected_value = float(ev or 0.0)
+    normalized_confidence = (confidence or "").strip().lower()
+
+    if expected_value < float(profile["min_ev"]):
+        reasons.append("ev_below_threshold")
+    if edge < float(profile["min_edge"]):
+        reasons.append("edge_below_threshold")
+
+    max_edge = profile.get("max_edge")
+    if max_edge is not None and edge >= float(max_edge):
+        reasons.append("edge_above_policy_band")
+
+    allowed_confidences = profile.get("allowed_confidences") or set()
+    if allowed_confidences and normalized_confidence not in allowed_confidences:
+        reasons.append("confidence_too_low")
+
+    min_cs = profile.get("min_confidence_score")
+    if min_cs is not None and confidence_score is not None and confidence_score < float(min_cs):
+        reasons.append("confidence_score_too_low")
+
+    return reasons
+
+
 def _edge_ev(edge: EdgeResult) -> float:
     play = (edge.recommended_play or "").lower()
     if play == "away_ml":
@@ -89,6 +126,7 @@ def _reject_sample(game: Game, reasons: list[str], edge: EdgeResult | None = Non
         "raw_edge_pct": float(edge.edge_pct or 0) if edge else None,
         "adjusted_edge_pct": adjustment.get("adjusted_edge_pct") if adjustment else None,
         "market_trust_score": adjustment.get("score") if adjustment else None,
+        "adjusted_kelly_fraction": adjustment.get("adjusted_kelly_fraction") if adjustment else None,
         "reasons": reasons,
     }
 
@@ -186,13 +224,21 @@ def build_decision_pipeline_diagnostics(db: Session) -> dict:
     confidence_rejected = []
     confidence_survivors = []
     for game, edge, odds, projection, respect, adjustment in stale_survivors:
-        if not qualifies_for_bet_policy(
+        policy_reasons = _policy_rejection_reasons(
             play=edge.recommended_play,
             edge_pct=adjustment["adjusted_edge_pct"],
             ev=adjustment["adjusted_ev"],
             confidence=adjustment["adjusted_confidence"],
+            confidence_score=projection.confidence_score if projection else None,
+        )
+        if policy_reasons or not qualifies_for_bet_policy(
+            play=edge.recommended_play,
+            edge_pct=adjustment["adjusted_edge_pct"],
+            ev=adjustment["adjusted_ev"],
+            confidence=adjustment["adjusted_confidence"],
+            confidence_score=projection.confidence_score if projection else None,
         ):
-            confidence_rejected.append(_reject_sample(game, ["confidence_too_low"], edge, adjustment))
+            confidence_rejected.append(_reject_sample(game, policy_reasons or ["confidence_too_low"], edge, adjustment))
         else:
             confidence_survivors.append((game, edge, odds, projection, respect, adjustment))
 
@@ -204,6 +250,15 @@ def build_decision_pipeline_diagnostics(db: Session) -> dict:
         else:
             final_rows.append((game, edge, odds, projection, respect, adjustment))
 
+    fire_ready_rows = [
+        row
+        for row in final_rows
+        if int(row[4].get("score", 50)) >= 70
+        and row[5].get("alert_allowed")
+        and float(row[5].get("adjusted_edge_pct") or 0) > 0
+        and float(row[5].get("adjusted_ev") or 0) > 0
+    ]
+
     counts = {
         "total_games": len(games),
         "games_with_odds": len({game_id for game_id in game_ids if game_id in odds_by_game}),
@@ -214,6 +269,7 @@ def build_decision_pipeline_diagnostics(db: Session) -> dict:
         "after_confidence_filter": len(confidence_survivors),
         "after_kelly_filter": len(final_rows),
         "final_ranked_plays": len(final_rows),
+        "fire_ready_plays": len(fire_ready_rows),
     }
     stages = {
         "games_with_odds": _stage_payload(missing_odds),
@@ -227,7 +283,13 @@ def build_decision_pipeline_diagnostics(db: Session) -> dict:
     }
     report = {"date": today.isoformat(), "counts": counts, "stages": stages}
     if counts["final_ranked_plays"] == 0:
-        logger.warning("No plays survived decision pipeline", extra={"decision_pipeline": counts})
+        logger.warning(
+            "No plays survived decision pipeline",
+            extra={
+                "event": "decision_pipeline_zero_survivors",
+                "decision_pipeline": counts,
+            },
+        )
     return report
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -18,6 +19,7 @@ from app.services.market_respect_service import market_respect_adjustment, marke
 from app.services.odds_service import is_odds_snapshot_fresh
 
 router = APIRouter(prefix="/api/ranked", tags=["ranked"])
+logger = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
 FINAL_STATUSES = {"Final", "Completed Early", "Cancelled"}
@@ -132,7 +134,22 @@ def _build_ranked_rows(
     for i, row in enumerate(ranked, start=1):
         row["rank"] = i
 
-    return ranked[:limit]
+    limited = ranked[:limit]
+    if not limited:
+        logger.warning(
+            "No plays survived decision pipeline",
+            extra={
+                "event": "decision_pipeline_zero_survivors",
+                "decision_pipeline": {
+                    "surface": "ranked_bets",
+                    "game_date": today.isoformat(),
+                    "active_only": active_only,
+                    "trusted_edges": len(rows),
+                },
+            },
+        )
+
+    return limited
 
 
 def _decision_reason(row: dict, status: str) -> str:
@@ -206,7 +223,19 @@ def _build_decision_queue(db: Session, limit: int = 20, active_only: bool = True
     )
     for i, row in enumerate(rows, start=1):
         row["rank"] = i
-    return rows[:limit]
+    limited = rows[:limit]
+    if not limited:
+        logger.warning(
+            "No plays survived decision pipeline",
+            extra={
+                "event": "decision_pipeline_zero_survivors",
+                "decision_pipeline": {
+                    "surface": "decision_queue",
+                    "active_only": active_only,
+                },
+            },
+        )
+    return limited
 
 
 def _build_discord_lines(bets: list[dict], title: str = "📊 **Ranked MLB Bets**") -> list[str]:

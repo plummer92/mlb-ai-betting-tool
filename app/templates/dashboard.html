@@ -1286,14 +1286,10 @@ async function loadDecisionDebug() {
     const stages = data.stages || {};
     const funnel = [
       ['Games', counts.total_games],
-      ['Odds', counts.games_with_odds],
-      ['Model', counts.games_with_model_projection],
       ['Edges', counts.raw_positive_edges],
       ['Calibrated', counts.after_market_respect_filter],
-      ['Fresh', counts.after_stale_odds_filter],
-      ['Conf', counts.after_confidence_filter],
-      ['Kelly', counts.after_kelly_filter],
       ['Ranked', counts.final_ranked_plays],
+      ['FIRE', counts.fire_ready_plays],
     ];
     const worstStage = Object.entries(stages)
       .map(([name, stage]) => ({ name, count: stage.filtered_count || 0, reasons: stage.top_rejection_reasons || [] }))
