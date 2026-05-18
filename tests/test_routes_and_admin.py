@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, Prediction, SnapshotType
+from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, Prediction, SnapshotType
 from app.routes.commentary import commentary_today
 from app.routes.admin import admin_backfill_prediction_dashboard_metrics, admin_freshness
+from app.routes.debug import build_decision_pipeline_diagnostics
 from app.routes.model import get_today_predictions, run_model
 from app.routes.ranked import _build_ranked_rows, _decision_row_from_ranked
 from app.routes.reviews import get_review_summary, profitability_report
@@ -443,6 +444,107 @@ class RouteAndAdminTests(unittest.TestCase):
         row = _decision_row_from_ranked(self._decision_base_row(adjusted_edge_pct=-0.01))
 
         self.assertEqual(row["decision_status"], "NO BET")
+
+    def _pipeline_edge_game(
+        self,
+        game_id: int,
+        *,
+        movement_direction: str = "toward_model",
+        sharp_home: bool = True,
+        stale: bool = False,
+    ) -> None:
+        game = self._game(game_id)
+        prediction = self._prediction(game.game_id)
+        fetched_at = datetime.now(timezone.utc) - (timedelta(hours=4) if stale else timedelta(minutes=5))
+        open_odds = self._odds(game.game_id)
+        open_odds.fetched_at = fetched_at
+        close_odds = GameOdds(
+            game_id=game.game_id,
+            sportsbook="draftkings",
+            snapshot_type=SnapshotType.pregame,
+            fetched_at=fetched_at,
+            away_ml=120,
+            home_ml=-155 if movement_direction == "toward_model" else -105,
+            total_line=8.5,
+            over_odds=-110,
+            under_odds=-110,
+        )
+        movement = LineMovement(
+            game_id=game.game_id,
+            sportsbook="consensus",
+            calculated_at=fetched_at,
+            open_away_ml=120,
+            open_home_ml=-130,
+            open_total=8.5,
+            pregame_away_ml=120,
+            pregame_home_ml=-155 if movement_direction == "toward_model" else -105,
+            pregame_total=8.5,
+            away_prob_move=0.0,
+            home_prob_move=0.04 if movement_direction == "toward_model" else -0.06,
+            total_move=0.0,
+            sharp_away=not sharp_home,
+            sharp_home=sharp_home,
+            total_steam_over=False,
+            total_steam_under=False,
+        )
+        self.db.add_all([close_odds, movement])
+        self.db.commit()
+        self.db.refresh(open_odds)
+        self.db.refresh(movement)
+        edge = EdgeResult(
+            game_id=game.game_id,
+            prediction_id=prediction.prediction_id,
+            odds_id=open_odds.id,
+            movement_id=movement.id,
+            run_stage="daily_open",
+            is_active=True,
+            calculated_at=datetime.now(timezone.utc),
+            model_away_win_pct=0.46,
+            model_home_win_pct=0.54,
+            implied_away_pct=0.45,
+            implied_home_pct=0.55,
+            edge_away=-0.01,
+            edge_home=0.08,
+            ev_away=-0.02,
+            ev_home=0.11,
+            recommended_play="home_ml",
+            confidence_tier="strong",
+            edge_pct=0.08,
+            movement_direction=movement_direction,
+            sportsbook="draftkings",
+            away_ml=120,
+            home_ml=-130,
+        )
+        self.db.add(edge)
+        self.db.commit()
+
+    def test_decision_pipeline_counts_surviving_play(self) -> None:
+        self._pipeline_edge_game(91)
+
+        report = build_decision_pipeline_diagnostics(self.db)
+
+        self.assertEqual(report["counts"]["total_games"], 1)
+        self.assertEqual(report["counts"]["games_with_odds"], 1)
+        self.assertEqual(report["counts"]["games_with_model_projection"], 1)
+        self.assertEqual(report["counts"]["raw_positive_edges"], 1)
+        self.assertEqual(report["counts"]["final_ranked_plays"], 1)
+
+    def test_decision_pipeline_tracks_rejection_reasons(self) -> None:
+        self._pipeline_edge_game(92, movement_direction="away_from_model", sharp_home=False)
+        self._pipeline_edge_game(93, stale=True)
+
+        report = build_decision_pipeline_diagnostics(self.db)
+
+        market_reasons = report["stages"]["after_market_respect_filter"]["top_rejection_reasons"]
+        stale_reasons = report["stages"]["after_stale_odds_filter"]["top_rejection_reasons"]
+        self.assertIn("market_rejection", {row["reason"] for row in market_reasons})
+        self.assertIn("stale_odds", {row["reason"] for row in stale_reasons})
+
+    def test_decision_pipeline_zero_play_state(self) -> None:
+        report = build_decision_pipeline_diagnostics(self.db)
+
+        self.assertEqual(report["counts"]["total_games"], 0)
+        self.assertEqual(report["counts"]["final_ranked_plays"], 0)
 
 
 class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):

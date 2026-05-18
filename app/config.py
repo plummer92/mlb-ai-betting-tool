@@ -8,6 +8,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 APP_NAME = "MLB AI Betting Tool"
 APP_VERSION = "0.1.0"
+DEBUG = os.getenv("DEBUG", "false").strip().lower() == "true"
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
 DATABASE_URL = os.getenv("DATABASE_URL")
