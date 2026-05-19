@@ -17,6 +17,7 @@ from app.services.market_respect_service import market_respect_adjustment, marke
 from app.services.notification_service import send_alert_message
 from app.services.paper_trade_service import log_alert_as_paper_trade
 from app.services.odds_service import is_odds_snapshot_fresh
+from app.services.totals_policy_service import evaluate_totals_policy
 
 ET = ZoneInfo("America/New_York")
 
@@ -100,7 +101,11 @@ def _edge_ev(edge: EdgeResult) -> float:
     return 0.0
 
 
-def qualifies_for_alert(edge: EdgeResult, market_adjustment: dict | None = None) -> bool:
+def qualifies_for_alert(
+    edge: EdgeResult,
+    market_adjustment: dict | None = None,
+    totals_policy: dict | None = None,
+) -> bool:
     """
     Sniper Alert Criteria:
     - Totals: Confidence >= 72.0%
@@ -126,6 +131,11 @@ def qualifies_for_alert(edge: EdgeResult, market_adjustment: dict | None = None)
     adjusted_ev = float((market_adjustment or {}).get("adjusted_ev", ev))
     adjusted_confidence = (market_adjustment or {}).get("adjusted_confidence", edge.confidence_tier)
     if market_adjustment and not market_adjustment.get("alert_allowed", False):
+        return False
+    if totals_policy and (
+        not totals_policy.get("alert_allowed", False)
+        or totals_policy.get("policy_status") == "BLOCKED"
+    ):
         return False
 
     if not qualifies_for_bet_policy(
@@ -303,8 +313,16 @@ def create_and_send_alerts_for_today(db: Session) -> dict:
             market_respect=market_respect,
             odds_american=_pick_play_odds(edge, odds),
         )
+        totals_policy = evaluate_totals_policy(
+            db,
+            edge=edge,
+            game=game,
+            prediction=prediction,
+            odds=odds,
+            market_respect=market_respect,
+        )
 
-        if not qualifies_for_alert(edge, adjustment):
+        if not qualifies_for_alert(edge, adjustment, totals_policy):
             skipped += 1
             continue
 
@@ -405,14 +423,23 @@ def create_and_send_alert_for_game(db: Session, game_id: int) -> dict:
         market_respect=market_respect,
         odds_american=_pick_play_odds(edge, odds),
     )
-    if not qualifies_for_alert(edge, adjustment):
+    totals_policy = evaluate_totals_policy(
+        db,
+        edge=edge,
+        game=game,
+        prediction=prediction,
+        odds=odds,
+        market_respect=market_respect,
+    )
+    if not qualifies_for_alert(edge, adjustment, totals_policy):
         return {
             "created": 0,
             "sent": 0,
             "skipped": 1,
-            "reason": "market respect gate or sniper criteria suppressed this alert",
+            "reason": "market respect, totals policy, or sniper criteria suppressed this alert",
             "market_respect": market_respect,
             "market_respect_adjustment": adjustment,
+            "totals_policy": totals_policy,
         }
 
     message = build_sniper_alert_message(game, edge, db)

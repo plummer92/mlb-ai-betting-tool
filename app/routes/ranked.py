@@ -17,6 +17,7 @@ from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.edge_service import get_trustworthy_active_edges
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
 from app.services.odds_service import odds_freshness_metadata
+from app.services.totals_policy_service import apply_under_cluster_risk, evaluate_totals_policy
 
 router = APIRouter(prefix="/api/ranked", tags=["ranked"])
 logger = logging.getLogger(__name__)
@@ -67,16 +68,16 @@ def _build_ranked_rows(
 
     rows = get_trustworthy_active_edges(db, game_date=today)
 
-    latest_by_game: dict[int, tuple[EdgeResult, Game, GameOdds | None]] = {}
+    latest_by_game: dict[int, tuple[EdgeResult, Game, object, GameOdds | None]] = {}
 
-    for edge, game, _prediction, odds in rows:
+    for edge, game, prediction, odds in rows:
         if active_only and (game.status in FINAL_STATUSES):
             continue
         if edge.game_id not in latest_by_game:
-            latest_by_game[edge.game_id] = (edge, game, odds)
+            latest_by_game[edge.game_id] = (edge, game, prediction, odds)
 
     ranked = []
-    for edge, game, odds in latest_by_game.values():
+    for edge, game, prediction, odds in latest_by_game.values():
         ev = _pick_ev(edge)
         market_respect = market_respect_for_edge(db, edge, odds=odds, game=game)
         adjustment = market_respect_adjustment(
@@ -85,6 +86,14 @@ def _build_ranked_rows(
             confidence=edge.confidence_tier,
             market_respect=market_respect,
             odds_american=_pick_odds(edge, odds),
+        )
+        totals_policy = evaluate_totals_policy(
+            db,
+            edge=edge,
+            game=game,
+            prediction=prediction,
+            odds=odds,
+            market_respect=market_respect,
         )
         freshness = odds_freshness_metadata(db, game=game, odds_row=odds)
         odds_fresh = freshness["status"] in {"fresh", "quiet_market"}
@@ -121,6 +130,12 @@ def _build_ranked_rows(
                 "market_trust_bucket": adjustment["bucket"],
                 "market_respect_adjustment": adjustment,
                 "market_respect_alert_allowed": adjustment["alert_allowed"],
+                "totals_policy": totals_policy,
+                "totals_policy_score": totals_policy["totals_policy_score"],
+                "policy_status": totals_policy["policy_status"],
+                "policy_reason": totals_policy["policy_reason"],
+                "policy_reasons": totals_policy["policy_reasons"],
+                "totals_policy_alert_allowed": totals_policy["alert_allowed"],
                 "calculated_at": edge.calculated_at.isoformat() if edge.calculated_at else None,
                 "policy_qualified": qualifies_for_bet_policy(
                     play=edge.recommended_play,
@@ -131,10 +146,21 @@ def _build_ranked_rows(
             }
         )
 
-    ranked.sort(key=lambda x: (x["adjusted_edge_pct"], x["adjusted_ev"], x["edge_pct"]), reverse=True)
+    cluster = apply_under_cluster_risk(ranked)
+
+    ranked.sort(
+        key=lambda x: (
+            0 if x.get("policy_status") in {"APPROVED", "CLUSTER_RISK"} else 1 if x.get("policy_status") == "CAUTION" else 2,
+            -float(x.get("totals_policy_score", 50)),
+            -float(x["adjusted_edge_pct"]),
+            -float(x["adjusted_ev"]),
+            -float(x["edge_pct"]),
+        )
+    )
 
     for i, row in enumerate(ranked, start=1):
         row["rank"] = i
+        row["totals_cluster"] = cluster
 
     limited = ranked[:limit]
     if not limited:
@@ -166,11 +192,15 @@ def _decision_reason(row: dict, status: str) -> str:
     if status == "FIRE":
         return base + " Trust is high and odds are fresh."
     if status == "WATCH":
+        policy_reason = row.get("policy_reason") or (row.get("totals_policy") or {}).get("policy_reason")
+        if policy_reason:
+            return base + f" {policy_reason}"
         return base + " Edge is positive, but market trust is moderate or sample is thin."
     if status == "WAIT FOR ODDS":
         return base + " Waiting because odds are stale or the open/close read is incomplete."
     if status == "BLOCKED":
-        return base + " Blocked because the market rejected the model side."
+        policy_reason = row.get("policy_reason") or (row.get("totals_policy") or {}).get("policy_reason")
+        return base + (f" {policy_reason}" if policy_reason else " Blocked because the market rejected the model side.")
     return base + " No bet because the adjusted edge is not positive."
 
 
@@ -182,13 +212,21 @@ def _decision_row_from_ranked(row: dict) -> dict:
     freshness_status = row.get("odds_freshness_status")
     stale = "STALE OPEN" in tags or freshness_status in {"STALE_FEED", "STALE_OPEN", "MISSING_ODDS"}
     rejected = "MARKET REJECTED" in tags or row.get("market_trust_bucket") == "market_rejection"
+    totals_policy = row.get("totals_policy") or {}
+    policy_status = totals_policy.get("policy_status") or row.get("policy_status")
 
     if adjusted_edge <= 0:
         status = "NO BET"
+    elif policy_status == "BLOCKED":
+        status = "BLOCKED"
     elif stale:
         status = "WAIT FOR ODDS"
     elif rejected:
         status = "BLOCKED"
+    elif policy_status == "CLUSTER_RISK":
+        status = "WATCH"
+    elif policy_status == "CAUTION":
+        status = "WATCH"
     elif score >= 70:
         status = "FIRE"
     else:
@@ -209,6 +247,12 @@ def _decision_row_from_ranked(row: dict) -> dict:
         "odds_freshness_status": row.get("odds_freshness_status", "UNKNOWN"),
         "decision_status": status,
         "decision_reason": reason,
+        "totals_policy_score": row.get("totals_policy_score"),
+        "policy_status": policy_status,
+        "policy_reason": totals_policy.get("policy_reason") or row.get("policy_reason"),
+        "policy_reasons": totals_policy.get("policy_reasons") or row.get("policy_reasons") or [],
+        "totals_policy": totals_policy,
+        "totals_cluster": row.get("totals_cluster"),
         "sportsbook": row.get("sportsbook"),
         "start_time": row.get("start_time"),
         "market_respect": row.get("market_respect"),
@@ -261,6 +305,8 @@ def _alertable_ranked_bets(bets: list[dict]) -> list[dict]:
         bet
         for bet in bets
         if bet.get("market_respect_alert_allowed")
+        and bet.get("totals_policy_alert_allowed", True)
+        and bet.get("policy_status") != "BLOCKED"
         and float(bet.get("adjusted_edge_pct") or 0) > 0
         and float(bet.get("adjusted_ev") or 0) > 0
     ]

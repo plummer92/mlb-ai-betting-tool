@@ -917,6 +917,17 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     </div>
   </div>
 
+  <div class="section" id="totals-regime-section">
+    <div class="section-head">
+      <div class="section-label">Totals Regime</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="totals-regime-badge">LOADING</div>
+    </div>
+    <div id="totals-regime-panel">
+      <div class="loading">Loading totals policy</div>
+    </div>
+  </div>
+
   <div class="section" id="decision-debug-section" style="display:none;">
     <div class="section-head">
       <div class="section-label">Decision Pipeline Debug</div>
@@ -1239,6 +1250,30 @@ function decisionStatusChip(status) {
   return `<span class="chip ${map[status] || 'c-none'}">${esc(status || 'UNKNOWN')}</span>`;
 }
 
+function policyStatusChip(status) {
+  const map = {
+    'APPROVED': 'c-strong',
+    'CAUTION': 'c-medium',
+    'BLOCKED': 'c-loss',
+    'CLUSTER_RISK': 'sig-orange',
+  };
+  return `<span class="chip ${map[status] || 'c-none'}">${esc(status || 'UNKNOWN')}</span>`;
+}
+
+function totalsPolicyMeter(policy) {
+  if (!policy) return '';
+  const score = policy.totals_policy_score ?? policy.policy_score ?? 0;
+  const cls = score >= 70 ? 'green' : score >= 45 ? 'yellow' : 'red';
+  return `<div title="${esc(policy.policy_reason || '')}" style="min-width:120px">
+    <div style="display:flex;justify-content:space-between;font-family:monospace;font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.7px;">
+      <span>Totals Policy</span><span class="${cls}">${score}</span>
+    </div>
+    <div style="height:6px;border-radius:4px;background:var(--surface2);overflow:hidden;border:1px solid var(--border);margin-top:3px;">
+      <div style="height:100%;width:${Math.max(0, Math.min(100, score))}%;background:${score >= 70 ? 'var(--green)' : score >= 45 ? 'var(--yellow)' : 'var(--red)'};"></div>
+    </div>
+  </div>`;
+}
+
 async function loadDecisionQueue() {
   try {
     const res = await fetch('/api/ranked/decision-queue?limit=20&active_only=true');
@@ -1255,7 +1290,7 @@ async function loadDecisionQueue() {
     $('decision-queue-table').innerHTML = `
       <table>
         <thead><tr>
-          <th>Rank</th><th>Game</th><th>Play</th><th>Raw Edge</th><th>Adjusted Edge</th><th>Market Trust</th><th>Respect Tag</th><th>Odds</th><th>Status</th><th>Reason</th>
+          <th>Rank</th><th>Game</th><th>Play</th><th>Raw Edge</th><th>Adjusted Edge</th><th>Market Trust</th><th>Totals Policy</th><th>Respect Tag</th><th>Odds</th><th>Status</th><th>Reason</th>
         </tr></thead>
         <tbody>
           ${rows.map(r => `
@@ -1266,6 +1301,7 @@ async function loadDecisionQueue() {
               <td class="mono">${r.raw_edge_pct != null ? (r.raw_edge_pct * 100).toFixed(1) + '%' : '---'}</td>
               <td class="mono ${r.adjusted_edge_pct > 0 ? 'green' : 'red'}">${r.adjusted_edge_pct != null ? (r.adjusted_edge_pct * 100).toFixed(1) + '%' : '---'}</td>
               <td>${marketTrustMeter(r.market_respect_adjustment)}</td>
+              <td>${totalsPolicyMeter(r.totals_policy)}${r.policy_status ? `<div style="margin-top:4px">${policyStatusChip(r.policy_status)}</div>` : ''}</td>
               <td>${marketRespectChip(r.market_respect)}</td>
               <td class="mono ${r.odds_freshness_status === 'FRESH' ? 'green' : 'yellow'}">${esc(r.odds_freshness_status || 'UNKNOWN')}</td>
               <td>${decisionStatusChip(r.decision_status)}</td>
@@ -1277,6 +1313,64 @@ async function loadDecisionQueue() {
   } catch(e) {
     $('decision-queue-badge').textContent = 'ERROR';
     $('decision-queue-table').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+async function loadTotalsRegime() {
+  try {
+    const res = await fetch('/api/debug/totals-policy');
+    const data = await res.json();
+    const board = data.current_board || {};
+    const backtest = data.backtest || {};
+    const raw = backtest.raw_totals_model || {};
+    const filtered = backtest.totals_policy_filtered || {};
+    const cluster = board.cluster || {};
+    $('totals-regime-badge').textContent = cluster.warning || `${board.totals_plays || 0} TOTALS`;
+    const approved = board.approved_plays || [];
+    $('totals-regime-panel').innerHTML = `
+      <div class="today-read" style="margin-bottom:12px;">
+        <div class="read-tile">
+          <div class="read-label">Current Mix</div>
+          <div class="read-main">${board.under_count || 0}U / ${board.over_count || 0}O</div>
+          <div class="read-sub">${cluster.warning ? esc(cluster.warning) : 'No cluster warning'} · ${(cluster.under_share != null ? (cluster.under_share * 100).toFixed(0) : '0')}% under</div>
+        </div>
+        <div class="read-tile">
+          <div class="read-label">Policy Filtered ROI</div>
+          <div class="read-main ${(filtered.roi || 0) >= 0 ? 'green' : 'red'}">${filtered.roi != null ? (filtered.roi * 100).toFixed(1) + '%' : '---'}</div>
+          <div class="read-sub">Raw totals ROI ${raw.roi != null ? (raw.roi * 100).toFixed(1) + '%' : '---'}</div>
+        </div>
+        <div class="read-tile">
+          <div class="read-label">Hit Rate</div>
+          <div class="read-main">${filtered.hit_rate != null ? (filtered.hit_rate * 100).toFixed(1) + '%' : '---'}</div>
+          <div class="read-sub">${filtered.bets || 0} policy-qualified historical bets</div>
+        </div>
+        <div class="read-tile">
+          <div class="read-label">Drawdown</div>
+          <div class="read-main">${filtered.drawdown ?? '---'}</div>
+          <div class="read-sub">Volatility ${filtered.volatility ?? '---'} · CLV ${filtered.avg_line_clv ?? '---'}</div>
+        </div>
+      </div>
+      <div class="card" style="padding:0;">
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Game</th><th>Play</th><th>Policy</th><th>Score</th><th>Market</th><th>Reason</th></tr></thead>
+            <tbody>
+              ${approved.length ? approved.slice(0, 8).map(p => `
+                <tr>
+                  <td style="font-weight:600;white-space:nowrap">${esc(p.matchup || '---')}</td>
+                  <td class="mono">${esc((p.play || '---').toUpperCase())}</td>
+                  <td>${policyStatusChip(p.policy_status)}</td>
+                  <td class="mono">${p.totals_policy_score ?? '---'}</td>
+                  <td>${marketRespectChip({score: p.market_respect_score, tags: p.market_respect_tags || []})}</td>
+                  <td style="min-width:300px;font-size:11px;color:var(--muted);line-height:1.45">${esc(p.policy_reason || '')}</td>
+                </tr>`).join('') : '<tr><td colspan="6"><div class="empty compact">No totals policy-approved plays right now.</div></td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+  } catch(e) {
+    $('totals-regime-badge').textContent = 'ERROR';
+    $('totals-regime-panel').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
   }
 }
 
@@ -2400,7 +2494,7 @@ async function loadBullpen() {
 }
 
 async function loadAll() {
-  await Promise.all([loadDecisionQueue(), loadDecisionDebug(), loadOddsDebug(), loadTodayRead(), loadAccuracy(), loadTopBets(), loadBestPlaysWeek(), loadMarketAudit(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
+  await Promise.all([loadDecisionQueue(), loadTotalsRegime(), loadDecisionDebug(), loadOddsDebug(), loadTodayRead(), loadAccuracy(), loadTopBets(), loadBestPlaysWeek(), loadMarketAudit(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
 }
 
 let countdown = 60;

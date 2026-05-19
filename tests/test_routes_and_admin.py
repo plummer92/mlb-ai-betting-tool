@@ -342,7 +342,7 @@ class RouteAndAdminTests(unittest.TestCase):
                 confidence="strong",
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             qualifies_for_bet_policy(
                 play="under",
                 edge_pct=0.07,
@@ -672,6 +672,7 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertIn("/api/debug/edge-db-state", paths)
         self.assertIn("/api/debug/rebuild-edge-results", paths)
         self.assertIn("/api/debug/totals-bias", paths)
+        self.assertIn("/api/debug/totals-policy", paths)
 
     def test_totals_bias_report_flags_supported_under_edge(self) -> None:
         self._totals_review_game(104, model_total=7.0, book_total=9.0, final_total=6, play="under", bet_result="win", pregame_total=8.5)

@@ -29,13 +29,13 @@ BETTING_PROFILES: dict[str, dict] = {
         "allowed_confidences": {"medium", "strong"},
         "min_confidence_score": 72.0,
     },
-    # Unders were the weakest overall market in the current history, so they
-    # are disabled until the model is recalibrated.
+    # Unders are allowed only after the totals policy engine applies its
+    # disagreement, CLV, market-respect, and run-environment gates.
     "under": {
-        "enabled": False,
+        "enabled": True,
         "min_edge": 0.05,
-        "max_edge": 0.10,
-        "min_ev": 0.08,
+        "max_edge": None,
+        "min_ev": 0.05,
         "allowed_confidences": {"medium", "strong"},
         "min_confidence_score": 72.0,
     },

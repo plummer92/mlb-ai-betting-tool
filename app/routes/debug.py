@@ -26,6 +26,7 @@ from app.services.edge_service import (
 from app.services.ev_math import american_to_decimal, calc_edge, implied_prob_raw, remove_vig
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
 from app.services.odds_service import odds_freshness_metadata
+from app.services.totals_policy_service import totals_policy_backtest
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
 logger = logging.getLogger(__name__)
@@ -351,6 +352,71 @@ def build_totals_bias_report(db: Session, *, min_sample: int = 5) -> dict:
 @router.get("/totals-bias")
 def totals_bias(min_sample: int = Query(5, ge=1, le=100), db: Session = Depends(get_db)):
     return build_totals_bias_report(db, min_sample=min_sample)
+
+
+def build_totals_policy_report(db: Session, *, min_sample: int = 5) -> dict:
+    from app.routes.ranked import _build_ranked_rows
+
+    current = _build_ranked_rows(db=db, limit=50, active_only=True)
+    totals = [row for row in current if (row.get("play") or "").lower() in {"over", "under"}]
+    by_status: dict[str, list[dict]] = defaultdict(list)
+    reason_counts: Counter[str] = Counter()
+    for row in totals:
+        status = row.get("policy_status") or "UNKNOWN"
+        by_status[status].append(row)
+        for reason in row.get("policy_reasons") or []:
+            reason_counts[reason] += 1
+    cluster = current[0].get("totals_cluster") if current else {"under_share": 0.0, "warning": None, "penalized": 0}
+    approved = [
+        {
+            "rank": row.get("rank"),
+            "game_id": row.get("game_id"),
+            "matchup": row.get("matchup"),
+            "play": row.get("play"),
+            "adjusted_edge_pct": row.get("adjusted_edge_pct"),
+            "totals_policy_score": row.get("totals_policy_score"),
+            "policy_status": row.get("policy_status"),
+            "policy_reason": row.get("policy_reason"),
+            "market_respect_score": row.get("market_respect_score"),
+            "market_respect_tags": row.get("market_respect_tags"),
+        }
+        for row in totals
+        if row.get("policy_status") in {"APPROVED", "CAUTION", "CLUSTER_RISK"}
+    ]
+    blocked = [
+        {
+            "rank": row.get("rank"),
+            "game_id": row.get("game_id"),
+            "matchup": row.get("matchup"),
+            "play": row.get("play"),
+            "totals_policy_score": row.get("totals_policy_score"),
+            "policy_status": row.get("policy_status"),
+            "policy_reasons": row.get("policy_reasons"),
+            "policy_reason": row.get("policy_reason"),
+        }
+        for row in totals
+        if row.get("policy_status") == "BLOCKED"
+    ][:10]
+    return {
+        "status": "ok",
+        "current_board": {
+            "total_ranked_plays": len(current),
+            "totals_plays": len(totals),
+            "under_count": sum(1 for row in totals if row.get("play") == "under"),
+            "over_count": sum(1 for row in totals if row.get("play") == "over"),
+            "cluster": cluster,
+            "blocked_counts": {status: len(rows) for status, rows in sorted(by_status.items())},
+            "filter_reasons": [{"reason": reason, "count": count} for reason, count in reason_counts.most_common(10)],
+            "approved_plays": approved[:15],
+            "sample_blocked_plays": blocked,
+        },
+        "backtest": totals_policy_backtest(db, min_sample=min_sample),
+    }
+
+
+@router.get("/totals-policy")
+def totals_policy(min_sample: int = Query(5, ge=1, le=100), db: Session = Depends(get_db)):
+    return build_totals_policy_report(db, min_sample=min_sample)
 
 
 def _stage_payload(filtered: list[dict]) -> dict:

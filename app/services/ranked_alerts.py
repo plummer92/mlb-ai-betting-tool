@@ -10,6 +10,7 @@ from app.db import SessionLocal
 from app.models.schema import EdgeResult, Game, GameOdds
 from app.services.edge_service import get_trustworthy_active_edges
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
+from app.services.totals_policy_service import apply_under_cluster_risk, evaluate_totals_policy
 
 ET = ZoneInfo("America/New_York")
 FINAL_STATUSES = {"Final", "Completed Early", "Cancelled"}
@@ -50,14 +51,14 @@ def _build_ranked_rows(limit: int = 10, active_only: bool = True) -> list[dict]:
 
         latest_by_game: dict[int, tuple] = {}
 
-        for edge, game, _prediction, odds in rows:
+        for edge, game, prediction, odds in rows:
             if active_only and (game.status in FINAL_STATUSES):
                 continue
             if edge.game_id not in latest_by_game:
-                latest_by_game[edge.game_id] = (edge, game, odds)
+                latest_by_game[edge.game_id] = (edge, game, prediction, odds)
 
         ranked = []
-        for edge, game, odds in latest_by_game.values():
+        for edge, game, prediction, odds in latest_by_game.values():
             ev = _pick_ev(edge)
             market_respect = market_respect_for_edge(db, edge, odds=odds, game=game)
             adjustment = market_respect_adjustment(
@@ -66,6 +67,14 @@ def _build_ranked_rows(limit: int = 10, active_only: bool = True) -> list[dict]:
                 confidence=edge.confidence_tier,
                 market_respect=market_respect,
                 odds_american=_pick_odds(edge, odds),
+            )
+            totals_policy = evaluate_totals_policy(
+                db,
+                edge=edge,
+                game=game,
+                prediction=prediction,
+                odds=odds,
+                market_respect=market_respect,
             )
             ranked.append(
                 {
@@ -92,13 +101,28 @@ def _build_ranked_rows(limit: int = 10, active_only: bool = True) -> list[dict]:
                     "market_trust_bucket": adjustment["bucket"],
                     "market_respect_adjustment": adjustment,
                     "market_respect_alert_allowed": adjustment["alert_allowed"],
+                    "totals_policy": totals_policy,
+                    "totals_policy_score": totals_policy["totals_policy_score"],
+                    "policy_status": totals_policy["policy_status"],
+                    "policy_reason": totals_policy["policy_reason"],
+                    "totals_policy_alert_allowed": totals_policy["alert_allowed"],
                 }
             )
 
-        ranked.sort(key=lambda x: (x["adjusted_edge_pct"], x["adjusted_ev"], x["edge_pct"]), reverse=True)
+        cluster = apply_under_cluster_risk(ranked)
+        ranked.sort(
+            key=lambda x: (
+                0 if x.get("policy_status") in {"APPROVED", "CLUSTER_RISK"} else 1 if x.get("policy_status") == "CAUTION" else 2,
+                -float(x.get("totals_policy_score", 50)),
+                -float(x["adjusted_edge_pct"]),
+                -float(x["adjusted_ev"]),
+                -float(x["edge_pct"]),
+            )
+        )
 
         for i, row in enumerate(ranked, start=1):
             row["rank"] = i
+            row["totals_cluster"] = cluster
 
         return ranked[:limit]
     finally:
@@ -110,6 +134,8 @@ def _alertable_ranked_bets(bets: list[dict]) -> list[dict]:
         bet
         for bet in bets
         if bet.get("market_respect_alert_allowed")
+        and bet.get("totals_policy_alert_allowed", True)
+        and bet.get("policy_status") != "BLOCKED"
         and float(bet.get("adjusted_edge_pct") or 0) > 0
         and float(bet.get("adjusted_ev") or 0) > 0
     ]
