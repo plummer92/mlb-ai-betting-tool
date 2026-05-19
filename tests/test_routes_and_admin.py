@@ -18,6 +18,7 @@ from app.routes.debug import (
     build_edge_persistence_report,
     build_odds_freshness_report,
     build_raw_edge_board,
+    build_totals_bias_report,
 )
 from app.routes.model import get_today_predictions, run_model
 from app.routes.ranked import _build_ranked_rows, _decision_row_from_ranked
@@ -480,13 +481,14 @@ class RouteAndAdminTests(unittest.TestCase):
         fetched_at = datetime.now(timezone.utc) - (timedelta(hours=4) if stale else timedelta(minutes=5))
         open_odds = self._odds(game.game_id)
         open_odds.fetched_at = fetched_at
+        close_home_ml = -130 if stale and minutes_to_start is not None else (-155 if movement_direction == "toward_model" else -105)
         close_odds = GameOdds(
             game_id=game.game_id,
             sportsbook="draftkings",
             snapshot_type=SnapshotType.pregame,
             fetched_at=fetched_at,
             away_ml=120,
-            home_ml=-155 if movement_direction == "toward_model" else -105,
+            home_ml=close_home_ml,
             total_line=8.5,
             over_odds=-110,
             under_odds=-110,
@@ -499,7 +501,7 @@ class RouteAndAdminTests(unittest.TestCase):
             open_home_ml=-130,
             open_total=8.5,
             pregame_away_ml=120,
-            pregame_home_ml=-155 if movement_direction == "toward_model" else -105,
+            pregame_home_ml=close_home_ml,
             pregame_total=8.5,
             away_prob_move=0.0,
             home_prob_move=0.04 if movement_direction == "toward_model" else -0.06,
@@ -538,6 +540,85 @@ class RouteAndAdminTests(unittest.TestCase):
             home_ml=-130,
         )
         self.db.add(edge)
+        self.db.commit()
+
+    def _totals_review_game(
+        self,
+        game_id: int,
+        *,
+        model_total: float,
+        book_total: float,
+        final_total: int,
+        play: str,
+        bet_result: str,
+        pregame_total: float | None = None,
+    ) -> None:
+        game = self._game(game_id, date(2026, 5, 1))
+        game.final_away_score = final_total // 2
+        game.final_home_score = final_total - game.final_away_score
+        prediction = self._prediction(game.game_id)
+        prediction.projected_total = model_total
+        odds = self._odds(game.game_id)
+        odds.total_line = book_total
+        odds.over_odds = -110
+        odds.under_odds = -110
+        movement = LineMovement(
+            game_id=game.game_id,
+            sportsbook="consensus",
+            calculated_at=datetime.now(timezone.utc),
+            open_total=book_total,
+            pregame_total=pregame_total if pregame_total is not None else book_total,
+            total_move=(pregame_total - book_total) if pregame_total is not None else 0,
+            total_steam_over=False,
+            total_steam_under=False,
+        )
+        self.db.add(movement)
+        self.db.commit()
+        self.db.refresh(movement)
+        edge = EdgeResult(
+            game_id=game.game_id,
+            prediction_id=prediction.prediction_id,
+            odds_id=odds.id,
+            movement_id=movement.id,
+            run_stage="daily_open",
+            is_active=True,
+            calculated_at=datetime.now(timezone.utc),
+            model_total=model_total,
+            book_total=book_total,
+            total_edge=model_total - book_total,
+            ev_over=-0.02 if play == "under" else 0.08,
+            ev_under=0.08 if play == "under" else -0.02,
+            recommended_play=play,
+            confidence_tier="strong",
+            edge_pct=abs(model_total - book_total) / 10,
+            sportsbook="draftkings",
+            over_odds=-110,
+            under_odds=-110,
+        )
+        self.db.add(edge)
+        self.db.commit()
+        self.db.refresh(edge)
+        review = GameOutcomeReview(
+            game_id=game.game_id,
+            prediction_id=prediction.prediction_id,
+            edge_result_id=edge.id,
+            game_date=game.game_date,
+            actual_outcome_summary="Final",
+            recommended_play=play,
+            confidence_tier="strong",
+            model_total=model_total,
+            book_total=book_total,
+            edge_pct=edge.edge_pct,
+            ev=0.08,
+            movement_direction="toward_model",
+            final_away_score=game.final_away_score,
+            final_home_score=game.final_home_score,
+            winning_side="home",
+            bet_result=bet_result,
+            was_model_correct=True,
+            total_correct=bet_result == "win",
+        )
+        self.db.add(review)
         self.db.commit()
 
     def test_decision_pipeline_counts_surviving_play(self) -> None:
@@ -590,6 +671,32 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertIn("/api/debug/edge-persistence", paths)
         self.assertIn("/api/debug/edge-db-state", paths)
         self.assertIn("/api/debug/rebuild-edge-results", paths)
+        self.assertIn("/api/debug/totals-bias", paths)
+
+    def test_totals_bias_report_flags_supported_under_edge(self) -> None:
+        self._totals_review_game(104, model_total=7.0, book_total=9.0, final_total=6, play="under", bet_result="win", pregame_total=8.5)
+        self._totals_review_game(105, model_total=7.4, book_total=8.5, final_total=7, play="under", bet_result="win", pregame_total=8.0)
+        self._totals_review_game(106, model_total=8.2, book_total=9.0, final_total=11, play="under", bet_result="loss", pregame_total=9.0)
+
+        report = build_totals_bias_report(self.db, min_sample=1)
+
+        self.assertEqual(report["summary"]["under_edge_count"], 3)
+        self.assertEqual(report["summary"]["over_edge_count"], 0)
+        self.assertEqual(report["summary"]["realized_under_winrate"], 0.6667)
+        self.assertGreater(report["recommended_totals_roi_by_direction"]["under"]["roi_per_bet"], 0)
+        self.assertEqual(report["summary"]["conclusion"], "under_edge_has_historical_support")
+
+    def test_totals_bias_report_flags_low_totals_bias_when_unders_fail(self) -> None:
+        self._totals_review_game(107, model_total=7.0, book_total=9.0, final_total=10, play="under", bet_result="loss")
+        self._totals_review_game(108, model_total=7.5, book_total=8.5, final_total=11, play="under", bet_result="loss")
+        self._totals_review_game(109, model_total=8.0, book_total=9.5, final_total=7, play="under", bet_result="win")
+
+        report = build_totals_bias_report(self.db, min_sample=1)
+
+        self.assertEqual(report["summary"]["under_edge_count"], 3)
+        self.assertEqual(report["summary"]["realized_under_winrate"], 0.3333)
+        self.assertLess(report["recommended_totals_roi_by_direction"]["under"]["roi_per_bet"], 0)
+        self.assertEqual(report["summary"]["conclusion"], "totals_model_biased_low")
 
     def test_raw_edge_board_returns_all_games(self) -> None:
         self._game(97)

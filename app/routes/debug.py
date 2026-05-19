@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -14,7 +14,7 @@ from app.db import get_db
 from app.config import DEBUG
 from app.middleware.auth import verify_api_key
 from app.middleware.limiter import limiter
-from app.models.schema import EdgeResult, Game, GameOdds, Prediction, SnapshotType
+from app.models.schema import EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, Prediction, SnapshotType
 from app.scheduler import scheduler
 from app.services.betting_policy import get_betting_profile, qualifies_for_bet_policy
 from app.services.edge_service import (
@@ -23,7 +23,7 @@ from app.services.edge_service import (
     get_edge_persistence_failures,
     validate_active_edge_lineage,
 )
-from app.services.ev_math import calc_edge, implied_prob_raw, remove_vig
+from app.services.ev_math import american_to_decimal, calc_edge, implied_prob_raw, remove_vig
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
 from app.services.odds_service import odds_freshness_metadata
 
@@ -67,6 +67,290 @@ def debug_routes(request: Request):
             "methods": sorted(getattr(route, "methods", []) or []),
         })
     return {"count": len(routes), "routes": sorted(routes, key=lambda row: row["path"])}
+
+
+def _graded_total_result(direction: str, actual_total: float, market_total: float) -> str:
+    if actual_total == market_total:
+        return "push"
+    if direction == "under":
+        return "win" if actual_total < market_total else "loss"
+    if direction == "over":
+        return "win" if actual_total > market_total else "loss"
+    return "push"
+
+
+def _profit_for_result(result: str, odds_american: int | None = None) -> float:
+    result = (result or "").lower()
+    if result == "push":
+        return 0.0
+    if result == "loss":
+        return -1.0
+    if result != "win":
+        return 0.0
+    if odds_american is None:
+        return 100 / 110
+    return american_to_decimal(int(odds_american)) - 1.0
+
+
+def _total_play_odds(play: str, edge: EdgeResult | None, odds: GameOdds | None) -> int | None:
+    if play == "over":
+        return edge.over_odds if edge and edge.over_odds is not None else (odds.over_odds if odds else None)
+    if play == "under":
+        return edge.under_odds if edge and edge.under_odds is not None else (odds.under_odds if odds else None)
+    return None
+
+
+def _closing_total_for_edge(
+    db: Session,
+    *,
+    review: GameOutcomeReview,
+    edge: EdgeResult | None,
+    odds: GameOdds | None,
+    movement: LineMovement | None,
+) -> float | None:
+    if movement and movement.pregame_total is not None:
+        return float(movement.pregame_total)
+
+    sportsbook = edge.sportsbook if edge and edge.sportsbook else (odds.sportsbook if odds else None)
+    query = db.query(GameOdds).filter(
+        GameOdds.game_id == review.game_id,
+        GameOdds.snapshot_type == SnapshotType.pregame,
+        GameOdds.total_line.isnot(None),
+    )
+    if sportsbook:
+        same_book = (
+            query.filter(GameOdds.sportsbook == sportsbook)
+            .order_by(GameOdds.fetched_at.desc(), GameOdds.id.desc())
+            .first()
+        )
+        if same_book:
+            return float(same_book.total_line)
+    close = query.order_by(GameOdds.fetched_at.desc(), GameOdds.id.desc()).first()
+    return float(close.total_line) if close and close.total_line is not None else None
+
+
+def _totals_segment_stats(rows: list[dict]) -> dict:
+    wins = sum(1 for row in rows if row["result"] == "win")
+    losses = sum(1 for row in rows if row["result"] == "loss")
+    pushes = sum(1 for row in rows if row["result"] == "push")
+    decisions = wins + losses
+    profit_units = round(sum(row["profit_units"] for row in rows), 4)
+    clv_rows = [row for row in rows if row.get("line_clv") is not None]
+    deltas = [row["projected_total_minus_market"] for row in rows if row.get("projected_total_minus_market") is not None]
+    actual_deltas = [row["actual_total_minus_market"] for row in rows if row.get("actual_total_minus_market") is not None]
+    return {
+        "count": len(rows),
+        "wins": wins,
+        "losses": losses,
+        "pushes": pushes,
+        "win_rate": round(wins / decisions, 4) if decisions else None,
+        "profit_units": profit_units,
+        "roi_per_bet": round(profit_units / len(rows), 4) if rows else 0.0,
+        "avg_projected_total_minus_market": round(sum(deltas) / len(deltas), 3) if deltas else None,
+        "avg_actual_total_minus_market": round(sum(actual_deltas) / len(actual_deltas), 3) if actual_deltas else None,
+        "avg_line_clv": round(sum(row["line_clv"] for row in clv_rows) / len(clv_rows), 3) if clv_rows else None,
+        "beat_close_rate": round(sum(1 for row in clv_rows if row["line_clv"] > 0) / len(clv_rows), 4) if clv_rows else None,
+    }
+
+
+def _distribution(values: list[float]) -> dict:
+    if not values:
+        return {"count": 0, "avg": None, "min": None, "p25": None, "median": None, "p75": None, "max": None}
+    ordered = sorted(values)
+
+    def pick(percentile: float) -> float:
+        idx = round((len(ordered) - 1) * percentile)
+        return round(ordered[idx], 3)
+
+    return {
+        "count": len(ordered),
+        "avg": round(sum(ordered) / len(ordered), 3),
+        "min": round(ordered[0], 3),
+        "p25": pick(0.25),
+        "median": pick(0.5),
+        "p75": pick(0.75),
+        "max": round(ordered[-1], 3),
+    }
+
+
+def _delta_bucket(delta: float) -> str:
+    if delta <= -2.0:
+        return "model_2plus_runs_lower"
+    if delta <= -1.0:
+        return "model_1_to_2_runs_lower"
+    if delta < -0.25:
+        return "model_0_25_to_1_run_lower"
+    if delta <= 0.25:
+        return "near_market"
+    if delta < 1.0:
+        return "model_0_25_to_1_run_higher"
+    if delta < 2.0:
+        return "model_1_to_2_runs_higher"
+    return "model_2plus_runs_higher"
+
+
+def build_totals_bias_report(db: Session, *, min_sample: int = 5) -> dict:
+    rows = (
+        db.query(GameOutcomeReview, EdgeResult, GameOdds, LineMovement, Game)
+        .outerjoin(EdgeResult, EdgeResult.id == GameOutcomeReview.edge_result_id)
+        .outerjoin(GameOdds, GameOdds.id == EdgeResult.odds_id)
+        .outerjoin(LineMovement, LineMovement.id == EdgeResult.movement_id)
+        .outerjoin(Game, Game.game_id == GameOutcomeReview.game_id)
+        .filter(
+            GameOutcomeReview.model_total.isnot(None),
+            GameOutcomeReview.book_total.isnot(None),
+            GameOutcomeReview.final_away_score.isnot(None),
+            GameOutcomeReview.final_home_score.isnot(None),
+        )
+        .order_by(GameOutcomeReview.game_date.desc(), GameOutcomeReview.id.desc())
+        .all()
+    )
+
+    model_direction_rows: list[dict] = []
+    recommended_total_rows: list[dict] = []
+    by_model_direction: dict[str, list[dict]] = defaultdict(list)
+    by_recommended_direction: dict[str, list[dict]] = defaultdict(list)
+    by_delta_bucket: dict[str, list[dict]] = defaultdict(list)
+    samples: list[dict] = []
+
+    for review, edge, odds, movement, game in rows:
+        model_total = float(review.model_total)
+        market_total = float(review.book_total)
+        actual_total = float(review.final_away_score + review.final_home_score)
+        projected_minus_market = round(model_total - market_total, 3)
+        actual_minus_market = round(actual_total - market_total, 3)
+        if projected_minus_market < 0:
+            model_direction = "under"
+        elif projected_minus_market > 0:
+            model_direction = "over"
+        else:
+            model_direction = "neutral"
+
+        if model_direction in {"under", "over"}:
+            result = _graded_total_result(model_direction, actual_total, market_total)
+            close_total = _closing_total_for_edge(db, review=review, edge=edge, odds=odds, movement=movement)
+            line_clv = None
+            if close_total is not None:
+                line_clv = round(close_total - market_total, 3) if model_direction == "over" else round(market_total - close_total, 3)
+            row = {
+                "game_id": review.game_id,
+                "game_date": review.game_date.isoformat(),
+                "matchup": f"{game.away_team} @ {game.home_team}" if game else None,
+                "direction": model_direction,
+                "result": result,
+                "profit_units": _profit_for_result(result),
+                "model_total": model_total,
+                "market_total": market_total,
+                "actual_total": actual_total,
+                "projected_total_minus_market": projected_minus_market,
+                "actual_total_minus_market": actual_minus_market,
+                "line_clv": line_clv,
+                "recommended_play": review.recommended_play,
+                "bet_result": review.bet_result,
+            }
+            model_direction_rows.append(row)
+            by_model_direction[model_direction].append(row)
+            by_delta_bucket[_delta_bucket(projected_minus_market)].append(row)
+            if len(samples) < 10:
+                samples.append(row)
+
+        play = (review.recommended_play or "").lower()
+        if play in {"over", "under"} and (review.bet_result or "").lower() in {"win", "loss", "push"}:
+            close_total = _closing_total_for_edge(db, review=review, edge=edge, odds=odds, movement=movement)
+            line_clv = None
+            if close_total is not None:
+                line_clv = round(close_total - market_total, 3) if play == "over" else round(market_total - close_total, 3)
+            recommended = {
+                "game_id": review.game_id,
+                "game_date": review.game_date.isoformat(),
+                "matchup": f"{game.away_team} @ {game.home_team}" if game else None,
+                "direction": play,
+                "result": review.bet_result,
+                "profit_units": _profit_for_result(review.bet_result, _total_play_odds(play, edge, odds)),
+                "model_total": model_total,
+                "market_total": market_total,
+                "actual_total": actual_total,
+                "projected_total_minus_market": projected_minus_market,
+                "actual_total_minus_market": actual_minus_market,
+                "line_clv": line_clv,
+                "edge_pct": float(review.edge_pct or 0) if review.edge_pct is not None else None,
+                "ev": float(review.ev or 0) if review.ev is not None else None,
+            }
+            recommended_total_rows.append(recommended)
+            by_recommended_direction[play].append(recommended)
+
+    direction_stats = {
+        direction: _totals_segment_stats(items)
+        for direction, items in sorted(by_model_direction.items())
+    }
+    recommended_stats = {
+        direction: _totals_segment_stats(items)
+        for direction, items in sorted(by_recommended_direction.items())
+    }
+    bucket_stats = {
+        bucket: _totals_segment_stats(items)
+        for bucket, items in sorted(by_delta_bucket.items())
+        if len(items) >= min_sample
+    }
+    deltas = [row["projected_total_minus_market"] for row in model_direction_rows]
+    under_count = len(by_model_direction.get("under", []))
+    over_count = len(by_model_direction.get("over", []))
+    total_direction_count = under_count + over_count
+    under_stats = direction_stats.get("under", _totals_segment_stats([]))
+    recommended_under_stats = recommended_stats.get("under", _totals_segment_stats([]))
+    recommended_over_stats = recommended_stats.get("over", _totals_segment_stats([]))
+
+    indicators: list[str] = []
+    if total_direction_count and under_count / total_direction_count >= 0.65:
+        indicators.append("under_edges_dominate")
+    if under_stats["win_rate"] is not None and under_stats["win_rate"] >= 0.53:
+        indicators.append("under_direction_beating_market_total")
+    if under_stats["win_rate"] is not None and under_stats["win_rate"] < 0.5:
+        indicators.append("model_likely_too_low_on_totals")
+    if recommended_under_stats["roi_per_bet"] > 0:
+        indicators.append("recommended_unders_profitable")
+    if recommended_under_stats["roi_per_bet"] < 0 and recommended_under_stats["count"] >= min_sample:
+        indicators.append("recommended_unders_unprofitable")
+    if recommended_over_stats["count"] >= min_sample and recommended_over_stats["roi_per_bet"] > recommended_under_stats["roi_per_bet"]:
+        indicators.append("overs_outperform_recommended_unders")
+
+    conclusion = "insufficient_totals_history"
+    if "under_edges_dominate" in indicators and "under_direction_beating_market_total" in indicators and "recommended_unders_profitable" in indicators:
+        conclusion = "under_edge_has_historical_support"
+    elif "under_edges_dominate" in indicators and (
+        "model_likely_too_low_on_totals" in indicators or "recommended_unders_unprofitable" in indicators
+    ):
+        conclusion = "totals_model_biased_low"
+    elif total_direction_count >= min_sample:
+        conclusion = "mixed_totals_signal"
+
+    return {
+        "status": "ok",
+        "min_sample": min_sample,
+        "summary": {
+            "reviewed_games": len(rows),
+            "model_total_direction_games": len(model_direction_rows),
+            "under_edge_count": under_count,
+            "over_edge_count": over_count,
+            "under_edge_share": round(under_count / total_direction_count, 4) if total_direction_count else None,
+            "realized_under_winrate": under_stats["win_rate"],
+            "recommended_totals_bets": len(recommended_total_rows),
+            "recommended_under_roi": recommended_under_stats["roi_per_bet"],
+            "recommended_over_roi": recommended_over_stats["roi_per_bet"],
+            "projected_total_minus_market": _distribution(deltas),
+            "conclusion": conclusion,
+            "indicators": indicators,
+        },
+        "model_direction_results": direction_stats,
+        "recommended_totals_roi_by_direction": recommended_stats,
+        "projected_total_minus_market_buckets": bucket_stats,
+        "recent_samples": samples,
+    }
+
+
+@router.get("/totals-bias")
+def totals_bias(min_sample: int = Query(5, ge=1, le=100), db: Session = Depends(get_db)):
+    return build_totals_bias_report(db, min_sample=min_sample)
 
 
 def _stage_payload(filtered: list[dict]) -> dict:
