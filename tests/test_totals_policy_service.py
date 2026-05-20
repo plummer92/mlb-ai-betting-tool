@@ -112,18 +112,27 @@ class TotalsPolicyServiceTests(unittest.TestCase):
         self.db.refresh(edge)
         return edge, game, prediction, odds
 
-    def _respect(self, *, score: int = 80, line_clv: float | None = 0.5, rejected: bool = False) -> dict:
+    def _respect(
+        self,
+        *,
+        score: int = 80,
+        line_clv: float | None = 0.5,
+        rejected: bool = False,
+        movement_direction: str = "toward_model",
+        late_move: bool = False,
+        sharp_match: bool = True,
+    ) -> dict:
         return {
             "score": 25 if rejected else score,
             "tags": ["MARKET REJECTED"] if rejected else ["MARKET AGREED"],
             "components": {
                 "line_clv": line_clv,
                 "price_clv": None,
-                "movement_direction": "toward_model",
+                "movement_direction": movement_direction,
                 "line_move": 0.5,
-                "sharp_match": True,
+                "sharp_match": sharp_match,
                 "sharp_against": False,
-                "late_move": False,
+                "late_move": late_move,
                 "became_more_expensive": True,
             },
         }
@@ -151,6 +160,39 @@ class TotalsPolicyServiceTests(unittest.TestCase):
 
         self.assertEqual(policy["policy_status"], "APPROVED")
         self.assertGreaterEqual(policy["totals_policy_score"], 70)
+        self.assertTrue(policy["alert_allowed"])
+
+    def test_approved_total_without_clv_or_market_confirmation_cannot_alert(self) -> None:
+        edge, game, prediction, odds = self._edge_game(model_total=6.5, book_total=9.0)
+
+        policy = evaluate_totals_policy(
+            self.db,
+            edge=edge,
+            game=game,
+            prediction=prediction,
+            odds=odds,
+            market_respect=self._respect(score=88, line_clv=0.0, movement_direction="neutral", sharp_match=False),
+        )
+
+        self.assertEqual(policy["policy_status"], "APPROVED")
+        self.assertFalse(policy["alert_allowed"])
+        self.assertIn("alert_suppressed_without_clv_or_market_confirmation", policy["policy_reasons"])
+
+    def test_caution_total_is_research_only_not_alertable(self) -> None:
+        edge, game, prediction, odds = self._edge_game(model_total=6.5, book_total=9.0, wind_factor=0.35)
+
+        policy = evaluate_totals_policy(
+            self.db,
+            edge=edge,
+            game=game,
+            prediction=prediction,
+            odds=odds,
+            market_respect=self._respect(score=96, line_clv=0.0, late_move=True),
+        )
+
+        self.assertEqual(policy["policy_status"], "CAUTION")
+        self.assertTrue(policy["alert_confirmed"])
+        self.assertFalse(policy["alert_allowed"])
 
     def test_explosive_environment_blocks_under(self) -> None:
         edge, game, prediction, odds = self._edge_game(

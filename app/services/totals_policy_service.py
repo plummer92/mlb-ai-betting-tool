@@ -78,6 +78,27 @@ def _movement_persistence(play: str, market_respect: dict | None) -> tuple[int, 
     return int(_clamp(points, 0, 25)), reasons
 
 
+def _has_totals_alert_confirmation(
+    *,
+    clv_positive: bool,
+    market_respect: dict | None,
+) -> tuple[bool, list[str]]:
+    components = (market_respect or {}).get("components") or {}
+    tags = market_respect.get("tags", []) if market_respect else []
+    respect_score = int((market_respect or {}).get("score", 50))
+    direction = (components.get("movement_direction") or "").lower()
+    sharp_match = bool(components.get("sharp_match"))
+    late_move = bool(components.get("late_move"))
+
+    if clv_positive:
+        return True, ["alert_confirmed_by_positive_clv"]
+    if direction == "toward_model":
+        return True, ["alert_confirmed_by_line_move_toward_model"]
+    if respect_score >= 90 and late_move and (sharp_match or "LATE SHARP BUY" in tags):
+        return True, ["alert_confirmed_by_late_sharp_market_respect"]
+    return False, ["alert_suppressed_without_clv_or_market_confirmation"]
+
+
 def _historical_bucket_points(delta_abs: float, play: str) -> tuple[int, str]:
     # Seeded from /api/debug/totals-bias research. Keep deliberately modest:
     # this is a prior, not a guarantee.
@@ -290,7 +311,11 @@ def evaluate_totals_policy(
     elif explosive_penalty > 0 or edge_band == "weak":
         status = "CAUTION"
 
-    all_reasons = list(dict.fromkeys(gate_reasons + reasons))
+    alert_confirmed, alert_reasons = _has_totals_alert_confirmation(
+        clv_positive=clv_positive,
+        market_respect=market_respect,
+    )
+    all_reasons = list(dict.fromkeys(gate_reasons + reasons + alert_reasons))
     final_score = int(_clamp(score, 0, 100))
     if status == "BLOCKED":
         final_score = min(final_score, 39)
@@ -317,9 +342,10 @@ def evaluate_totals_policy(
         "delta": delta,
         "delta_abs": round(delta_abs, 3),
         "clv_positive": clv_positive,
+        "alert_confirmed": alert_confirmed,
         "explosive_environment_penalty": explosive_penalty,
         "components": components,
-        "alert_allowed": status in {"APPROVED", "CAUTION"},
+        "alert_allowed": status == "APPROVED" and alert_confirmed,
     }
 
 
@@ -360,7 +386,10 @@ def apply_under_cluster_risk(rows: list[dict], *, threshold: float = 0.70) -> di
             if policy.get("policy_status") == "APPROVED":
                 policy["policy_status"] = "CLUSTER_RISK"
             policy["policy_reason"] = _policy_reason(policy["policy_status"], reasons, new_score)
-            policy["alert_allowed"] = policy["policy_status"] in {"APPROVED", "CAUTION"}
+            policy["alert_allowed"] = (
+                policy["policy_status"] == "APPROVED"
+                and bool(policy.get("alert_confirmed"))
+            )
             row["totals_policy"] = policy
             row["totals_policy_score"] = new_score
             row["policy_status"] = policy["policy_status"]

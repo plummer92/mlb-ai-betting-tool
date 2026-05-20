@@ -367,8 +367,9 @@ def build_totals_policy_report(db: Session, *, min_sample: int = 5) -> dict:
         for reason in row.get("policy_reasons") or []:
             reason_counts[reason] += 1
     cluster = current[0].get("totals_cluster") if current else {"under_share": 0.0, "warning": None, "penalized": 0}
-    approved = [
-        {
+
+    def _policy_play_payload(row: dict) -> dict:
+        return {
             "rank": row.get("rank"),
             "game_id": row.get("game_id"),
             "matchup": row.get("matchup"),
@@ -379,9 +380,19 @@ def build_totals_policy_report(db: Session, *, min_sample: int = 5) -> dict:
             "policy_reason": row.get("policy_reason"),
             "market_respect_score": row.get("market_respect_score"),
             "market_respect_tags": row.get("market_respect_tags"),
+            "alert_allowed": row.get("totals_policy_alert_allowed"),
         }
+
+    actionable = [
+        _policy_play_payload(row)
         for row in totals
-        if row.get("policy_status") in {"APPROVED", "CAUTION", "CLUSTER_RISK"}
+        if row.get("policy_status") == "APPROVED"
+        and row.get("totals_policy_alert_allowed")
+    ]
+    watchlist = [
+        _policy_play_payload(row)
+        for row in totals
+        if row.get("policy_status") in {"CAUTION", "CLUSTER_RISK"}
     ]
     blocked = [
         {
@@ -407,7 +418,9 @@ def build_totals_policy_report(db: Session, *, min_sample: int = 5) -> dict:
             "cluster": cluster,
             "blocked_counts": {status: len(rows) for status, rows in sorted(by_status.items())},
             "filter_reasons": [{"reason": reason, "count": count} for reason, count in reason_counts.most_common(10)],
-            "approved_plays": approved[:15],
+            "actionable_plays": actionable[:15],
+            "watchlist_plays": watchlist[:15],
+            "actionable_or_watchlist": (actionable + watchlist)[:15],
             "sample_blocked_plays": blocked,
         },
         "backtest": totals_policy_backtest(db, min_sample=min_sample),

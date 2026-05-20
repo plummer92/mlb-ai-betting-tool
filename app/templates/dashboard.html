@@ -1326,7 +1326,14 @@ async function loadTotalsRegime() {
     const filtered = backtest.totals_policy_filtered || {};
     const cluster = board.cluster || {};
     $('totals-regime-badge').textContent = cluster.warning || `${board.totals_plays || 0} TOTALS`;
-    const approved = board.approved_plays || [];
+    const actionable = board.actionable_plays || [];
+    const watchlist = board.watchlist_plays || [];
+    const blocked = board.sample_blocked_plays || [];
+    const displayRows = [
+      ...actionable.map(p => ({...p, queue_label: 'FIRE', queue_sub: 'actionable'})),
+      ...watchlist.map(p => ({...p, queue_label: 'WATCH', queue_sub: 'research only'})),
+      ...blocked.slice(0, Math.max(0, 8 - actionable.length - watchlist.length)).map(p => ({...p, queue_label: 'BLOCKED', queue_sub: 'no bet'})),
+    ];
     $('totals-regime-panel').innerHTML = `
       <div class="today-read" style="margin-bottom:12px;">
         <div class="read-tile">
@@ -1335,7 +1342,7 @@ async function loadTotalsRegime() {
           <div class="read-sub">${cluster.warning ? esc(cluster.warning) : 'No cluster warning'} · ${(cluster.under_share != null ? (cluster.under_share * 100).toFixed(0) : '0')}% under</div>
         </div>
         <div class="read-tile">
-          <div class="read-label">Policy Filtered ROI</div>
+          <div class="read-label">Watchlist ROI</div>
           <div class="read-main ${(filtered.roi || 0) >= 0 ? 'green' : 'red'}">${filtered.roi != null ? (filtered.roi * 100).toFixed(1) + '%' : '---'}</div>
           <div class="read-sub">Raw totals ROI ${raw.roi != null ? (raw.roi * 100).toFixed(1) + '%' : '---'}</div>
         </div>
@@ -1353,17 +1360,21 @@ async function loadTotalsRegime() {
       <div class="card" style="padding:0;">
         <div class="tbl-wrap">
           <table>
-            <thead><tr><th>Game</th><th>Play</th><th>Policy</th><th>Score</th><th>Market</th><th>Reason</th></tr></thead>
+            <thead><tr><th>Queue</th><th>Game</th><th>Play</th><th>Policy</th><th>Score</th><th>Market</th><th>Reason</th></tr></thead>
             <tbody>
-              ${approved.length ? approved.slice(0, 8).map(p => `
+              ${displayRows.length ? displayRows.slice(0, 8).map(p => `
                 <tr>
+                  <td>
+                    ${decisionStatusChip(p.queue_label)}
+                    <div style="margin-top:3px;font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.7px;">${esc(p.queue_sub)}</div>
+                  </td>
                   <td style="font-weight:600;white-space:nowrap">${esc(p.matchup || '---')}</td>
                   <td class="mono">${esc((p.play || '---').toUpperCase())}</td>
                   <td>${policyStatusChip(p.policy_status)}</td>
                   <td class="mono">${p.totals_policy_score ?? '---'}</td>
                   <td>${marketRespectChip({score: p.market_respect_score, tags: p.market_respect_tags || []})}</td>
                   <td style="min-width:300px;font-size:11px;color:var(--muted);line-height:1.45">${esc(p.policy_reason || '')}</td>
-                </tr>`).join('') : '<tr><td colspan="6"><div class="empty compact">No totals policy-approved plays right now.</div></td></tr>'}
+                </tr>`).join('') : '<tr><td colspan="7"><div class="empty compact">No totals policy rows right now.</div></td></tr>'}
             </tbody>
           </table>
         </div>
