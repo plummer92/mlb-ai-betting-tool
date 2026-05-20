@@ -181,6 +181,7 @@ def market_respect_for_edge(
     odds: GameOdds | None = None,
     movement: LineMovement | None = None,
     game: Game | None = None,
+    evaluate_freshness: bool = True,
 ) -> dict:
     """Score whether the market respected our side from open to close.
 
@@ -188,7 +189,16 @@ def market_respect_for_edge(
     so it can be used before we decide whether to persist a frozen audit value.
     """
     if edge is None:
-        return MarketRespect(50, ["STALE OPEN"], {"reason": "missing_edge"}).as_dict()
+        return MarketRespect(
+            50,
+            ["MARKET NEUTRAL"],
+            {
+                "reason": "missing_edge",
+                "freshness_status": "missing_edge",
+                "freshness_reason": "missing edge result",
+                "minutes_since_update": None,
+            },
+        ).as_dict()
 
     play = (edge.recommended_play or "").lower()
     movement = movement or _movement_for_edge(db, edge)
@@ -196,7 +206,15 @@ def market_respect_for_edge(
     odds = odds or _odds_for_edge(db, edge)
     open_odds = _open_odds(db, edge, odds)
     close_odds = _close_odds(db, edge, odds)
-    freshness = odds_freshness_metadata(db, game=game, odds_row=odds)
+    freshness = (
+        odds_freshness_metadata(db, game=game, odds_row=odds)
+        if evaluate_freshness
+        else {
+            "status": "historical_review",
+            "reason": "freshness ignored for historical market-respect audit",
+            "minutes_since_update": None,
+        }
+    )
 
     direction = (edge.movement_direction or "none").lower()
     clv = _edge_clv(edge, play, odds, close_odds)

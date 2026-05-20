@@ -1816,6 +1816,8 @@ async function loadMarketAudit() {
     const movementRows = movement.by_play_movement_bucket || [];
     const respectRows = movement.by_market_respect_tag || [];
     const weighting = movement.market_respect_weighting_backtest || {};
+    const v2Backtest = movement.market_respect_v2_backtest || {};
+    const signalRows = movement.by_tradable_signal || [];
     const metrics = movement.new_metrics || {};
 
     const beatRate = clvSummary.beat_close_rate != null ? (clvSummary.beat_close_rate * 100).toFixed(1) + '%' : '---';
@@ -1912,6 +1914,37 @@ async function loadMarketAudit() {
         </tr>`;
       }).join('');
 
+    const v2Rows = [
+      ['Model Only', v2Backtest.model_only],
+      ['Market Respect Only', v2Backtest.market_respect_only],
+      ['Model + Market Respect', v2Backtest.model_plus_market_respect],
+      ['Totals Policy + Market Respect', v2Backtest.totals_policy_plus_market_respect],
+    ].map(([label, row]) => {
+      row = row || {};
+      const wr = row.win_rate != null ? (row.win_rate * 100).toFixed(1) + '%' : '---';
+      return `<tr>
+        <td>${esc(label)}</td>
+        <td class="mono">${row.bets ?? 0}</td>
+        <td class="mono ${row.roi_per_bet > 0 ? 'green' : row.roi_per_bet < 0 ? 'red' : 'muted'}">${fmt(row.roi_per_bet, 3)}</td>
+        <td class="mono">${wr}</td>
+      </tr>`;
+    }).join('');
+
+    const signalBacktest = [...signalRows]
+      .sort((a, b) => {
+        const order = { TRADE: 0, WATCH: 1, PASS: 2 };
+        return (order[a.tradable_signal] ?? 9) - (order[b.tradable_signal] ?? 9);
+      })
+      .map(row => {
+        const wr = row.win_rate != null ? (row.win_rate * 100).toFixed(1) + '%' : '---';
+        return `<tr>
+          <td class="mono">${esc(row.tradable_signal || '---')}</td>
+          <td class="mono">${row.bets ?? 0}</td>
+          <td class="mono ${row.roi_per_bet > 0 ? 'green' : row.roi_per_bet < 0 ? 'red' : 'muted'}">${fmt(row.roi_per_bet, 3)}</td>
+          <td class="mono">${wr}</td>
+        </tr>`;
+      }).join('');
+
     $('market-audit-table').innerHTML = `
       <table>
         <thead><tr>
@@ -1936,6 +1969,22 @@ async function loadMarketAudit() {
           <th>Tag</th><th>Bets</th><th>ROI / Bet</th><th>Win Rate</th>
         </tr></thead>
         <tbody>${respectBacktest || '<tr><td colspan="4" class="empty">No market respect rows yet.</td></tr>'}</tbody>
+      </table>
+      <table style="margin-top:14px;">
+        <thead><tr>
+          <th colspan="4">Market Respect V2 Backtest</th>
+        </tr><tr>
+          <th>Policy</th><th>Bets</th><th>ROI / Bet</th><th>Win Rate</th>
+        </tr></thead>
+        <tbody>${v2Rows || '<tr><td colspan="4" class="empty">No V2 rows yet.</td></tr>'}</tbody>
+      </table>
+      <table style="margin-top:14px;">
+        <thead><tr>
+          <th colspan="4">Tradable Signals</th>
+        </tr><tr>
+          <th>Signal</th><th>Bets</th><th>ROI / Bet</th><th>Win Rate</th>
+        </tr></thead>
+        <tbody>${signalBacktest || '<tr><td colspan="4" class="empty">No signal rows yet.</td></tr>'}</tbody>
       </table>`;
   } catch(e) {
     $('market-audit-summary').innerHTML = '';

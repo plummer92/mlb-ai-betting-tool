@@ -4,10 +4,11 @@ from collections import defaultdict
 
 from sqlalchemy.orm import Session
 
-from app.models.schema import EdgeResult, GameOdds, GameOutcomeReview, LineMovement, PaperTrade, SnapshotType
+from app.models.schema import EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, PaperTrade, SnapshotType
 from app.services.ev_math import american_to_decimal, implied_prob_raw
 from app.services.market_respect_service import market_respect_adjustment, market_respect_bucket, market_respect_for_edge
 from app.services.paper_trade_service import DEFAULT_PAPER_STAKE
+from app.services.totals_policy_service import evaluate_totals_policy
 
 
 FINAL_SNAPSHOT = SnapshotType.pregame
@@ -233,19 +234,87 @@ def _safe_delta(after: float | None, before: float | None) -> float | None:
     return round(after - before, 4)
 
 
+def _has_positive_clv(row: dict) -> bool:
+    components = row.get("market_respect_components") or {}
+    return (components.get("price_clv") or 0) > 0 or (components.get("line_clv") or 0) > 0
+
+
+def _is_stale_market(row: dict) -> bool:
+    tags = row.get("market_respect_tags") or []
+    freshness_status = ((row.get("market_respect_components") or {}).get("freshness_status") or "").lower()
+    return "STALE OPEN" in tags or freshness_status in {"stale_open", "stale_feed"}
+
+
+def _is_market_agreed(row: dict) -> bool:
+    tags = row.get("market_respect_tags") or []
+    bucket = row.get("market_respect_bucket")
+    return bucket in {"strong_market_agreement", "market_agreement"} or "MARKET AGREED" in tags
+
+
+def _is_market_rejected(row: dict) -> bool:
+    tags = row.get("market_respect_tags") or []
+    return row.get("market_respect_bucket") == "market_rejection" or "MARKET REJECTED" in tags
+
+
+def _is_market_neutral(row: dict) -> bool:
+    tags = row.get("market_respect_tags") or []
+    return not _is_market_agreed(row) and not _is_market_rejected(row) and "MARKET NEUTRAL" in tags
+
+
+def _has_strong_model(row: dict) -> bool:
+    confidence = (row.get("adjusted_confidence") or "").lower()
+    return confidence == "strong" or abs(float(row.get("raw_edge_pct") or 0)) >= 0.08 or float(row.get("raw_ev") or 0) >= 0.08
+
+
+def _tradable_signal(row: dict) -> tuple[str, str]:
+    if _is_stale_market(row):
+        return "PASS", "stale market context"
+    if _is_market_rejected(row):
+        return "PASS", "market rejected model side"
+
+    positive_ev = float(row.get("adjusted_ev") or 0) > 0
+    positive_clv = _has_positive_clv(row)
+    if _is_market_agreed(row) and positive_ev and positive_clv:
+        return "TRADE", "market agreed with positive CLV and adjusted EV"
+
+    if _is_market_neutral(row) and _has_strong_model(row) and positive_ev:
+        reason = "market neutral with strong model"
+        if not positive_clv:
+            reason += "; no positive CLV, research only"
+        return "WATCH", reason
+
+    if not positive_clv:
+        return "PASS", "no positive CLV"
+    if not positive_ev:
+        return "PASS", "adjusted EV is not positive"
+    return "PASS", "market confirmation insufficient"
+
+
 def get_movement_backtest_report(db: Session, *, min_sample: int = 3) -> dict:
     rows = (
-        db.query(GameOutcomeReview, EdgeResult, GameOdds, LineMovement)
+        db.query(GameOutcomeReview, EdgeResult, GameOdds, LineMovement, Game)
         .outerjoin(EdgeResult, EdgeResult.id == GameOutcomeReview.edge_result_id)
         .outerjoin(GameOdds, GameOdds.id == EdgeResult.odds_id)
         .outerjoin(LineMovement, LineMovement.id == EdgeResult.movement_id)
+        .outerjoin(Game, Game.game_id == GameOutcomeReview.game_id)
         .filter(GameOutcomeReview.bet_result.in_(["win", "loss", "push"]))
         .all()
     )
 
     normalized = []
-    for review, edge, odds, movement in rows:
-        respect = market_respect_for_edge(db, edge, odds=odds, movement=movement) if edge else None
+    for review, edge, odds, movement, game in rows:
+        respect = (
+            market_respect_for_edge(
+                db,
+                edge,
+                odds=odds,
+                movement=movement,
+                game=game,
+                evaluate_freshness=False,
+            )
+            if edge
+            else None
+        )
         adjustment = market_respect_adjustment(
             edge_pct=float(edge.edge_pct or 0) if edge else review.edge_pct,
             ev=_edge_ev(edge, review),
@@ -253,32 +322,40 @@ def get_movement_backtest_report(db: Session, *, min_sample: int = 3) -> dict:
             market_respect=respect,
             odds_american=_play_odds(edge, odds, review),
         ) if respect else None
-        normalized.append(
-            {
-                "play": (review.recommended_play or "none").lower(),
-                "movement_direction": (review.movement_direction or "none").lower(),
-                "movement_bucket": _movement_bucket(movement),
-                "market_respect_score": respect["score"] if respect else None,
-                "market_respect_bucket": market_respect_bucket(respect["score"] if respect else None),
-                "market_respect_tags": respect["tags"] if respect else [],
-                "market_respect_components": respect.get("components", {}) if respect else {},
-                "raw_edge_pct": adjustment["raw_edge_pct"] if adjustment else float(review.edge_pct or 0),
-                "adjusted_edge_pct": adjustment["adjusted_edge_pct"] if adjustment else float(review.edge_pct or 0),
-                "raw_ev": adjustment["raw_ev"] if adjustment else 0.0,
-                "adjusted_ev": adjustment["adjusted_ev"] if adjustment else 0.0,
-                "adjusted_confidence": adjustment["adjusted_confidence"] if adjustment else None,
-                "adjusted_kelly_fraction": adjustment["adjusted_kelly_fraction"] if adjustment else 0.0,
-                "market_respect_adjustment": adjustment,
-                "after_market_respect_gate": bool(
-                    adjustment
-                    and adjustment["alert_allowed"]
-                    and adjustment["adjusted_edge_pct"] > 0
-                    and adjustment["adjusted_ev"] > 0
-                ),
-                "bet_result": review.bet_result,
-                "profit_units": _profit_units(review, odds),
-            }
+        totals_policy = (
+            evaluate_totals_policy(db, edge=edge, game=game, odds=odds, market_respect=respect)
+            if edge and (edge.recommended_play or "").lower() in {"over", "under"}
+            else None
         )
+        row = {
+            "play": (review.recommended_play or "none").lower(),
+            "movement_direction": (review.movement_direction or "none").lower(),
+            "movement_bucket": _movement_bucket(movement),
+            "market_respect_score": respect["score"] if respect else None,
+            "market_respect_bucket": market_respect_bucket(respect["score"] if respect else None),
+            "market_respect_tags": respect["tags"] if respect else [],
+            "market_respect_components": respect.get("components", {}) if respect else {},
+            "raw_edge_pct": adjustment["raw_edge_pct"] if adjustment else float(review.edge_pct or 0),
+            "adjusted_edge_pct": adjustment["adjusted_edge_pct"] if adjustment else float(review.edge_pct or 0),
+            "raw_ev": adjustment["raw_ev"] if adjustment else 0.0,
+            "adjusted_ev": adjustment["adjusted_ev"] if adjustment else 0.0,
+            "adjusted_confidence": adjustment["adjusted_confidence"] if adjustment else None,
+            "adjusted_kelly_fraction": adjustment["adjusted_kelly_fraction"] if adjustment else 0.0,
+            "market_respect_adjustment": adjustment,
+            "totals_policy_score": totals_policy.get("totals_policy_score") if totals_policy else None,
+            "totals_policy_status": totals_policy.get("policy_status") if totals_policy else None,
+            "totals_policy_alert_allowed": bool(totals_policy and totals_policy.get("alert_allowed")),
+            "after_market_respect_gate": bool(
+                adjustment
+                and adjustment["alert_allowed"]
+                and adjustment["adjusted_edge_pct"] > 0
+                and adjustment["adjusted_ev"] > 0
+            ),
+            "bet_result": review.bet_result,
+            "profit_units": _profit_units(review, odds),
+        }
+        row["tradable_signal"], row["tradable_reason"] = _tradable_signal(row)
+        normalized.append(row)
 
     by_direction: dict[str, list[dict]] = defaultdict(list)
     by_bucket: dict[str, list[dict]] = defaultdict(list)
@@ -286,12 +363,14 @@ def get_movement_backtest_report(db: Session, *, min_sample: int = 3) -> dict:
     by_play_bucket: dict[tuple[str, str], list[dict]] = defaultdict(list)
     by_respect_bucket: dict[str, list[dict]] = defaultdict(list)
     by_respect_tag: dict[str, list[dict]] = defaultdict(list)
+    by_tradable_signal: dict[str, list[dict]] = defaultdict(list)
     for row in normalized:
         by_direction[row["movement_direction"]].append(row)
         by_bucket[row["movement_bucket"]].append(row)
         by_play_direction[(row["play"], row["movement_direction"])].append(row)
         by_play_bucket[(row["play"], row["movement_bucket"])].append(row)
         by_respect_bucket[row["market_respect_bucket"]].append(row)
+        by_tradable_signal[row["tradable_signal"]].append(row)
         for tag in row["market_respect_tags"] or ["UNTAGGED"]:
             by_respect_tag[tag].append(row)
 
@@ -320,6 +399,15 @@ def get_movement_backtest_report(db: Session, *, min_sample: int = 3) -> dict:
     sharp_follow_rows = [
         row for row in normalized
         if row["market_respect_components"].get("sharp_match")
+    ]
+    trade_rows = [row for row in normalized if row["tradable_signal"] == "TRADE"]
+    market_respect_only_rows = [
+        row for row in normalized
+        if _is_market_agreed(row) and not _is_stale_market(row) and float(row.get("adjusted_ev") or 0) > 0
+    ]
+    totals_policy_market_rows = [
+        row for row in trade_rows
+        if row["play"] in {"over", "under"} and row["totals_policy_alert_allowed"]
     ]
     rejected_decisions = sum(1 for row in rejected_rows if row["bet_result"] in {"win", "loss"})
     rejected_losses = sum(1 for row in rejected_rows if row["bet_result"] == "loss")
@@ -360,11 +448,18 @@ def get_movement_backtest_report(db: Session, *, min_sample: int = 3) -> dict:
             "clv_adjusted_roi": _segment_stats(positive_clv_rows)["roi_per_bet"],
             "sharp_follow_accuracy": _segment_stats(sharp_follow_rows)["win_rate"],
         },
+        "market_respect_v2_backtest": {
+            "model_only": before_stats,
+            "market_respect_only": _segment_stats(market_respect_only_rows),
+            "model_plus_market_respect": _segment_stats(trade_rows),
+            "totals_policy_plus_market_respect": _segment_stats(totals_policy_market_rows),
+        },
         "by_movement_direction": rows_for(by_direction, ("movement_direction",)),
         "by_movement_bucket": rows_for(by_bucket, ("movement_bucket",)),
         "by_play_movement_direction": rows_for(by_play_direction, ("play", "movement_direction")),
         "by_play_movement_bucket": rows_for(by_play_bucket, ("play", "movement_bucket")),
         "by_market_respect_bucket": rows_for(by_respect_bucket, ("market_respect_bucket",)),
         "by_market_respect_tag": rows_for(by_respect_tag, ("market_respect_tag",)),
+        "by_tradable_signal": rows_for(by_tradable_signal, ("tradable_signal",)),
         "min_sample": min_sample,
     }

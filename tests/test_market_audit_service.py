@@ -225,9 +225,18 @@ class MarketAuditServiceTests(unittest.TestCase):
         self.assertEqual(report["by_movement_direction"][0]["movement_direction"], "toward_model")
         self.assertEqual(report["by_movement_bucket"][0]["movement_bucket"], "ml_steam")
         self.assertEqual(report["by_market_respect_tag"][0]["market_respect_tag"], "MARKET AGREED")
+        self.assertNotIn(
+            "STALE OPEN",
+            [row["market_respect_tag"] for row in report["by_market_respect_tag"]],
+        )
         self.assertIn("market_respect_weighting_backtest", report)
         self.assertIn("new_metrics", report)
+        self.assertIn("market_respect_v2_backtest", report)
+        self.assertEqual(report["by_tradable_signal"][0]["tradable_signal"], "TRADE")
         self.assertEqual(report["market_respect_weighting_backtest"]["after"]["bets"], 1)
+        self.assertEqual(report["market_respect_v2_backtest"]["model_only"]["bets"], 1)
+        self.assertEqual(report["market_respect_v2_backtest"]["market_respect_only"]["bets"], 1)
+        self.assertEqual(report["market_respect_v2_backtest"]["model_plus_market_respect"]["bets"], 1)
 
     def test_market_respect_scores_late_sharp_buy(self) -> None:
         game, _prediction, _entry_odds, edge, _alert = self._base_rows(game_id=3)
