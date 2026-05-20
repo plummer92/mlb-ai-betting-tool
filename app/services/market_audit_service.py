@@ -6,7 +6,13 @@ from sqlalchemy.orm import Session
 
 from app.models.schema import EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, PaperTrade, SnapshotType
 from app.services.ev_math import american_to_decimal, implied_prob_raw
-from app.services.market_respect_service import market_respect_adjustment, market_respect_bucket, market_respect_for_edge
+from app.services.market_respect_service import (
+    classify_tradable_signal,
+    has_positive_market_clv,
+    market_respect_adjustment,
+    market_respect_bucket,
+    market_respect_for_edge,
+)
 from app.services.paper_trade_service import DEFAULT_PAPER_STAKE
 from app.services.totals_policy_service import evaluate_totals_policy
 
@@ -235,8 +241,7 @@ def _safe_delta(after: float | None, before: float | None) -> float | None:
 
 
 def _has_positive_clv(row: dict) -> bool:
-    components = row.get("market_respect_components") or {}
-    return (components.get("price_clv") or 0) > 0 or (components.get("line_clv") or 0) > 0
+    return has_positive_market_clv({"components": row.get("market_respect_components") or {}})
 
 
 def _is_stale_market(row: dict) -> bool:
@@ -267,27 +272,18 @@ def _has_strong_model(row: dict) -> bool:
 
 
 def _tradable_signal(row: dict) -> tuple[str, str]:
-    if _is_stale_market(row):
-        return "PASS", "stale market context"
-    if _is_market_rejected(row):
-        return "PASS", "market rejected model side"
-
-    positive_ev = float(row.get("adjusted_ev") or 0) > 0
-    positive_clv = _has_positive_clv(row)
-    if _is_market_agreed(row) and positive_ev and positive_clv:
-        return "TRADE", "market agreed with positive CLV and adjusted EV"
-
-    if _is_market_neutral(row) and _has_strong_model(row) and positive_ev:
-        reason = "market neutral with strong model"
-        if not positive_clv:
-            reason += "; no positive CLV, research only"
-        return "WATCH", reason
-
-    if not positive_clv:
-        return "PASS", "no positive CLV"
-    if not positive_ev:
-        return "PASS", "adjusted EV is not positive"
-    return "PASS", "market confirmation insufficient"
+    signal = classify_tradable_signal(
+        market_respect={
+            "score": row.get("market_respect_score"),
+            "tags": row.get("market_respect_tags"),
+            "components": row.get("market_respect_components") or {},
+        },
+        market_adjustment=row.get("market_respect_adjustment"),
+        raw_edge_pct=row.get("raw_edge_pct"),
+        raw_ev=row.get("raw_ev"),
+        adjusted_confidence=row.get("adjusted_confidence"),
+    )
+    return signal["tradable_signal"], signal["tradable_reason"]
 
 
 def get_movement_backtest_report(db: Session, *, min_sample: int = 3) -> dict:
@@ -364,6 +360,7 @@ def get_movement_backtest_report(db: Session, *, min_sample: int = 3) -> dict:
     by_respect_bucket: dict[str, list[dict]] = defaultdict(list)
     by_respect_tag: dict[str, list[dict]] = defaultdict(list)
     by_tradable_signal: dict[str, list[dict]] = defaultdict(list)
+    by_play_tradable_signal: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for row in normalized:
         by_direction[row["movement_direction"]].append(row)
         by_bucket[row["movement_bucket"]].append(row)
@@ -371,6 +368,7 @@ def get_movement_backtest_report(db: Session, *, min_sample: int = 3) -> dict:
         by_play_bucket[(row["play"], row["movement_bucket"])].append(row)
         by_respect_bucket[row["market_respect_bucket"]].append(row)
         by_tradable_signal[row["tradable_signal"]].append(row)
+        by_play_tradable_signal[(row["play"], row["tradable_signal"])].append(row)
         for tag in row["market_respect_tags"] or ["UNTAGGED"]:
             by_respect_tag[tag].append(row)
 
@@ -461,5 +459,6 @@ def get_movement_backtest_report(db: Session, *, min_sample: int = 3) -> dict:
         "by_market_respect_bucket": rows_for(by_respect_bucket, ("market_respect_bucket",)),
         "by_market_respect_tag": rows_for(by_respect_tag, ("market_respect_tag",)),
         "by_tradable_signal": rows_for(by_tradable_signal, ("tradable_signal",)),
+        "by_play_tradable_signal": rows_for(by_play_tradable_signal, ("play", "tradable_signal")),
         "min_sample": min_sample,
     }

@@ -9,7 +9,7 @@ import requests
 from app.db import SessionLocal
 from app.models.schema import EdgeResult, Game, GameOdds
 from app.services.edge_service import get_trustworthy_active_edges
-from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
+from app.services.market_respect_service import classify_tradable_signal, market_respect_adjustment, market_respect_for_edge
 from app.services.totals_policy_service import apply_under_cluster_risk, evaluate_totals_policy
 
 ET = ZoneInfo("America/New_York")
@@ -68,6 +68,13 @@ def _build_ranked_rows(limit: int = 10, active_only: bool = True) -> list[dict]:
                 market_respect=market_respect,
                 odds_american=_pick_odds(edge, odds),
             )
+            tradable = classify_tradable_signal(
+                market_respect=market_respect,
+                market_adjustment=adjustment,
+                raw_edge_pct=adjustment["raw_edge_pct"],
+                raw_ev=adjustment["raw_ev"],
+                adjusted_confidence=adjustment["adjusted_confidence"],
+            )
             totals_policy = evaluate_totals_policy(
                 db,
                 edge=edge,
@@ -101,6 +108,9 @@ def _build_ranked_rows(limit: int = 10, active_only: bool = True) -> list[dict]:
                     "market_trust_bucket": adjustment["bucket"],
                     "market_respect_adjustment": adjustment,
                     "market_respect_alert_allowed": adjustment["alert_allowed"],
+                    "tradable_signal": tradable["tradable_signal"],
+                    "tradable_reason": tradable["tradable_reason"],
+                    "trade_allowed": tradable["trade_allowed"],
                     "totals_policy": totals_policy,
                     "totals_policy_score": totals_policy["totals_policy_score"],
                     "policy_status": totals_policy["policy_status"],
@@ -133,7 +143,9 @@ def _alertable_ranked_bets(bets: list[dict]) -> list[dict]:
     return [
         bet
         for bet in bets
-        if bet.get("market_respect_alert_allowed")
+        if bet.get("trade_allowed")
+        and bet.get("tradable_signal") == "TRADE"
+        and bet.get("market_respect_alert_allowed")
         and bet.get("totals_policy_alert_allowed", True)
         and bet.get("policy_status") != "BLOCKED"
         and float(bet.get("adjusted_edge_pct") or 0) > 0

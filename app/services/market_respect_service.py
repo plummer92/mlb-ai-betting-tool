@@ -121,6 +121,73 @@ def market_respect_adjustment(
     }
 
 
+def has_positive_market_clv(market_respect: dict | None) -> bool:
+    components = (market_respect or {}).get("components") or {}
+    return (components.get("price_clv") or 0) > 0 or (components.get("line_clv") or 0) > 0
+
+
+def classify_tradable_signal(
+    *,
+    market_respect: dict | None,
+    market_adjustment: dict | None,
+    raw_edge_pct: float | None = None,
+    raw_ev: float | None = None,
+    adjusted_confidence: str | None = None,
+) -> dict:
+    respect = market_respect or {"score": 50, "tags": ["MARKET NEUTRAL"], "components": {}}
+    adjustment = market_adjustment or {}
+    tags = list(respect.get("tags") or adjustment.get("tags") or [])
+    components = respect.get("components") or {}
+    score = int(respect.get("score", adjustment.get("score", 50)))
+    bucket = adjustment.get("score_bucket") or market_respect_bucket(score)
+    effective_bucket = adjustment.get("bucket") or bucket
+    freshness_status = (components.get("freshness_status") or "").lower()
+
+    stale = "STALE OPEN" in tags or freshness_status in {"stale_open", "stale_feed"}
+    rejected = "MARKET REJECTED" in tags or bucket == "market_rejection" or effective_bucket == "market_rejection"
+    agreed = bucket in {"strong_market_agreement", "market_agreement"} or "MARKET AGREED" in tags
+    neutral = not agreed and not rejected and "MARKET NEUTRAL" in tags
+    positive_clv = has_positive_market_clv(respect)
+    positive_ev = float(adjustment.get("adjusted_ev") or 0) > 0
+    confidence = (adjusted_confidence or adjustment.get("adjusted_confidence") or "").lower()
+    strong_model = (
+        confidence == "strong"
+        or abs(float(raw_edge_pct if raw_edge_pct is not None else adjustment.get("raw_edge_pct") or 0)) >= 0.08
+        or float(raw_ev if raw_ev is not None else adjustment.get("raw_ev") or 0) >= 0.08
+    )
+
+    if stale:
+        signal, reason = "PASS", "stale market context"
+    elif rejected:
+        signal, reason = "PASS", "market rejected model side"
+    elif agreed and positive_ev and positive_clv:
+        signal, reason = "TRADE", "market agreed with positive CLV and adjusted EV"
+    elif neutral and strong_model and positive_ev:
+        signal = "WATCH"
+        reason = "market neutral with strong model"
+        if not positive_clv:
+            reason += "; no positive CLV, research only"
+    elif not positive_clv:
+        signal, reason = "PASS", "no positive CLV"
+    elif not positive_ev:
+        signal, reason = "PASS", "adjusted EV is not positive"
+    else:
+        signal, reason = "PASS", "market confirmation insufficient"
+
+    return {
+        "tradable_signal": signal,
+        "tradable_reason": reason,
+        "trade_allowed": signal == "TRADE",
+        "positive_clv": positive_clv,
+        "positive_adjusted_ev": positive_ev,
+        "market_agreed": agreed,
+        "market_neutral": neutral,
+        "market_rejected": rejected,
+        "stale": stale,
+        "strong_model": strong_model,
+    }
+
+
 def _adjust_confidence(confidence: str | None, bucket: str, score: int) -> str | None:
     levels = [None, "weak", "medium", "strong"]
     current = (confidence or "").lower().strip() or None

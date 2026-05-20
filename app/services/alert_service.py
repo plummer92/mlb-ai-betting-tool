@@ -13,7 +13,7 @@ from app.models.schema import BetAlert, EdgeResult, Game, Prediction, GameOdds, 
 from app.services.explanation_service import generate_pick_explanation
 from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.edge_service import get_trustworthy_active_edges, TOTAL_STD_DEV
-from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
+from app.services.market_respect_service import classify_tradable_signal, market_respect_adjustment, market_respect_for_edge
 from app.services.notification_service import send_alert_message
 from app.services.paper_trade_service import log_alert_as_paper_trade
 from app.services.odds_service import is_odds_snapshot_fresh
@@ -105,6 +105,7 @@ def qualifies_for_alert(
     edge: EdgeResult,
     market_adjustment: dict | None = None,
     totals_policy: dict | None = None,
+    tradable_signal: dict | None = None,
 ) -> bool:
     """
     Sniper Alert Criteria:
@@ -130,6 +131,8 @@ def qualifies_for_alert(
     adjusted_edge = float((market_adjustment or {}).get("adjusted_edge_pct", float(edge.edge_pct or 0)))
     adjusted_ev = float((market_adjustment or {}).get("adjusted_ev", ev))
     adjusted_confidence = (market_adjustment or {}).get("adjusted_confidence", edge.confidence_tier)
+    if tradable_signal and tradable_signal.get("tradable_signal") != "TRADE":
+        return False
     if market_adjustment and not market_adjustment.get("alert_allowed", False):
         return False
     if totals_policy and (
@@ -313,6 +316,13 @@ def create_and_send_alerts_for_today(db: Session) -> dict:
             market_respect=market_respect,
             odds_american=_pick_play_odds(edge, odds),
         )
+        tradable = classify_tradable_signal(
+            market_respect=market_respect,
+            market_adjustment=adjustment,
+            raw_edge_pct=adjustment["raw_edge_pct"],
+            raw_ev=adjustment["raw_ev"],
+            adjusted_confidence=adjustment["adjusted_confidence"],
+        )
         totals_policy = evaluate_totals_policy(
             db,
             edge=edge,
@@ -322,7 +332,7 @@ def create_and_send_alerts_for_today(db: Session) -> dict:
             market_respect=market_respect,
         )
 
-        if not qualifies_for_alert(edge, adjustment, totals_policy):
+        if not qualifies_for_alert(edge, adjustment, totals_policy, tradable):
             skipped += 1
             continue
 
@@ -423,6 +433,13 @@ def create_and_send_alert_for_game(db: Session, game_id: int) -> dict:
         market_respect=market_respect,
         odds_american=_pick_play_odds(edge, odds),
     )
+    tradable = classify_tradable_signal(
+        market_respect=market_respect,
+        market_adjustment=adjustment,
+        raw_edge_pct=adjustment["raw_edge_pct"],
+        raw_ev=adjustment["raw_ev"],
+        adjusted_confidence=adjustment["adjusted_confidence"],
+    )
     totals_policy = evaluate_totals_policy(
         db,
         edge=edge,
@@ -431,12 +448,13 @@ def create_and_send_alert_for_game(db: Session, game_id: int) -> dict:
         odds=odds,
         market_respect=market_respect,
     )
-    if not qualifies_for_alert(edge, adjustment, totals_policy):
+    if not qualifies_for_alert(edge, adjustment, totals_policy, tradable):
         return {
             "created": 0,
             "sent": 0,
             "skipped": 1,
-            "reason": "market respect, totals policy, or sniper criteria suppressed this alert",
+            "reason": "tradable signal, market respect, totals policy, or sniper criteria suppressed this alert",
+            "tradable_signal": tradable,
             "market_respect": market_respect,
             "market_respect_adjustment": adjustment,
             "totals_policy": totals_policy,

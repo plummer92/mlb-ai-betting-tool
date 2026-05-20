@@ -421,10 +421,16 @@ class RouteAndAdminTests(unittest.TestCase):
             "market_trust_bucket": "strong_market_agreement",
             "odds_freshness_status": "FRESH",
             "movement_direction": "toward_model",
-            "market_respect": {"score": 82, "tags": ["MARKET AGREED"], "components": {}},
+            "market_respect": {"score": 82, "tags": ["MARKET AGREED"], "components": {"line_clv": 0.5}},
             "market_respect_adjustment": {
                 "score": 82,
+                "bucket": "strong_market_agreement",
+                "score_bucket": "strong_market_agreement",
                 "tags": ["MARKET AGREED"],
+                "raw_edge_pct": 0.05,
+                "raw_ev": 0.08,
+                "adjusted_ev": 0.1,
+                "adjusted_confidence": "strong",
                 "explanation": "market agreed",
             },
         }
@@ -456,6 +462,41 @@ class RouteAndAdminTests(unittest.TestCase):
         row = _decision_row_from_ranked(self._decision_base_row())
 
         self.assertEqual(row["decision_status"], "FIRE")
+        self.assertEqual(row["tradable_signal"], "TRADE")
+
+    def test_decision_queue_blocks_agreement_without_clv(self) -> None:
+        row = _decision_row_from_ranked(
+            self._decision_base_row(
+                market_respect={"score": 82, "tags": ["MARKET AGREED"], "components": {}},
+            )
+        )
+
+        self.assertEqual(row["decision_status"], "BLOCKED")
+        self.assertEqual(row["tradable_signal"], "PASS")
+
+    def test_decision_queue_watches_neutral_strong_model(self) -> None:
+        row = _decision_row_from_ranked(
+            self._decision_base_row(
+                market_respect_score=50,
+                market_respect_tags=["MARKET NEUTRAL"],
+                market_trust_bucket="mixed_market",
+                market_respect={"score": 50, "tags": ["MARKET NEUTRAL"], "components": {}},
+                market_respect_adjustment={
+                    "score": 50,
+                    "bucket": "mixed_market",
+                    "score_bucket": "mixed_market",
+                    "tags": ["MARKET NEUTRAL"],
+                    "raw_edge_pct": 0.1,
+                    "raw_ev": 0.1,
+                    "adjusted_ev": 0.1,
+                    "adjusted_confidence": "strong",
+                    "explanation": "market neutral",
+                },
+            )
+        )
+
+        self.assertEqual(row["decision_status"], "WATCH")
+        self.assertEqual(row["tradable_signal"], "WATCH")
 
     def test_decision_queue_no_bet_on_negative_adjusted_edge(self) -> None:
         row = _decision_row_from_ranked(self._decision_base_row(adjusted_edge_pct=-0.01))

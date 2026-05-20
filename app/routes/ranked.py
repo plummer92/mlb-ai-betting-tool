@@ -15,7 +15,7 @@ from app.middleware.limiter import limiter
 from app.models.schema import EdgeResult, Game, GameOdds
 from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.edge_service import get_trustworthy_active_edges
-from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
+from app.services.market_respect_service import classify_tradable_signal, market_respect_adjustment, market_respect_for_edge
 from app.services.odds_service import odds_freshness_metadata
 from app.services.totals_policy_service import apply_under_cluster_risk, evaluate_totals_policy
 
@@ -87,6 +87,13 @@ def _build_ranked_rows(
             market_respect=market_respect,
             odds_american=_pick_odds(edge, odds),
         )
+        tradable = classify_tradable_signal(
+            market_respect=market_respect,
+            market_adjustment=adjustment,
+            raw_edge_pct=adjustment["raw_edge_pct"],
+            raw_ev=adjustment["raw_ev"],
+            adjusted_confidence=adjustment["adjusted_confidence"],
+        )
         totals_policy = evaluate_totals_policy(
             db,
             edge=edge,
@@ -130,6 +137,9 @@ def _build_ranked_rows(
                 "market_trust_bucket": adjustment["bucket"],
                 "market_respect_adjustment": adjustment,
                 "market_respect_alert_allowed": adjustment["alert_allowed"],
+                "tradable_signal": tradable["tradable_signal"],
+                "tradable_reason": tradable["tradable_reason"],
+                "trade_allowed": tradable["trade_allowed"],
                 "totals_policy": totals_policy,
                 "totals_policy_score": totals_policy["totals_policy_score"],
                 "policy_status": totals_policy["policy_status"],
@@ -190,7 +200,7 @@ def _decision_reason(row: dict, status: str) -> str:
         f"because {tag.lower()} and {direction.replace('_', ' ')}."
     )
     if status == "FIRE":
-        return base + " Trust is high and odds are fresh."
+        return base + " Tradable signal confirmed: market agreed with positive CLV and adjusted EV."
     if status == "WATCH":
         policy_reason = row.get("policy_reason") or (row.get("totals_policy") or {}).get("policy_reason")
         if policy_reason:
@@ -200,6 +210,9 @@ def _decision_reason(row: dict, status: str) -> str:
         return base + " Waiting because odds are stale or the open/close read is incomplete."
     if status == "BLOCKED":
         policy_reason = row.get("policy_reason") or (row.get("totals_policy") or {}).get("policy_reason")
+        tradable_reason = row.get("tradable_reason")
+        if tradable_reason:
+            return base + f" Blocked by tradable signal rule: {tradable_reason}."
         return base + (f" {policy_reason}" if policy_reason else " Blocked because the market rejected the model side.")
     return base + " No bet because the adjusted edge is not positive."
 
@@ -214,6 +227,21 @@ def _decision_row_from_ranked(row: dict) -> dict:
     rejected = "MARKET REJECTED" in tags or row.get("market_trust_bucket") == "market_rejection"
     totals_policy = row.get("totals_policy") or {}
     policy_status = totals_policy.get("policy_status") or row.get("policy_status")
+    if row.get("tradable_signal"):
+        tradable_signal = row.get("tradable_signal")
+        tradable_reason = row.get("tradable_reason")
+        trade_allowed = row.get("trade_allowed", tradable_signal == "TRADE")
+    else:
+        tradable = classify_tradable_signal(
+            market_respect=row.get("market_respect"),
+            market_adjustment=adjustment,
+            raw_edge_pct=row.get("raw_edge_pct", row.get("edge_pct")),
+            raw_ev=adjustment.get("raw_ev"),
+            adjusted_confidence=adjustment.get("adjusted_confidence"),
+        )
+        tradable_signal = tradable["tradable_signal"]
+        tradable_reason = tradable["tradable_reason"]
+        trade_allowed = tradable["trade_allowed"]
 
     if adjusted_edge <= 0:
         status = "NO BET"
@@ -227,11 +255,18 @@ def _decision_row_from_ranked(row: dict) -> dict:
         status = "WATCH"
     elif policy_status == "CAUTION":
         status = "WATCH"
-    elif score >= 70:
+    elif tradable_signal == "TRADE":
         status = "FIRE"
+    elif tradable_signal == "WATCH":
+        status = "WATCH"
+    elif tradable_signal == "PASS":
+        status = "BLOCKED"
     else:
         status = "WATCH"
 
+    row["tradable_signal"] = tradable_signal
+    row["tradable_reason"] = tradable_reason
+    row["trade_allowed"] = trade_allowed
     reason = _decision_reason(row, status)
     return {
         "rank": row.get("rank"),
@@ -247,6 +282,9 @@ def _decision_row_from_ranked(row: dict) -> dict:
         "odds_freshness_status": row.get("odds_freshness_status", "UNKNOWN"),
         "decision_status": status,
         "decision_reason": reason,
+        "tradable_signal": tradable_signal,
+        "tradable_reason": tradable_reason,
+        "trade_allowed": trade_allowed,
         "totals_policy_score": row.get("totals_policy_score"),
         "policy_status": policy_status,
         "policy_reason": totals_policy.get("policy_reason") or row.get("policy_reason"),
@@ -304,7 +342,9 @@ def _alertable_ranked_bets(bets: list[dict]) -> list[dict]:
     return [
         bet
         for bet in bets
-        if bet.get("market_respect_alert_allowed")
+        if bet.get("trade_allowed")
+        and bet.get("tradable_signal") == "TRADE"
+        and bet.get("market_respect_alert_allowed")
         and bet.get("totals_policy_alert_allowed", True)
         and bet.get("policy_status") != "BLOCKED"
         and float(bet.get("adjusted_edge_pct") or 0) > 0

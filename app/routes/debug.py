@@ -27,6 +27,7 @@ from app.services.ev_math import american_to_decimal, calc_edge, implied_prob_ra
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
 from app.services.odds_service import odds_freshness_metadata
 from app.services.totals_policy_service import totals_policy_backtest
+from app.routes.ranked import _build_decision_queue
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
 logger = logging.getLogger(__name__)
@@ -34,6 +35,33 @@ ET = ZoneInfo("America/New_York")
 MIN_DIAGNOSTIC_KELLY_FRACTION = 0.001
 RAW_EDGE_THRESHOLD = 0.0
 DEBUG_NEAR_EDGE_THRESHOLD = -0.005
+
+
+@router.get("/tradable-signals")
+def tradable_signals_debug(
+    limit: int = Query(50, ge=1, le=50),
+    active_only: bool = Query(True),
+    db: Session = Depends(get_db),
+):
+    rows = _build_decision_queue(db=db, limit=limit, active_only=active_only)
+    by_signal = Counter(row.get("tradable_signal") or "UNKNOWN" for row in rows)
+    by_play_signal: dict[tuple[str, str], int] = Counter(
+        ((row.get("play") or "unknown").lower(), row.get("tradable_signal") or "UNKNOWN")
+        for row in rows
+    )
+
+    return {
+        "status": "ok",
+        "total": len(rows),
+        "counts": dict(by_signal),
+        "by_play_signal": [
+            {"play": play, "tradable_signal": signal, "count": count}
+            for (play, signal), count in sorted(by_play_signal.items(), key=lambda item: (item[0][0], item[0][1]))
+        ],
+        "trade": [row for row in rows if row.get("tradable_signal") == "TRADE"],
+        "watch": [row for row in rows if row.get("tradable_signal") == "WATCH"],
+        "pass": [row for row in rows if row.get("tradable_signal") == "PASS"],
+    }
 
 
 @router.get("/jobs", dependencies=[Depends(verify_api_key)])
