@@ -1228,6 +1228,13 @@ function fatigueCounts(reports) {
   return counts;
 }
 
+function fetchWithTimeout(url, label, ms = 25000) {
+  return Promise.race([
+    fetch(url),
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} is still calculating; try refresh in a minute.`)), ms)),
+  ]);
+}
+
 function actionChip(edge, pred, isFinal) {
   if (isFinal) return '<span class="chip c-none">FINAL</span>';
   if (!pred) return '<span class="chip sig-orange">NO MODEL</span>';
@@ -1347,7 +1354,7 @@ async function loadDecisionQueue() {
 
 async function loadTotalsRegime() {
   try {
-    const res = await fetch('/api/debug/totals-policy');
+    const res = await fetchWithTimeout('/api/debug/totals-policy', 'Totals policy report', 25000);
     const data = await res.json();
     const board = data.current_board || {};
     const backtest = data.backtest || {};
@@ -1574,13 +1581,13 @@ async function loadTodayRead() {
     const [gamesRes, rankedRes, clvRes, bullpenRes, signalsRes] = await Promise.all([
       fetch('/api/games/today'),
       fetch('/api/ranked/bets?limit=10&active_only=true'),
-      fetch('/api/paper/clv'),
-      fetch('/api/bullpen/today'),
+      fetchWithTimeout('/api/paper/clv', 'CLV report', 8000).catch(() => null),
+      fetchWithTimeout('/api/bullpen/today', 'Bullpen report', 25000),
       fetch('/api/sandbox/signals/today'),
     ]);
     const games = await gamesRes.json();
     const ranked = await rankedRes.json();
-    const clv = await clvRes.json();
+    const clv = clvRes ? await clvRes.json() : { summary: null };
     const bullpen = await bullpenRes.json();
     const signals = await signalsRes.json();
 
@@ -1904,13 +1911,9 @@ async function loadBestPlaysWeek() {
 
 async function loadMarketAudit() {
   try {
-    const auditTimeout = (promise, label) => Promise.race([
-      promise,
-      new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} is still calculating; try refresh in a minute.`)), 25000)),
-    ]);
     const [clvRes, movementRes] = await Promise.all([
-      auditTimeout(fetch('/api/paper/clv'), 'CLV report'),
-      auditTimeout(fetch('/api/reviews/movement-report?min_sample=1'), 'Movement report'),
+      fetchWithTimeout('/api/paper/clv', 'CLV report', 25000),
+      fetchWithTimeout('/api/reviews/movement-report?min_sample=1', 'Movement report', 25000),
     ]);
     const clv = await clvRes.json();
     const movement = await movementRes.json();
