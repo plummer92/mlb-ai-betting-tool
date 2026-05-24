@@ -37,6 +37,95 @@ PREGAME_REUSE_WINDOW_MINUTES = 15
 logger = logging.getLogger(__name__)
 
 
+def _parse_game_start_time(game: Game) -> datetime | None:
+    if not game.start_time:
+        return None
+    try:
+        game_dt = datetime.fromisoformat(game.start_time)
+    except ValueError:
+        logger.warning(
+            "[scheduler] Could not parse start_time for game %s: %s",
+            game.game_id,
+            game.start_time,
+        )
+        return None
+    if game_dt.tzinfo is None:
+        return game_dt.replace(tzinfo=UTC)
+    return game_dt.astimezone(UTC)
+
+
+def schedule_pregame_jobs_for_today(
+    db,
+    *,
+    now_utc: datetime | None = None,
+    catch_up_missing: bool = False,
+) -> dict:
+    """Schedule today's in-memory pregame jobs; optionally catch up after restarts."""
+    now_utc = now_utc or datetime.now(UTC)
+    today = datetime.now(ET).date()
+    games = db.query(Game).filter(Game.game_date == today).all()
+    result = {
+        "games": len(games),
+        "scheduled": 0,
+        "catch_up_scheduled": 0,
+        "already_scheduled": 0,
+        "already_ready": 0,
+        "past_start": 0,
+        "missing_start_time": 0,
+    }
+
+    catch_up_offset_seconds = 5
+    for game in games:
+        game_dt = _parse_game_start_time(game)
+        if game_dt is None:
+            result["missing_start_time"] += 1
+            continue
+
+        job_id = f"pregame_{game.game_id}"
+        if scheduler.get_job(job_id):
+            result["already_scheduled"] += 1
+            continue
+
+        latest_pregame = get_latest_odds_snapshot(
+            db,
+            game_id=game.game_id,
+            snapshot_type=SnapshotType.pregame,
+        )
+        if latest_pregame is not None:
+            result["already_ready"] += 1
+            continue
+
+        pregame_trigger_time = game_dt - timedelta(minutes=45)
+        run_at = pregame_trigger_time
+        is_catch_up = False
+        if pregame_trigger_time <= now_utc:
+            if not catch_up_missing or game_dt <= now_utc:
+                result["past_start"] += 1
+                continue
+            run_at = now_utc + timedelta(seconds=catch_up_offset_seconds)
+            catch_up_offset_seconds += 10
+            is_catch_up = True
+
+        scheduler.add_job(
+            run_pregame_snapshot,
+            trigger=DateTrigger(run_date=run_at),
+            args=[game.game_id],
+            id=job_id,
+            replace_existing=True,
+        )
+        if is_catch_up:
+            result["catch_up_scheduled"] += 1
+        else:
+            result["scheduled"] += 1
+        logger.info(
+            "[scheduler] Pregame job scheduled for game %s at %s catch_up=%s",
+            game.game_id,
+            run_at,
+            is_catch_up,
+        )
+    return result
+
+
 @scheduler.scheduled_job(CronTrigger(hour=9, minute=0, timezone="America/New_York"))
 def resolve_yesterday_job():
     db = SessionLocal()
@@ -135,42 +224,8 @@ def run_monte_carlo_and_schedule_pregame():
         )
         print(f"[scheduler] Monte Carlo: {result['ran']} ok, {len(result['errors'])} errors")
 
-        games = db.query(Game).filter(Game.game_date == today).all()
-        for game in games:
-            if not game.start_time:
-                continue
-            try:
-                game_dt = datetime.fromisoformat(game.start_time)
-                if game_dt.tzinfo is None:
-                    game_dt = game_dt.replace(tzinfo=UTC)
-            except ValueError:
-                logger.warning(
-                    "[scheduler] Could not parse start_time for game %s: %s",
-                    game.game_id,
-                    game.start_time,
-                )
-                continue
-
-            pregame_trigger_time = game_dt - timedelta(minutes=45)
-            if pregame_trigger_time <= datetime.now(UTC):
-                continue
-
-            job_id = f"pregame_{game.game_id}"
-            if scheduler.get_job(job_id):
-                continue
-
-            scheduler.add_job(
-                run_pregame_snapshot,
-                trigger=DateTrigger(run_date=pregame_trigger_time),
-                args=[game.game_id],
-                id=job_id,
-                replace_existing=True,
-            )
-            logger.info(
-                "[scheduler] Pregame job scheduled for game %s at %s",
-                game.game_id,
-                pregame_trigger_time,
-            )
+        schedule_result = schedule_pregame_jobs_for_today(db)
+        print(f"[scheduler] Pregame jobs: {schedule_result}")
     except (SQLAlchemyError, RuntimeError, ValueError):
         logger.exception("[scheduler] Monte Carlo job error")
     finally:

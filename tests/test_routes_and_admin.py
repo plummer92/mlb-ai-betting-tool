@@ -24,6 +24,7 @@ from app.routes.debug import (
 from app.routes.model import get_today_predictions, run_model
 from app.routes.ranked import _build_ranked_rows, _decision_row_from_ranked
 from app.routes.reviews import get_review_summary, profitability_report
+from app.scheduler import schedule_pregame_jobs_for_today
 from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.edge_service import clear_edge_persistence_failures
 
@@ -780,6 +781,34 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(by_game[waiting_game.game_id]["readiness"], "WAITING_FOR_PREGAME_WINDOW")
         self.assertEqual(by_game[ready_game.game_id]["readiness"], "CLV_READY")
         self.assertTrue(by_game[ready_game.game_id]["has_line_movement"])
+
+    def test_startup_schedules_future_pregame_jobs(self) -> None:
+        game = self._game(130)
+        now_utc = datetime.now(timezone.utc)
+        game.start_time = (now_utc + timedelta(hours=3)).isoformat()
+        self.db.commit()
+
+        with patch("app.scheduler.scheduler") as mocked_scheduler:
+            mocked_scheduler.get_job.return_value = None
+            result = schedule_pregame_jobs_for_today(self.db, now_utc=now_utc)
+
+        self.assertEqual(result["scheduled"], 1)
+        self.assertEqual(result["catch_up_scheduled"], 0)
+        mocked_scheduler.add_job.assert_called_once()
+
+    def test_startup_catches_up_missing_pregame_jobs_inside_window(self) -> None:
+        game = self._game(131)
+        now_utc = datetime.now(timezone.utc)
+        game.start_time = (now_utc + timedelta(minutes=30)).isoformat()
+        self.db.commit()
+
+        with patch("app.scheduler.scheduler") as mocked_scheduler:
+            mocked_scheduler.get_job.return_value = None
+            result = schedule_pregame_jobs_for_today(self.db, now_utc=now_utc, catch_up_missing=True)
+
+        self.assertEqual(result["scheduled"], 0)
+        self.assertEqual(result["catch_up_scheduled"], 1)
+        mocked_scheduler.add_job.assert_called_once()
 
     def test_debug_routes_are_registered(self) -> None:
         from app.main import app
