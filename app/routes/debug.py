@@ -1244,6 +1244,8 @@ def build_decision_pipeline_diagnostics(db: Session) -> dict:
     odds_by_game: dict[int, GameOdds] = {}
     projection_by_game: dict[int, Prediction] = {}
     edge_by_game: dict[int, EdgeResult] = {}
+    latest_edge_by_game: dict[int, EdgeResult] = {}
+    all_edge_rows: list[EdgeResult] = []
     raw_board = build_raw_edge_board(db)
     raw_by_game = {row["game_id"]: row for row in raw_board["games"]}
 
@@ -1275,6 +1277,15 @@ def build_decision_pipeline_diagnostics(db: Session) -> dict:
         for edge in edge_rows:
             edge_by_game.setdefault(edge.game_id, edge)
 
+        all_edge_rows = (
+            db.query(EdgeResult)
+            .filter(EdgeResult.game_id.in_(game_ids))
+            .order_by(EdgeResult.game_id.asc(), EdgeResult.calculated_at.desc(), EdgeResult.id.desc())
+            .all()
+        )
+        for edge in all_edge_rows:
+            latest_edge_by_game.setdefault(edge.game_id, edge)
+
     missing_odds = []
     missing_projection = []
     raw_rejected = []
@@ -1284,6 +1295,7 @@ def build_decision_pipeline_diagnostics(db: Session) -> dict:
         odds = odds_by_game.get(game.game_id)
         projection = projection_by_game.get(game.game_id)
         edge = edge_by_game.get(game.game_id)
+        latest_edge = latest_edge_by_game.get(game.game_id)
         raw = raw_by_game.get(game.game_id, {})
         raw_status = _raw_edge_acceptance(raw)
         if odds is None:
@@ -1297,7 +1309,7 @@ def build_decision_pipeline_diagnostics(db: Session) -> dict:
             if not raw_status["accepted"]:
                 reasons.append(raw_status["reason"])
             elif not edge:
-                reasons.append("missing_persisted_edge_result")
+                reasons.append("inactive_or_untrusted_persisted_edge_result" if latest_edge else "missing_persisted_edge_result")
             elif not edge.recommended_play:
                 reasons.append("missing_persisted_recommended_play")
             else:
@@ -1390,6 +1402,8 @@ def build_decision_pipeline_diagnostics(db: Session) -> dict:
         "games_with_odds": len({game_id for game_id in game_ids if game_id in odds_by_game}),
         "games_with_model_projection": len({game_id for game_id in game_ids if game_id in projection_by_game}),
         "raw_positive_edges": len(raw_accepted),
+        "persisted_edge_results": len(all_edge_rows),
+        "inactive_persisted_edge_results": len([edge for edge in all_edge_rows if not edge.is_active]),
         "persisted_raw_positive_edges": len(raw_positive),
         "debug_near_edges": len([_game for _game, status in raw_accepted if status["status"] == "DEBUG_NEAR_EDGE"]),
         "after_market_respect_filter": len(market_survivors),

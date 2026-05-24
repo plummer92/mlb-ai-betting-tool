@@ -1243,11 +1243,45 @@ function fatigueCounts(reports) {
   return counts;
 }
 
-function fetchWithTimeout(url, label, ms = 25000) {
-  return Promise.race([
-    fetch(url),
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} is still calculating; try refresh in a minute.`)), ms)),
-  ]);
+function fetchWithTimeout(url, label, ms = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  return fetch(url, { signal: controller.signal })
+    .catch(err => {
+      if (err && err.name === 'AbortError') {
+        throw new Error(`${label} is still calculating; try refresh in a minute.`);
+      }
+      throw err;
+    })
+    .finally(() => clearTimeout(timer));
+}
+
+function runPanel(loader, label) {
+  return loader().catch(err => console.error(`Error loading ${label}`, err));
+}
+
+let decisionPipelineCache = null;
+async function loadDecisionPipelineSummary(ms = 8000) {
+  if (decisionPipelineCache) return decisionPipelineCache;
+  const res = await fetchWithTimeout('/api/debug/decision-pipeline', 'Decision pipeline', ms);
+  decisionPipelineCache = await res.json();
+  return decisionPipelineCache;
+}
+
+function rankedEmptyHtml(data) {
+  const counts = data?.counts || {};
+  const stages = data?.stages || {};
+  const worstStage = Object.entries(stages)
+    .map(([name, stage]) => ({ name, count: stage.filtered_count || 0, reasons: stage.top_rejection_reasons || [] }))
+    .sort((a, b) => b.count - a.count)[0];
+  const reason = worstStage?.reasons?.[0]?.reason || 'waiting_for_ranked_edge_result';
+  return `
+    <div class="empty compact">
+      <div style="font-weight:700;color:var(--text);margin-bottom:5px;">No ranked bets available right now.</div>
+      <div>${counts.raw_positive_edges ?? 0} raw edge${(counts.raw_positive_edges ?? 0) === 1 ? '' : 's'} found, but ${counts.persisted_raw_positive_edges ?? 0} trusted persisted edge result${(counts.persisted_raw_positive_edges ?? 0) === 1 ? '' : 's'} are eligible for ranking.</div>
+      ${(counts.inactive_persisted_edge_results ?? 0) ? `<div style="margin-top:5px;">${counts.inactive_persisted_edge_results} persisted edge result${counts.inactive_persisted_edge_results === 1 ? '' : 's'} exist but are inactive or untrusted.</div>` : ''}
+      <div style="margin-top:5px;">Main blocker: <span class="mono">${esc(reason)}</span>.</div>
+    </div>`;
 }
 
 function actionChip(edge, pred, isFinal) {
@@ -1328,14 +1362,16 @@ function totalsPolicyMeter(policy) {
 
 async function loadDecisionQueue() {
   try {
-    const res = await fetch('/api/ranked/decision-queue?limit=20&active_only=true');
-    const rows = await res.json();
+    const [rows, pipeline] = await Promise.all([
+      fetchWithTimeout('/api/ranked/decision-queue?limit=20&active_only=true', 'Decision queue', 10000).then(res => res.json()),
+      loadDecisionPipelineSummary(8000).catch(() => null),
+    ]);
     const fire = rows.filter(r => r.decision_status === 'FIRE').length;
     const watch = rows.filter(r => r.decision_status === 'WATCH').length;
     $('decision-queue-badge').textContent = rows.length ? `${fire} FIRE / ${watch} WATCH` : 'NO ACTION';
 
     if (!rows.length) {
-      $('decision-queue-table').innerHTML = '<div class="empty compact">No ranked decisions available yet.</div>';
+      $('decision-queue-table').innerHTML = rankedEmptyHtml(pipeline);
       return;
     }
 
@@ -1448,8 +1484,7 @@ async function loadDecisionDebug() {
     }
     section.style.display = '';
 
-    const res = await fetch('/api/debug/decision-pipeline');
-    const data = await res.json();
+    const data = await loadDecisionPipelineSummary(8000);
     const counts = data.counts || {};
     const stages = data.stages || {};
     const funnel = [
@@ -1480,8 +1515,8 @@ async function loadDecisionDebug() {
       </div>`;
   } catch(e) {
     $('decision-debug-section').style.display = '';
-    $('decision-debug-badge').textContent = 'ERROR';
-    $('decision-debug-panel').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+    $('decision-debug-badge').textContent = 'SLOW';
+    $('decision-debug-panel').innerHTML = `<div class="empty">Decision pipeline diagnostics are still calculating. The live board is available.</div>`;
   }
 }
 
@@ -1496,7 +1531,7 @@ async function loadOddsDebug() {
     }
     section.style.display = '';
 
-    const res = await fetch('/api/debug/odds-freshness');
+    const res = await fetchWithTimeout('/api/debug/odds-freshness', 'Odds freshness', 8000);
     const data = await res.json();
     const total = data.total_games || 0;
     const stalePct = total ? Math.round(((data.stale_games || 0) / total) * 100) : 0;
@@ -1516,8 +1551,8 @@ async function loadOddsDebug() {
       </div>`;
   } catch(e) {
     $('odds-debug-section').style.display = '';
-    $('odds-debug-badge').textContent = 'ERROR';
-    $('odds-debug-panel').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+    $('odds-debug-badge').textContent = 'SLOW';
+    $('odds-debug-panel').innerHTML = `<div class="empty">Odds freshness diagnostics are still calculating. Pregame integrity is available above.</div>`;
   }
 }
 
@@ -1671,17 +1706,17 @@ async function loadOddsWarehouse() {
 async function loadTodayRead() {
   try {
     const [gamesRes, rankedRes, clvRes, bullpenRes, signalsRes] = await Promise.all([
-      fetch('/api/games/today'),
-      fetch('/api/ranked/bets?limit=10&active_only=true'),
+      fetchWithTimeout('/api/games/today', 'Games board', 8000),
+      fetchWithTimeout('/api/ranked/bets?limit=10&active_only=true', 'Ranked bets', 8000).catch(() => null),
       fetchWithTimeout('/api/paper/clv', 'CLV report', 8000).catch(() => null),
-      fetchWithTimeout('/api/bullpen/today', 'Bullpen report', 25000),
-      fetch('/api/sandbox/signals/today'),
+      fetchWithTimeout('/api/bullpen/today', 'Bullpen report', 8000).catch(() => null),
+      fetchWithTimeout('/api/sandbox/signals/today', 'Signal intelligence', 8000).catch(() => null),
     ]);
     const games = await gamesRes.json();
-    const ranked = await rankedRes.json();
+    const ranked = rankedRes ? await rankedRes.json() : [];
     const clv = clvRes ? await clvRes.json() : { summary: null };
-    const bullpen = await bullpenRes.json();
-    const signals = await signalsRes.json();
+    const bullpen = bullpenRes ? await bullpenRes.json() : [];
+    const signals = signalsRes ? await signalsRes.json() : [];
 
     const top = strongestEdge(ranked);
     const bpc = fatigueCounts(bullpen);
@@ -1918,11 +1953,13 @@ async function loadAccuracy() {
 
 async function loadTopBets() {
   try {
-    const res = await fetch('/api/ranked/bets?limit=10&active_only=true');
-    const rows = await res.json();
+    const [rows, pipeline] = await Promise.all([
+      fetchWithTimeout('/api/ranked/bets?limit=10&active_only=true', 'Ranked bets', 10000).then(res => res.json()),
+      loadDecisionPipelineSummary(8000).catch(() => null),
+    ]);
     $('top-bets-badge').textContent = rows.length ? `${rows.length} LIVE RANKS` : 'NO LIVE BETS';
     if (!rows.length) {
-      $('top-bets-table').innerHTML = '<div class="empty compact">No current ranked bets for today.</div>';
+      $('top-bets-table').innerHTML = rankedEmptyHtml(pipeline);
       return;
     }
 
@@ -2004,8 +2041,8 @@ async function loadBestPlaysWeek() {
 async function loadMarketAudit() {
   try {
     const [clvRes, movementRes] = await Promise.all([
-      fetchWithTimeout('/api/paper/clv', 'CLV report', 25000),
-      fetchWithTimeout('/api/reviews/movement-report?min_sample=1', 'Movement report', 25000),
+      fetchWithTimeout('/api/paper/clv', 'CLV report', 10000),
+      fetchWithTimeout('/api/reviews/movement-report?min_sample=1', 'Movement report', 10000),
     ]);
     const clv = await clvRes.json();
     const movement = await movementRes.json();
@@ -2195,8 +2232,8 @@ async function loadMarketAudit() {
 async function loadMarketShadow() {
   try {
     const [journalRes, gradeRes] = await Promise.all([
-      fetch('/api/debug/sharp-move-journal'),
-      fetch('/api/debug/sharp-move-grade?min_sample=1'),
+      fetchWithTimeout('/api/debug/sharp-move-journal', 'Market shadow journal', 10000),
+      fetchWithTimeout('/api/debug/sharp-move-grade?min_sample=1', 'Market shadow grading', 10000),
     ]);
     const journal = await journalRes.json();
     const grade = await gradeRes.json();
@@ -2770,7 +2807,7 @@ async function loadSignals() {
 
 async function loadBullpen() {
   try {
-    const res = await fetch('/api/bullpen/today');
+    const res = await fetchWithTimeout('/api/bullpen/today', 'Bullpen report', 10000);
     const reports = await res.json();
 
     $('bullpen-badge').textContent = reports.length
@@ -2844,12 +2881,43 @@ async function loadBullpen() {
 
     $('bullpen-grid').innerHTML = cards;
   } catch(e) {
-    $('bullpen-grid').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+    $('bullpen-badge').textContent = 'SLOW';
+    $('bullpen-grid').innerHTML = `<div class="empty">Bullpen intelligence is still calculating. Refresh in a minute for the full bullpen board.</div>`;
   }
 }
 
+let loadAllInFlight = false;
 async function loadAll() {
-  await Promise.all([loadDecisionQueue(), loadTotalsRegime(), loadDecisionDebug(), loadOddsDebug(), loadOddsIntegrity(), loadOddsWarehouse(), loadTodayRead(), loadAccuracy(), loadTopBets(), loadBestPlaysWeek(), loadMarketAudit(), loadMarketShadow(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
+  if (loadAllInFlight) return;
+  loadAllInFlight = true;
+  decisionPipelineCache = null;
+  const primaryLoaders = [
+    [loadDecisionQueue, 'decision queue'],
+    [loadOddsIntegrity, 'pregame integrity'],
+    [loadOddsWarehouse, 'odds warehouse'],
+    [loadTodayRead, 'today read'],
+    [loadTopBets, 'top bets'],
+    [loadCommentary, 'commentary'],
+    [loadIntel, 'active intel'],
+    [loadSignals, 'signals'],
+  ];
+  const secondaryLoaders = [
+    [loadTotalsRegime, 'totals regime'],
+    [loadDecisionDebug, 'decision debug'],
+    [loadOddsDebug, 'odds freshness'],
+    [loadAccuracy, 'accuracy'],
+    [loadBestPlaysWeek, 'best plays week'],
+    [loadMarketAudit, 'market audit'],
+    [loadMarketShadow, 'market shadow'],
+    [loadDebrief, 'debrief'],
+    [loadBullpen, 'bullpen'],
+  ];
+
+  await Promise.all(primaryLoaders.map(([loader, label]) => runPanel(loader, label)));
+  setTimeout(() => {
+    Promise.all(secondaryLoaders.map(([loader, label]) => runPanel(loader, label)))
+      .finally(() => { loadAllInFlight = false; });
+  }, 150);
 }
 
 let countdown = 60;
