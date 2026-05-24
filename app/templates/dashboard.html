@@ -1502,6 +1502,7 @@ async function loadOddsWarehouse() {
         <div class="read-tile">
           <div class="read-label">Remaining</div>
           <div class="read-main">${quota.month_remaining ?? '---'}</div>
+          <div class="read-sub">Projected ${quota.projected_month_used ?? '---'} / ${quota.monthly_quota ?? 500} · ${esc(quota.quota_alert || 'OK')}</div>
           <div class="read-sub">Open ${(quota.by_snapshot_type || {}).open || 0} Â· Pregame ${(quota.by_snapshot_type || {}).pregame || 0}</div>
         </div>
         <div class="read-tile">

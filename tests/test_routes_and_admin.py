@@ -888,6 +888,8 @@ class RouteAndAdminTests(unittest.TestCase):
 
         self.assertEqual(report["quota"]["month_used"], 1)
         self.assertEqual(report["quota"]["by_snapshot_type"]["pregame"], 1)
+        self.assertIn("projected_month_used", report["quota"])
+        self.assertEqual(report["quota"]["quota_alert"], "OK")
         self.assertEqual(report["summary"]["clv_ready"], 1)
         self.assertEqual(report["summary"]["play_rows"], 4)
         self.assertEqual(report["games"][0]["readiness"], "CLV_READY")

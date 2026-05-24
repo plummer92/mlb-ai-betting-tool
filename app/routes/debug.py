@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import calendar
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -336,6 +337,12 @@ def build_odds_quota_report(db: Session) -> dict:
     by_snapshot = Counter(row.snapshot_type or "unknown" for row in ok_rows)
     used = len(ok_rows)
     remaining = max(ODDS_API_MONTHLY_QUOTA - used, 0)
+    days_elapsed = max(today.day, 1)
+    days_in_month = calendar.monthrange(today.year, today.month)[1]
+    daily_average = used / days_elapsed
+    projected_month_used = round(daily_average * days_in_month, 1)
+    projected_over_cap = ODDS_API_MONTHLY_QUOTA > 0 and projected_month_used > ODDS_API_MONTHLY_QUOTA
+    projected_warning = ODDS_API_MONTHLY_QUOTA > 0 and projected_month_used >= ODDS_API_MONTHLY_QUOTA * 0.9
     return {
         "month": month_start.strftime("%Y-%m"),
         "provider": "the_odds_api",
@@ -344,6 +351,16 @@ def build_odds_quota_report(db: Session) -> dict:
         "month_remaining": remaining,
         "month_usage_pct": round(used / ODDS_API_MONTHLY_QUOTA, 4) if ODDS_API_MONTHLY_QUOTA else None,
         "today_used": len(today_rows),
+        "daily_average": round(daily_average, 2),
+        "projected_month_used": projected_month_used,
+        "projected_remaining": round(ODDS_API_MONTHLY_QUOTA - projected_month_used, 1),
+        "projected_over_cap": projected_over_cap,
+        "projected_warning": projected_warning,
+        "quota_alert": (
+            "OVER_CAP_PROJECTION" if projected_over_cap else
+            "NEAR_CAP_PROJECTION" if projected_warning else
+            "OK"
+        ),
         "errors_this_month": len([row for row in rows if row.status != "ok"]),
         "by_snapshot_type": dict(by_snapshot),
         "recent_requests": [
