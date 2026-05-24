@@ -1416,8 +1416,8 @@ async function loadTotalsRegime() {
         </div>
       </div>`;
   } catch(e) {
-    $('totals-regime-badge').textContent = 'ERROR';
-    $('totals-regime-panel').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+    $('totals-regime-badge').textContent = 'SLOW';
+    $('totals-regime-panel').innerHTML = `<div class="empty">Totals policy report is still calculating. Refresh in a minute for the full regime read.</div>`;
   }
 }
 
@@ -2094,8 +2094,9 @@ async function loadMarketAudit() {
         <tbody>${signalBacktest || '<tr><td colspan="4" class="empty">No signal rows yet.</td></tr>'}</tbody>
       </table>`;
   } catch(e) {
+    $('market-audit-badge').textContent = 'SLOW';
     $('market-audit-summary').innerHTML = '';
-    $('market-audit-table').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+    $('market-audit-table').innerHTML = `<div class="empty">Market audit reports are still calculating. The live board and Market Shadow sections are available.</div>`;
   }
 }
 
