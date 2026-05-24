@@ -376,12 +376,150 @@ def _latest_rows_by_game(db: Session, game_ids: list[int], snapshot_type: Snapsh
     return latest
 
 
+def _latest_any_odds_by_game(db: Session, game_ids: list[int]) -> dict[int, GameOdds]:
+    latest: dict[int, GameOdds] = {}
+    if not game_ids:
+        return latest
+    rows = (
+        db.query(GameOdds)
+        .filter(GameOdds.game_id.in_(game_ids))
+        .order_by(GameOdds.game_id.asc(), GameOdds.fetched_at.desc(), GameOdds.id.desc())
+        .all()
+    )
+    for row in rows:
+        latest.setdefault(row.game_id, row)
+    return latest
+
+
+def _play_odds_and_line(odds: GameOdds | None, play: str) -> tuple[int | None, float | None]:
+    if odds is None:
+        return None, None
+    if play == "away_ml":
+        return odds.away_ml, None
+    if play == "home_ml":
+        return odds.home_ml, None
+    if play == "over":
+        return odds.over_odds, float(odds.total_line) if odds.total_line is not None else None
+    if play == "under":
+        return odds.under_odds, float(odds.total_line) if odds.total_line is not None else None
+    return None, None
+
+
+def _edge_pct_for_play(edge: EdgeResult | None, play: str) -> float | None:
+    if edge is None:
+        return None
+    if play == "away_ml":
+        return float(edge.edge_away) if edge.edge_away is not None else None
+    if play == "home_ml":
+        return float(edge.edge_home) if edge.edge_home is not None else None
+    if play == "over":
+        return float(edge.total_edge or 0) / 100 if edge.total_edge is not None else None
+    if play == "under":
+        return -float(edge.total_edge or 0) / 100 if edge.total_edge is not None else None
+    return None
+
+
+def _ev_for_play(edge: EdgeResult | None, play: str) -> float | None:
+    if edge is None:
+        return None
+    if play == "away_ml":
+        return float(edge.ev_away) if edge.ev_away is not None else None
+    if play == "home_ml":
+        return float(edge.ev_home) if edge.ev_home is not None else None
+    if play == "over":
+        return float(edge.ev_over) if edge.ev_over is not None else None
+    if play == "under":
+        return float(edge.ev_under) if edge.ev_under is not None else None
+    return None
+
+
+def _clv_for_play(open_odds: GameOdds | None, close_odds: GameOdds | None, play: str) -> dict[str, float | None]:
+    open_price, open_line = _play_odds_and_line(open_odds, play)
+    close_price, close_line = _play_odds_and_line(close_odds, play)
+    price_clv = None
+    line_clv = None
+    if open_price is not None and close_price is not None:
+        price_clv = round(implied_prob_raw(close_price) - implied_prob_raw(open_price), 4)
+    if play == "over" and open_line is not None and close_line is not None:
+        line_clv = round(close_line - open_line, 2)
+    elif play == "under" and open_line is not None and close_line is not None:
+        line_clv = round(open_line - close_line, 2)
+    return {"price_clv": price_clv, "line_clv": line_clv}
+
+
+def _movement_bucket_for_play(movement: LineMovement | None, play: str) -> str:
+    if movement is None:
+        return "no_movement"
+    if play in {"over", "under"}:
+        total = abs(float(movement.total_move or 0))
+        if total >= 0.5:
+            return "total_steam"
+        if total >= 0.2:
+            return "minor_move"
+        return "flat"
+    side_value = movement.away_prob_move if play == "away_ml" else movement.home_prob_move
+    side_move = abs(float(side_value or 0))
+    if side_move >= 0.04:
+        return "ml_steam"
+    if side_move >= 0.02:
+        return "minor_move"
+    return "flat"
+
+
+def _warehouse_play_row(
+    *,
+    game: Game,
+    play: str,
+    open_odds: GameOdds | None,
+    pregame_odds: GameOdds | None,
+    latest_odds: GameOdds | None,
+    movement: LineMovement | None,
+    edge: EdgeResult | None,
+    respect: dict | None,
+) -> dict:
+    open_price, open_line = _play_odds_and_line(open_odds, play)
+    pregame_price, pregame_line = _play_odds_and_line(pregame_odds, play)
+    latest_price, latest_line = _play_odds_and_line(latest_odds, play)
+    clv = _clv_for_play(open_odds, pregame_odds, play)
+    return {
+        "game_id": game.game_id,
+        "matchup": f"{game.away_team} @ {game.home_team}",
+        "start_time": game.start_time,
+        "play": play,
+        "recommended": bool(edge and edge.recommended_play == play),
+        "edge_pct": _edge_pct_for_play(edge, play),
+        "ev": _ev_for_play(edge, play),
+        "open_line": open_line,
+        "open_price": open_price,
+        "open_fetched_at": _iso_datetime(open_odds.fetched_at) if open_odds else None,
+        "pregame_line": pregame_line,
+        "pregame_price": pregame_price,
+        "pregame_fetched_at": _iso_datetime(pregame_odds.fetched_at) if pregame_odds else None,
+        "latest_line": latest_line,
+        "latest_price": latest_price,
+        "latest_snapshot_type": latest_odds.snapshot_type.value if latest_odds and latest_odds.snapshot_type else None,
+        "latest_fetched_at": _iso_datetime(latest_odds.fetched_at) if latest_odds else None,
+        "line_clv": clv["line_clv"],
+        "price_clv": clv["price_clv"],
+        "movement_bucket": _movement_bucket_for_play(movement, play),
+        "movement_direction": edge.movement_direction if edge and edge.recommended_play == play else None,
+        "market_respect_score": respect.get("score") if respect and edge and edge.recommended_play == play else None,
+        "market_respect_tags": respect.get("tags") if respect and edge and edge.recommended_play == play else [],
+        "readiness": (
+            "CLV_READY" if pregame_odds and movement else
+            "PREGAME_SNAPSHOT_MISSING" if not pregame_odds else
+            "MOVEMENT_MISSING"
+        ),
+    }
+
+
 def build_odds_warehouse_report(db: Session) -> dict:
     today = datetime.now(ET).date()
     games = db.query(Game).filter(Game.game_date == today).order_by(Game.start_time.asc(), Game.game_id.asc()).all()
     game_ids = [game.game_id for game in games]
     open_by_game = _latest_rows_by_game(db, game_ids, SnapshotType.open)
     pregame_by_game = _latest_rows_by_game(db, game_ids, SnapshotType.pregame)
+    latest_by_game = _latest_any_odds_by_game(db, game_ids)
     movement_by_game = _latest_by_game(
         db.query(LineMovement)
         .filter(LineMovement.game_id.in_(game_ids))
@@ -396,18 +534,34 @@ def build_odds_warehouse_report(db: Session) -> dict:
     ) if game_ids else {}
 
     rows = []
+    play_rows = []
     for game in games:
         open_odds = open_by_game.get(game.game_id)
         pregame_odds = pregame_by_game.get(game.game_id)
+        latest_odds = latest_by_game.get(game.game_id)
         movement = movement_by_game.get(game.game_id)
         edge = edge_by_game.get(game.game_id)
         respect = market_respect_for_edge(db, edge, odds=open_odds, game=game) if edge else None
         components = respect.get("components", {}) if respect else {}
+        for play in ("away_ml", "home_ml", "over", "under"):
+            play_rows.append(
+                _warehouse_play_row(
+                    game=game,
+                    play=play,
+                    open_odds=open_odds,
+                    pregame_odds=pregame_odds,
+                    latest_odds=latest_odds,
+                    movement=movement,
+                    edge=edge,
+                    respect=respect,
+                )
+            )
         rows.append({
             "game_id": game.game_id,
             "matchup": f"{game.away_team} @ {game.home_team}",
             "start_time": game.start_time,
             "play": edge.recommended_play if edge else None,
+            "recommended_play": edge.recommended_play if edge else None,
             "run_stage": edge.run_stage if edge else None,
             "edge_pct": float(edge.edge_pct or 0) if edge else None,
             "market_respect_score": respect.get("score") if respect else None,
@@ -439,11 +593,14 @@ def build_odds_warehouse_report(db: Session) -> dict:
         "quota": build_odds_quota_report(db),
         "summary": {
             "games": len(rows),
+            "play_rows": len(play_rows),
             "open_snapshots": sum(1 for row in rows if row["open"]),
             "pregame_snapshots": sum(1 for row in rows if row["pregame"]),
             "clv_ready": sum(1 for row in rows if row["readiness"] == "CLV_READY"),
+            "clv_ready_play_rows": sum(1 for row in play_rows if row["readiness"] == "CLV_READY"),
         },
         "games": rows,
+        "plays": play_rows,
     }
 
 

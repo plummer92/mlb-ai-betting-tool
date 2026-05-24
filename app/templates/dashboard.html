@@ -1489,7 +1489,7 @@ async function loadOddsWarehouse() {
     const data = await res.json();
     const quota = data.quota || {};
     const summary = data.summary || {};
-    const rows = data.games || [];
+    const rows = data.plays || data.games || [];
     const pct = quota.month_usage_pct != null ? (quota.month_usage_pct * 100).toFixed(1) : '0.0';
     $('odds-warehouse-badge').textContent = `${summary.clv_ready || 0} CLV READY`;
     $('odds-warehouse-summary').innerHTML = `
@@ -1519,25 +1519,32 @@ async function loadOddsWarehouse() {
     $('odds-warehouse-table').innerHTML = `
       <table>
         <thead><tr>
-          <th>Game</th><th>Play</th><th>Open</th><th>Pregame</th><th>Move</th><th>CLV</th><th>Market</th><th>State</th>
+          <th>Game</th><th>Play</th><th>Open</th><th>Pregame</th><th>Latest</th><th>CLV</th><th>Move</th><th>Market</th><th>State</th>
         </tr></thead>
         <tbody>
           ${rows.length ? rows.map(r => {
-            const openTotal = r.open && r.open.total_line != null ? r.open.total_line : null;
-            const preTotal = r.pregame && r.pregame.total_line != null ? r.pregame.total_line : null;
-            const totalMove = r.movement && r.movement.total_move != null ? r.movement.total_move : null;
+            const openLine = r.open_line ?? (r.open && r.open.total_line != null ? r.open.total_line : null);
+            const preLine = r.pregame_line ?? (r.pregame && r.pregame.total_line != null ? r.pregame.total_line : null);
+            const latestLine = r.latest_line ?? preLine ?? openLine;
+            const openPrice = r.open_price ?? (r.open ? ({away_ml:r.open.away_ml,home_ml:r.open.home_ml,over:r.open.over_odds,under:r.open.under_odds})[r.play] : null);
+            const prePrice = r.pregame_price ?? (r.pregame ? ({away_ml:r.pregame.away_ml,home_ml:r.pregame.home_ml,over:r.pregame.over_odds,under:r.pregame.under_odds})[r.play] : null);
+            const latestPrice = r.latest_price ?? prePrice ?? openPrice;
+            const moveBucket = r.movement_bucket || (r.movement && r.movement.total_move != null ? 'total_move' : 'no_movement');
             const clvCls = (r.line_clv || 0) > 0 || (r.price_clv || 0) > 0 ? 'green' : 'muted';
+            const lineText = v => v != null ? v : 'ML';
+            const priceText = v => v != null ? v : '---';
             return `<tr>
               <td style="font-weight:600;white-space:nowrap">${esc(r.matchup || '---')}<div class="muted mono" style="font-size:10px">${gameTime(r.start_time)}</div></td>
-              <td class="mono">${esc((r.play || '---').replace('_', ' ').toUpperCase())}</td>
-              <td class="mono">${openTotal != null ? openTotal : '---'}<div class="muted">${r.open ? esc(r.open.sportsbook || '') : ''}</div></td>
-              <td class="mono">${preTotal != null ? preTotal : '---'}<div class="muted">${r.pregame ? esc(r.pregame.sportsbook || '') : ''}</div></td>
-              <td class="mono">${totalMove != null ? totalMove.toFixed(1) : '---'}</td>
+              <td class="mono">${r.recommended ? '<span class="pill green">MODEL</span><br>' : ''}${esc((r.play || '---').replace('_', ' ').toUpperCase())}</td>
+              <td class="mono">${lineText(openLine)}<div class="muted">${priceText(openPrice)}</div></td>
+              <td class="mono">${lineText(preLine)}<div class="muted">${priceText(prePrice)}</div></td>
+              <td class="mono">${lineText(latestLine)}<div class="muted">${priceText(latestPrice)} ${r.latest_snapshot_type ? esc(r.latest_snapshot_type) : ''}</div></td>
               <td class="mono ${clvCls}">L ${r.line_clv ?? '---'}<div>P ${r.price_clv ?? '---'}</div></td>
+              <td class="mono">${esc(moveBucket.replace('_', ' ').toUpperCase())}</td>
               <td>${marketRespectChip({score: r.market_respect_score, tags: r.market_respect_tags || []})}</td>
               <td>${decisionStatusChip(r.readiness === 'CLV_READY' ? 'FIRE' : 'WAIT FOR ODDS').replace('FIRE', 'CLV READY')}</td>
             </tr>`;
-          }).join('') : '<tr><td colspan="8"><div class="empty compact">No odds warehouse rows yet.</div></td></tr>'}
+          }).join('') : '<tr><td colspan="9"><div class="empty compact">No odds warehouse rows yet.</div></td></tr>'}
         </tbody>
       </table>`;
   } catch(e) {

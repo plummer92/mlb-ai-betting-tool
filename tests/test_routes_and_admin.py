@@ -889,7 +889,18 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(report["quota"]["month_used"], 1)
         self.assertEqual(report["quota"]["by_snapshot_type"]["pregame"], 1)
         self.assertEqual(report["summary"]["clv_ready"], 1)
+        self.assertEqual(report["summary"]["play_rows"], 4)
         self.assertEqual(report["games"][0]["readiness"], "CLV_READY")
+        under = next(row for row in report["plays"] if row["play"] == "under")
+        self.assertTrue(under["recommended"])
+        self.assertEqual(under["open_line"], 8.5)
+        self.assertEqual(under["pregame_line"], 8.0)
+        self.assertEqual(under["latest_line"], 8.0)
+        self.assertEqual(under["line_clv"], 0.5)
+        self.assertEqual(under["movement_bucket"], "total_steam")
+        home_ml = next(row for row in report["plays"] if row["play"] == "home_ml")
+        self.assertEqual(home_ml["open_price"], -130)
+        self.assertEqual(home_ml["pregame_price"], -135)
 
     def test_startup_schedules_future_pregame_jobs(self) -> None:
         game = self._game(130)
