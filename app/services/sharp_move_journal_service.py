@@ -8,8 +8,8 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
-from app.models.schema import EdgeResult, Game, GameOdds, LineMovement, SharpMoveJournal, SnapshotType
-from app.services.ev_math import implied_prob_raw
+from app.models.schema import EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, SharpMoveJournal, SnapshotType
+from app.services.ev_math import american_to_decimal, implied_prob_raw
 
 ET = ZoneInfo("America/New_York")
 PLAYS = ("away_ml", "home_ml", "over", "under")
@@ -338,4 +338,126 @@ def persist_sharp_move_journal(db: Session, target_date: date | None = None) -> 
             if row["model_agreed"] and row["market_signal"] not in {"NO_MOVE", "QUIET_MARKET"}
         ),
         "rows": rows,
+    }
+
+
+def _result_for_play(review: GameOutcomeReview, snapshot: SharpMoveJournal) -> str:
+    play = (snapshot.play or "").lower()
+    away = int(review.final_away_score)
+    home = int(review.final_home_score)
+    if play == "away_ml":
+        return "win" if away > home else "loss"
+    if play == "home_ml":
+        return "win" if home > away else "loss"
+    line = snapshot.open_line if snapshot.open_line is not None else snapshot.pregame_line
+    if line is None:
+        return "no_line"
+    actual_total = away + home
+    total_line = float(line)
+    if actual_total == total_line:
+        return "push"
+    if play == "over":
+        return "win" if actual_total > total_line else "loss"
+    if play == "under":
+        return "win" if actual_total < total_line else "loss"
+    return "unknown"
+
+
+def _profit_for_snapshot(result: str, snapshot: SharpMoveJournal) -> float:
+    if result == "push":
+        return 0.0
+    if result == "loss":
+        return -1.0
+    if result != "win":
+        return 0.0
+    price = snapshot.open_price if snapshot.open_price is not None else snapshot.pregame_price
+    return round(american_to_decimal(price) - 1.0, 4) if price is not None else round(100 / 110, 4)
+
+
+def _segment_stats(rows: list[dict]) -> dict:
+    wins = sum(1 for row in rows if row["result"] == "win")
+    losses = sum(1 for row in rows if row["result"] == "loss")
+    pushes = sum(1 for row in rows if row["result"] == "push")
+    decisions = wins + losses
+    profit_units = round(sum(row["profit_units"] for row in rows), 4)
+    return {
+        "bets": len(rows),
+        "wins": wins,
+        "losses": losses,
+        "pushes": pushes,
+        "win_rate": round(wins / decisions, 4) if decisions else None,
+        "profit_units": profit_units,
+        "roi_per_bet": round(profit_units / len(rows), 4) if rows else 0.0,
+    }
+
+
+def _rows_for_segment(rows: list[dict], key: str) -> list[dict]:
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.get(key) or "UNKNOWN"), []).append(row)
+    return [
+        {key: segment, **_segment_stats(items)}
+        for segment, items in sorted(grouped.items(), key=lambda item: item[0])
+    ]
+
+
+def get_sharp_move_grade_report(db: Session, min_sample: int = 1) -> dict:
+    rows = (
+        db.query(SharpMoveJournal, GameOutcomeReview)
+        .join(GameOutcomeReview, GameOutcomeReview.game_id == SharpMoveJournal.game_id)
+        .filter(
+            GameOutcomeReview.final_away_score.isnot(None),
+            GameOutcomeReview.final_home_score.isnot(None),
+        )
+        .order_by(SharpMoveJournal.game_date.desc(), SharpMoveJournal.game_id.asc(), SharpMoveJournal.play.asc())
+        .all()
+    )
+
+    graded = []
+    seen: set[tuple[int, str]] = set()
+    for snapshot, review in rows:
+        key = (snapshot.id, snapshot.play)
+        if key in seen:
+            continue
+        seen.add(key)
+        result = _result_for_play(review, snapshot)
+        if result not in {"win", "loss", "push"}:
+            continue
+        row = {
+            "snapshot_id": snapshot.id,
+            "game_id": snapshot.game_id,
+            "game_date": snapshot.game_date.isoformat(),
+            "matchup": snapshot.matchup,
+            "play": snapshot.play,
+            "market_signal": snapshot.market_signal,
+            "movement_bucket": snapshot.movement_bucket,
+            "model_agreed": snapshot.model_agreed,
+            "readiness": snapshot.readiness,
+            "line_clv": float(snapshot.line_clv) if snapshot.line_clv is not None else None,
+            "price_clv": float(snapshot.price_clv) if snapshot.price_clv is not None else None,
+            "result": result,
+            "profit_units": _profit_for_snapshot(result, snapshot),
+            "final_score": f"{review.final_away_score}-{review.final_home_score}",
+        }
+        graded.append(row)
+
+    filtered_segments = {
+        "by_signal": [row for row in _rows_for_segment(graded, "market_signal") if row["bets"] >= min_sample],
+        "by_bucket": [row for row in _rows_for_segment(graded, "movement_bucket") if row["bets"] >= min_sample],
+        "by_play": [row for row in _rows_for_segment(graded, "play") if row["bets"] >= min_sample],
+        "by_model_agreement": [
+            row for row in _rows_for_segment(
+                [{**item, "model_agreement": "AGREED" if item["model_agreed"] else "DID_NOT_AGREE"} for item in graded],
+                "model_agreement",
+            )
+            if row["bets"] >= min_sample
+        ],
+    }
+
+    return {
+        "status": "ok",
+        "summary": _segment_stats(graded),
+        **filtered_segments,
+        "recent": graded[:25],
+        "min_sample": min_sample,
     }

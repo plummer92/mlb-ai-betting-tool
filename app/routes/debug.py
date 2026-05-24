@@ -28,7 +28,7 @@ from app.services.ev_math import american_to_decimal, calc_edge, implied_prob_ra
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
 from app.services.decision_journal_service import build_daily_trade_summary, persist_tradable_decisions
 from app.services.odds_service import odds_freshness_metadata
-from app.services.sharp_move_journal_service import persist_sharp_move_journal
+from app.services.sharp_move_journal_service import get_sharp_move_grade_report, persist_sharp_move_journal
 from app.services.totals_policy_service import totals_policy_backtest
 from app.routes.ranked import _build_decision_queue
 
@@ -102,6 +102,14 @@ def sharp_move_journal_debug(
     db: Session = Depends(get_db),
 ):
     return persist_sharp_move_journal(db=db)
+
+
+@router.get("/sharp-move-grade")
+def sharp_move_grade_debug(
+    min_sample: int = Query(1, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    return get_sharp_move_grade_report(db=db, min_sample=min_sample)
 
 
 @router.get("/jobs", dependencies=[Depends(verify_api_key)])
