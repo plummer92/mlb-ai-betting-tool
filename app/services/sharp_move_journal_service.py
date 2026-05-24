@@ -145,6 +145,8 @@ def _movement_bucket(line_move: float | None, price_move: float | None, play: st
 def _market_signal(play: str, line_move: float | None, price_move: float | None, bucket: str) -> str:
     if bucket == "no_movement":
         return "NO_MOVE"
+    if bucket == "flat":
+        return "QUIET_MARKET"
     if play == "over" and (line_move or 0) > 0:
         return "TOTAL_STEAM_OVER"
     if play == "under" and (line_move or 0) > 0:
