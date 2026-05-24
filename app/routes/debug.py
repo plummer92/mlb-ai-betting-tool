@@ -45,22 +45,40 @@ def tradable_signals_debug(
 ):
     rows = _build_decision_queue(db=db, limit=limit, active_only=active_only)
     by_signal = Counter(row.get("tradable_signal") or "UNKNOWN" for row in rows)
+    by_decision = Counter(row.get("decision_status") or "UNKNOWN" for row in rows)
     by_play_signal: dict[tuple[str, str], int] = Counter(
         ((row.get("play") or "unknown").lower(), row.get("tradable_signal") or "UNKNOWN")
         for row in rows
     )
+    by_play_decision: dict[tuple[str, str], int] = Counter(
+        ((row.get("play") or "unknown").lower(), row.get("decision_status") or "UNKNOWN")
+        for row in rows
+    )
+    fire_rows = [row for row in rows if row.get("decision_status") == "FIRE"]
+    watch_rows = [row for row in rows if row.get("decision_status") == "WATCH"]
+    blocked_rows = [row for row in rows if row.get("decision_status") == "BLOCKED"]
+    pass_rows = [row for row in rows if row.get("tradable_signal") == "PASS"]
 
     return {
         "status": "ok",
         "total": len(rows),
-        "counts": dict(by_signal),
+        "execution_counts": dict(by_decision),
+        "tradable_signal_counts": dict(by_signal),
+        "counts": dict(by_decision),
         "by_play_signal": [
             {"play": play, "tradable_signal": signal, "count": count}
             for (play, signal), count in sorted(by_play_signal.items(), key=lambda item: (item[0][0], item[0][1]))
         ],
-        "trade": [row for row in rows if row.get("tradable_signal") == "TRADE"],
-        "watch": [row for row in rows if row.get("tradable_signal") == "WATCH"],
-        "pass": [row for row in rows if row.get("tradable_signal") == "PASS"],
+        "by_play_decision": [
+            {"play": play, "decision_status": decision, "count": count}
+            for (play, decision), count in sorted(by_play_decision.items(), key=lambda item: (item[0][0], item[0][1]))
+        ],
+        "fire": fire_rows,
+        "trade": fire_rows,
+        "watch": watch_rows,
+        "blocked": blocked_rows,
+        "pass": pass_rows,
+        "research_watch": [row for row in rows if row.get("tradable_signal") == "WATCH"],
     }
 
 

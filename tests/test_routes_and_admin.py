@@ -498,6 +498,21 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(row["decision_status"], "WATCH")
         self.assertEqual(row["tradable_signal"], "WATCH")
 
+    def test_decision_queue_block_reason_prefers_totals_policy(self) -> None:
+        row = _decision_row_from_ranked(
+            self._decision_base_row(
+                totals_policy={
+                    "policy_status": "BLOCKED",
+                    "policy_reason": "Blocked by totals policy.",
+                    "policy_reasons": ["test_policy_block"],
+                },
+                policy_status="BLOCKED",
+            )
+        )
+
+        self.assertEqual(row["decision_status"], "BLOCKED")
+        self.assertIn("Blocked by totals policy.", row["decision_reason"])
+
     def test_decision_queue_no_bet_on_negative_adjusted_edge(self) -> None:
         row = _decision_row_from_ranked(self._decision_base_row(adjusted_edge_pct=-0.01))
 

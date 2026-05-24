@@ -210,6 +210,9 @@ def _decision_reason(row: dict, status: str) -> str:
         return base + " Waiting because odds are stale or the open/close read is incomplete."
     if status == "BLOCKED":
         policy_reason = row.get("policy_reason") or (row.get("totals_policy") or {}).get("policy_reason")
+        policy_status = row.get("policy_status") or (row.get("totals_policy") or {}).get("policy_status")
+        if policy_status == "BLOCKED" and policy_reason:
+            return base + f" {policy_reason}"
         tradable_reason = row.get("tradable_reason")
         if tradable_reason:
             return base + f" Blocked by tradable signal rule: {tradable_reason}."
