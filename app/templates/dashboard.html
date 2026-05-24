@@ -1280,6 +1280,7 @@ function decisionStatusChip(status) {
     'FIRE': 'c-strong',
     'WATCH': 'c-medium',
     'WAIT FOR ODDS': 'sig-blue',
+    'POST START': 'c-loss',
     'BLOCKED': 'c-loss',
     'NO BET': 'c-none',
   };
@@ -1555,6 +1556,7 @@ async function loadOddsWarehouse() {
             const moveBucket = r.movement_bucket || (r.movement && r.movement.total_move != null ? 'total_move' : 'no_movement');
             const moveDetail = r.line_move != null ? `L ${r.line_move}` : (r.price_move != null ? `P ${r.price_move}` : '');
             const staleMove = r.movement_record_stale ? '<div class="muted">stored move stale</div>' : '';
+            const readinessLabel = r.readiness === 'CLV_READY' ? 'CLV READY' : (r.readiness === 'PREGAME_AFTER_START' ? 'POST START' : 'WAIT FOR ODDS');
             const clvCls = (r.line_clv || 0) > 0 || (r.price_clv || 0) > 0 ? 'green' : 'muted';
             const lineText = v => v != null ? v : 'ML';
             const priceText = v => v != null ? v : '---';
@@ -1567,7 +1569,7 @@ async function loadOddsWarehouse() {
               <td class="mono ${clvCls}">L ${r.line_clv ?? '---'}<div>P ${r.price_clv ?? '---'}</div></td>
               <td class="mono">${esc(moveBucket.replace('_', ' ').toUpperCase())}${moveDetail ? `<div class="muted">${esc(moveDetail)}</div>` : ''}${staleMove}</td>
               <td>${marketRespectChip({score: r.market_respect_score, tags: r.market_respect_tags || []})}</td>
-              <td>${decisionStatusChip(r.readiness === 'CLV_READY' ? 'FIRE' : 'WAIT FOR ODDS').replace('FIRE', 'CLV READY')}</td>
+              <td>${decisionStatusChip(readinessLabel)}</td>
             </tr>`;
           }).join('') : '<tr><td colspan="9"><div class="empty compact">No odds warehouse rows yet.</div></td></tr>'}
         </tbody>

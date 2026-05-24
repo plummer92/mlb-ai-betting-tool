@@ -29,7 +29,7 @@ from app.scheduler import _recent_pregame_board_rows, schedule_pregame_jobs_for_
 from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.decision_journal_service import build_daily_trade_summary, persist_tradable_decisions
 from app.services.edge_service import clear_edge_persistence_failures
-from app.services.sharp_move_journal_service import get_sharp_move_grade_report, persist_sharp_move_journal
+from app.services.sharp_move_journal_service import build_sharp_move_rows, get_sharp_move_grade_report, persist_sharp_move_journal
 
 
 class RouteAndAdminTests(unittest.TestCase):
@@ -947,6 +947,51 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertTrue(away_ml["movement_record_stale"])
         self.assertAlmostEqual(away_ml["price_move"], 0.2608)
         self.assertEqual(under["line_move"], 0.5)
+
+    def test_odds_warehouse_rejects_pregame_snapshots_fetched_after_start(self) -> None:
+        game = self._game(131)
+        start = datetime.now(timezone.utc).replace(microsecond=0)
+        game.start_time = start.isoformat()
+        open_odds = self._odds(game.game_id)
+        open_odds.fetched_at = start - timedelta(hours=2)
+        post_start = GameOdds(
+            game_id=game.game_id,
+            sportsbook="draftkings",
+            snapshot_type=SnapshotType.pregame,
+            fetched_at=start + timedelta(minutes=20),
+            away_ml=-210,
+            home_ml=150,
+            total_line=7.0,
+            over_odds=-108,
+            under_odds=-130,
+        )
+        movement = LineMovement(
+            game_id=game.game_id,
+            sportsbook="consensus",
+            calculated_at=start - timedelta(minutes=10),
+            open_total=8.5,
+            pregame_total=8.5,
+            total_move=0.0,
+        )
+        self.db.add_all([post_start, movement])
+        self.db.commit()
+
+        report = build_odds_warehouse_report(self.db)
+        game_row = report["games"][0]
+        away_ml = next(row for row in report["plays"] if row["play"] == "away_ml")
+
+        self.assertEqual(game_row["readiness"], "PREGAME_AFTER_START")
+        self.assertIsNone(game_row["pregame"])
+        self.assertEqual(game_row["post_start_pregame"]["away_ml"], -210)
+        self.assertEqual(away_ml["readiness"], "PREGAME_AFTER_START")
+        self.assertIsNone(away_ml["pregame_price"])
+        self.assertEqual(away_ml["latest_price"], open_odds.away_ml)
+
+        shadow_rows = build_sharp_move_rows(self.db, target_date=game.game_date)
+        shadow_away = next(row for row in shadow_rows if row["game_id"] == game.game_id and row["play"] == "away_ml")
+        self.assertEqual(shadow_away["readiness"], "PREGAME_AFTER_START")
+        self.assertIsNone(shadow_away["pregame_price"])
+        self.assertEqual(shadow_away["latest_price"], open_odds.away_ml)
 
     def test_sharp_move_journal_persists_market_footprints(self) -> None:
         game = self._game(229)

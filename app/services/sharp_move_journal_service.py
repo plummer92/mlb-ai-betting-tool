@@ -46,6 +46,58 @@ def _latest_rows_by_game(db: Session, game_ids: list[int], snapshot_type: Snapsh
     return latest
 
 
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _aware_utc_from_start_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _odds_fetched_after_start(game: Game, odds: GameOdds | None) -> bool:
+    if odds is None:
+        return False
+    start_utc = _aware_utc_from_start_time(game.start_time)
+    fetched_utc = _as_utc(odds.fetched_at)
+    if start_utc is None or fetched_utc is None:
+        return False
+    same_game_day = fetched_utc.astimezone(ET).date() == start_utc.astimezone(ET).date()
+    return same_game_day and fetched_utc > start_utc
+
+
+def _latest_pregame_rows_by_game(
+    db: Session,
+    games: list[Game],
+) -> tuple[dict[int, GameOdds], dict[int, GameOdds]]:
+    game_by_id = {game.game_id: game for game in games}
+    valid: dict[int, GameOdds] = {}
+    post_start: dict[int, GameOdds] = {}
+    if not game_by_id:
+        return valid, post_start
+    rows = (
+        db.query(GameOdds)
+        .filter(GameOdds.game_id.in_(game_by_id), GameOdds.snapshot_type == SnapshotType.pregame)
+        .order_by(GameOdds.game_id.asc(), GameOdds.fetched_at.desc(), GameOdds.id.desc())
+        .all()
+    )
+    for row in rows:
+        game = game_by_id.get(row.game_id)
+        if game and _odds_fetched_after_start(game, row):
+            post_start.setdefault(row.game_id, row)
+            continue
+        valid.setdefault(row.game_id, row)
+    return valid, post_start
+
+
 def _latest_any_odds_by_game(db: Session, game_ids: list[int]) -> dict[int, GameOdds]:
     if not game_ids:
         return {}
@@ -166,6 +218,7 @@ def _snapshot_row(
     play: str,
     open_odds: GameOdds | None,
     pregame_odds: GameOdds | None,
+    post_start_pregame_odds: GameOdds | None,
     latest_odds: GameOdds | None,
     movement: LineMovement | None,
     edge: EdgeResult | None,
@@ -185,6 +238,7 @@ def _snapshot_row(
         "play": play,
         "open_fetched_at": _iso(open_odds.fetched_at) if open_odds else None,
         "move_observed_at": _iso(pregame_odds.fetched_at) if pregame_odds else None,
+        "post_start_pregame_fetched_at": _iso(post_start_pregame_odds.fetched_at) if post_start_pregame_odds else None,
         "latest_fetched_at": _iso(latest_odds.fetched_at) if latest_odds else None,
         "sportsbook": (pregame_odds.sportsbook if pregame_odds else None) or (open_odds.sportsbook if open_odds else None),
         "open_line": open_line,
@@ -205,6 +259,7 @@ def _snapshot_row(
         "model_ev": _ev_for_play(edge, play),
         "readiness": (
             "CLV_READY" if pregame_odds and movement else
+            "PREGAME_AFTER_START" if post_start_pregame_odds and not pregame_odds else
             "PREGAME_SNAPSHOT_MISSING" if not pregame_odds else
             "MOVEMENT_MISSING"
         ),
@@ -273,8 +328,7 @@ def build_sharp_move_rows(db: Session, target_date: date | None = None) -> list[
     games = db.query(Game).filter(Game.game_date == target_date).order_by(Game.start_time.asc(), Game.game_id.asc()).all()
     game_ids = [game.game_id for game in games]
     open_by_game = _latest_rows_by_game(db, game_ids, SnapshotType.open)
-    pregame_by_game = _latest_rows_by_game(db, game_ids, SnapshotType.pregame)
-    latest_by_game = _latest_any_odds_by_game(db, game_ids)
+    pregame_by_game, post_start_pregame_by_game = _latest_pregame_rows_by_game(db, games)
     movement_by_game = _latest_by_game(
         db.query(LineMovement)
         .filter(LineMovement.game_id.in_(game_ids))
@@ -297,7 +351,8 @@ def build_sharp_move_rows(db: Session, target_date: date | None = None) -> list[
                     play=play,
                     open_odds=open_by_game.get(game.game_id),
                     pregame_odds=pregame_by_game.get(game.game_id),
-                    latest_odds=latest_by_game.get(game.game_id),
+                    post_start_pregame_odds=post_start_pregame_by_game.get(game.game_id),
+                    latest_odds=pregame_by_game.get(game.game_id) or open_by_game.get(game.game_id),
                     movement=movement_by_game.get(game.game_id),
                     edge=edge_by_game.get(game.game_id),
                 )

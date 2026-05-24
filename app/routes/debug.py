@@ -211,6 +211,41 @@ def _latest_by_game(rows) -> dict[int, object]:
     return latest
 
 
+def _odds_fetched_after_start(game: Game, odds: GameOdds | None) -> bool:
+    if odds is None:
+        return False
+    start_utc = _aware_utc_from_start_time(game.start_time)
+    fetched_utc = _as_utc(odds.fetched_at)
+    if start_utc is None or fetched_utc is None:
+        return False
+    same_game_day = fetched_utc.astimezone(ET).date() == start_utc.astimezone(ET).date()
+    return same_game_day and fetched_utc > start_utc
+
+
+def _latest_pregame_rows_by_game(
+    db: Session,
+    games: list[Game],
+) -> tuple[dict[int, GameOdds], dict[int, GameOdds]]:
+    game_by_id = {game.game_id: game for game in games}
+    valid: dict[int, GameOdds] = {}
+    post_start: dict[int, GameOdds] = {}
+    if not game_by_id:
+        return valid, post_start
+    rows = (
+        db.query(GameOdds)
+        .filter(GameOdds.game_id.in_(game_by_id), GameOdds.snapshot_type == SnapshotType.pregame)
+        .order_by(GameOdds.game_id.asc(), GameOdds.fetched_at.desc(), GameOdds.id.desc())
+        .all()
+    )
+    for row in rows:
+        game = game_by_id.get(row.game_id)
+        if game and _odds_fetched_after_start(game, row):
+            post_start.setdefault(row.game_id, row)
+            continue
+        valid.setdefault(row.game_id, row)
+    return valid, post_start
+
+
 def build_market_readiness_report(db: Session) -> dict:
     today = datetime.now(ET).date()
     now_utc = datetime.now(timezone.utc)
@@ -219,18 +254,13 @@ def build_market_readiness_report(db: Session) -> dict:
 
     open_by_game: dict[int, GameOdds] = {}
     pregame_by_game: dict[int, GameOdds] = {}
+    post_start_pregame_by_game: dict[int, GameOdds] = {}
     movement_by_game: dict[int, LineMovement] = {}
     edge_by_game: dict[int, EdgeResult] = {}
 
     if game_ids:
-        odds_rows = (
-            db.query(GameOdds)
-            .filter(GameOdds.game_id.in_(game_ids))
-            .order_by(GameOdds.game_id.asc(), GameOdds.fetched_at.desc(), GameOdds.id.desc())
-            .all()
-        )
-        open_by_game = _latest_by_game(row for row in odds_rows if row.snapshot_type == SnapshotType.open)
-        pregame_by_game = _latest_by_game(row for row in odds_rows if row.snapshot_type == SnapshotType.pregame)
+        open_by_game = _latest_rows_by_game(db, game_ids, SnapshotType.open)
+        pregame_by_game, post_start_pregame_by_game = _latest_pregame_rows_by_game(db, games)
 
         movement_by_game = _latest_by_game(
             db.query(LineMovement)
@@ -250,6 +280,7 @@ def build_market_readiness_report(db: Session) -> dict:
     for game in games:
         open_odds = open_by_game.get(game.game_id)
         pregame_odds = pregame_by_game.get(game.game_id)
+        post_start_pregame = post_start_pregame_by_game.get(game.game_id)
         movement = movement_by_game.get(game.game_id)
         edge = edge_by_game.get(game.game_id)
         start_utc = _aware_utc_from_start_time(game.start_time)
@@ -259,6 +290,9 @@ def build_market_readiness_report(db: Session) -> dict:
         if pregame_odds and movement:
             readiness = "CLV_READY"
             reason = "Pregame snapshot and line movement are available."
+        elif post_start_pregame and not pregame_odds:
+            readiness = "PREGAME_AFTER_START"
+            reason = "Latest pregame-labeled odds were fetched after first pitch, so CLV is not trusted."
         elif pregame_due_at and now_utc < pregame_due_at:
             readiness = "WAITING_FOR_PREGAME_WINDOW"
             reason = "Pregame snapshot is not due until 45 minutes before first pitch."
@@ -286,6 +320,7 @@ def build_market_readiness_report(db: Session) -> dict:
             "readiness_reason": reason,
             "has_open_snapshot": open_odds is not None,
             "has_pregame_snapshot": pregame_odds is not None,
+            "has_post_start_pregame_snapshot": post_start_pregame is not None,
             "has_line_movement": movement is not None,
             "has_active_edge": edge is not None,
             "active_edge": {
@@ -299,6 +334,7 @@ def build_market_readiness_report(db: Session) -> dict:
             } if edge else None,
             "open_snapshot": _odds_snapshot_summary(open_odds),
             "pregame_snapshot": _odds_snapshot_summary(pregame_odds),
+            "post_start_pregame_snapshot": _odds_snapshot_summary(post_start_pregame),
             "line_movement": {
                 "id": movement.id,
                 "calculated_at": _iso_datetime(movement.calculated_at),
@@ -322,6 +358,7 @@ def build_market_readiness_report(db: Session) -> dict:
         "waiting_for_pregame_window": readiness_counts.get("WAITING_FOR_PREGAME_WINDOW", 0),
         "missing_open_odds": readiness_counts.get("MISSING_OPEN_ODDS", 0),
         "missing_pregame_snapshots": readiness_counts.get("PREGAME_SNAPSHOT_MISSING", 0),
+        "post_start_pregame_snapshots": readiness_counts.get("PREGAME_AFTER_START", 0),
         "missing_line_movement": readiness_counts.get("MOVEMENT_MISSING", 0),
         "games": rows,
     }
@@ -557,6 +594,7 @@ def _warehouse_play_row(
     play: str,
     open_odds: GameOdds | None,
     pregame_odds: GameOdds | None,
+    post_start_pregame_odds: GameOdds | None,
     latest_odds: GameOdds | None,
     movement: LineMovement | None,
     edge: EdgeResult | None,
@@ -567,6 +605,7 @@ def _warehouse_play_row(
     latest_price, latest_line = _play_odds_and_line(latest_odds, play)
     clv = _clv_for_play(open_odds, pregame_odds, play)
     movement_stale = _movement_record_is_stale(movement, pregame_odds)
+    has_post_start_pregame = post_start_pregame_odds is not None
     return {
         "game_id": game.game_id,
         "matchup": f"{game.away_team} @ {game.home_team}",
@@ -581,6 +620,7 @@ def _warehouse_play_row(
         "pregame_line": pregame_line,
         "pregame_price": pregame_price,
         "pregame_fetched_at": _iso_datetime(pregame_odds.fetched_at) if pregame_odds else None,
+        "post_start_pregame_fetched_at": _iso_datetime(post_start_pregame_odds.fetched_at) if post_start_pregame_odds else None,
         "latest_line": latest_line,
         "latest_price": latest_price,
         "latest_snapshot_type": latest_odds.snapshot_type.value if latest_odds and latest_odds.snapshot_type else None,
@@ -601,6 +641,7 @@ def _warehouse_play_row(
         "market_respect_tags": respect.get("tags") if respect and edge and edge.recommended_play == play else [],
         "readiness": (
             "CLV_READY" if pregame_odds and movement else
+            "PREGAME_AFTER_START" if has_post_start_pregame and not pregame_odds else
             "PREGAME_SNAPSHOT_MISSING" if not pregame_odds else
             "MOVEMENT_MISSING"
         ),
@@ -612,8 +653,7 @@ def build_odds_warehouse_report(db: Session) -> dict:
     games = db.query(Game).filter(Game.game_date == today).order_by(Game.start_time.asc(), Game.game_id.asc()).all()
     game_ids = [game.game_id for game in games]
     open_by_game = _latest_rows_by_game(db, game_ids, SnapshotType.open)
-    pregame_by_game = _latest_rows_by_game(db, game_ids, SnapshotType.pregame)
-    latest_by_game = _latest_any_odds_by_game(db, game_ids)
+    pregame_by_game, post_start_pregame_by_game = _latest_pregame_rows_by_game(db, games)
     movement_by_game = _latest_by_game(
         db.query(LineMovement)
         .filter(LineMovement.game_id.in_(game_ids))
@@ -632,7 +672,8 @@ def build_odds_warehouse_report(db: Session) -> dict:
     for game in games:
         open_odds = open_by_game.get(game.game_id)
         pregame_odds = pregame_by_game.get(game.game_id)
-        latest_odds = latest_by_game.get(game.game_id)
+        post_start_pregame_odds = post_start_pregame_by_game.get(game.game_id)
+        latest_odds = pregame_odds or open_odds
         movement = movement_by_game.get(game.game_id)
         edge = edge_by_game.get(game.game_id)
         respect = market_respect_for_edge(db, edge, odds=open_odds, game=game) if edge else None
@@ -644,6 +685,7 @@ def build_odds_warehouse_report(db: Session) -> dict:
                     play=play,
                     open_odds=open_odds,
                     pregame_odds=pregame_odds,
+                    post_start_pregame_odds=post_start_pregame_odds,
                     latest_odds=latest_odds,
                     movement=movement,
                     edge=edge,
@@ -664,6 +706,7 @@ def build_odds_warehouse_report(db: Session) -> dict:
             "price_clv": components.get("price_clv"),
             "open": _odds_snapshot_summary(open_odds),
             "pregame": _odds_snapshot_summary(pregame_odds),
+            "post_start_pregame": _odds_snapshot_summary(post_start_pregame_odds),
             "movement": {
                 "calculated_at": _iso_datetime(movement.calculated_at),
                 "total_move": float(movement.total_move) if movement and movement.total_move is not None else None,
@@ -676,6 +719,7 @@ def build_odds_warehouse_report(db: Session) -> dict:
             } if movement else None,
             "readiness": (
                 "CLV_READY" if pregame_odds and movement else
+                "PREGAME_AFTER_START" if post_start_pregame_odds and not pregame_odds else
                 "PREGAME_SNAPSHOT_MISSING" if not pregame_odds else
                 "MOVEMENT_MISSING"
             ),
@@ -690,6 +734,7 @@ def build_odds_warehouse_report(db: Session) -> dict:
             "play_rows": len(play_rows),
             "open_snapshots": sum(1 for row in rows if row["open"]),
             "pregame_snapshots": sum(1 for row in rows if row["pregame"]),
+            "post_start_pregame_snapshots": sum(1 for row in rows if row["post_start_pregame"]),
             "clv_ready": sum(1 for row in rows if row["readiness"] == "CLV_READY"),
             "clv_ready_play_rows": sum(1 for row in play_rows if row["readiness"] == "CLV_READY"),
         },
