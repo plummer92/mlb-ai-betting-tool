@@ -24,7 +24,7 @@ from app.routes.debug import (
 from app.routes.model import get_today_predictions, run_model
 from app.routes.ranked import _build_ranked_rows, _decision_row_from_ranked
 from app.routes.reviews import get_review_summary, profitability_report
-from app.scheduler import schedule_pregame_jobs_for_today
+from app.scheduler import _recent_pregame_board_rows, schedule_pregame_jobs_for_today
 from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.edge_service import clear_edge_persistence_failures
 
@@ -1012,6 +1012,53 @@ class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):
         calc_mock.assert_called_once()
         self.assertEqual(calc_mock.call_args.kwargs["odds_rows"][0].id, odds.id)
         odds_mock.assert_not_called()
+
+    def test_recent_pregame_board_reuses_full_board_for_later_game(self) -> None:
+        fetched_at = datetime.now(timezone.utc) - timedelta(minutes=45)
+        games = [
+            Game(
+                game_id=21,
+                game_date=date.today(),
+                season=2026,
+                away_team="Away A",
+                home_team="Home A",
+                away_team_id=1,
+                home_team_id=2,
+            ),
+            Game(
+                game_id=22,
+                game_date=date.today(),
+                season=2026,
+                away_team="Away B",
+                home_team="Home B",
+                away_team_id=3,
+                home_team_id=4,
+            ),
+        ]
+        odds_rows = [
+            GameOdds(
+                game_id=21,
+                sportsbook="draftkings",
+                snapshot_type=SnapshotType.pregame,
+                fetched_at=fetched_at,
+                away_ml=120,
+                home_ml=-130,
+            ),
+            GameOdds(
+                game_id=22,
+                sportsbook="draftkings",
+                snapshot_type=SnapshotType.pregame,
+                fetched_at=fetched_at,
+                away_ml=110,
+                home_ml=-125,
+            ),
+        ]
+        self.db.add_all([*games, *odds_rows])
+        self.db.commit()
+
+        rows = _recent_pregame_board_rows(self.db, game_id=22, now_utc=datetime.now(timezone.utc))
+
+        self.assertEqual({row.game_id for row in rows}, {21, 22})
 
     def _backtest_result(self, accuracy: float) -> BacktestResult:
         result = BacktestResult(

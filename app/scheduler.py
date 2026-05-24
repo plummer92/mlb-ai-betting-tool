@@ -34,6 +34,7 @@ scheduler = AsyncIOScheduler(timezone="America/New_York")
 ET = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
 PREGAME_REUSE_WINDOW_MINUTES = 15
+PREGAME_BOARD_REUSE_WINDOW_MINUTES = 60
 logger = logging.getLogger(__name__)
 
 
@@ -124,6 +125,37 @@ def schedule_pregame_jobs_for_today(
             is_catch_up,
         )
     return result
+
+
+def _recent_pregame_board_rows(
+    db,
+    *,
+    game_id: int,
+    now_utc: datetime | None = None,
+    max_age_minutes: int = PREGAME_BOARD_REUSE_WINDOW_MINUTES,
+) -> list[GameOdds]:
+    """Return a recently fetched pregame board if it includes the target game."""
+    now_utc = now_utc or datetime.now(UTC)
+    latest_for_game = get_latest_odds_snapshot(
+        db,
+        game_id=game_id,
+        snapshot_type=SnapshotType.pregame,
+    )
+    if latest_for_game is None or not is_odds_snapshot_fresh(
+        latest_for_game,
+        now=now_utc,
+        max_age_minutes=max_age_minutes,
+    ):
+        return []
+
+    return (
+        db.query(GameOdds)
+        .filter(
+            GameOdds.snapshot_type == SnapshotType.pregame,
+            GameOdds.fetched_at == latest_for_game.fetched_at,
+        )
+        .all()
+    )
 
 
 @scheduler.scheduled_job(CronTrigger(hour=9, minute=0, timezone="America/New_York"))
@@ -298,6 +330,11 @@ async def run_pregame_snapshot(game_id: int):
             print(
                 f"[scheduler] Pregame snapshot reused for game {game_id}: "
                 f"rows={len(stored)} fetched_at={latest_existing.fetched_at}"
+            )
+        elif stored := _recent_pregame_board_rows(db, game_id=game_id):
+            print(
+                f"[scheduler] Pregame board reused for game {game_id}: "
+                f"rows={len(stored)} fetched_at={stored[0].fetched_at}"
             )
         else:
             stored = await fetch_and_store_odds(db, snapshot_type=SnapshotType.pregame)
