@@ -113,6 +113,7 @@ def schedule_pregame_jobs_for_today(
             args=[game.game_id],
             id=job_id,
             replace_existing=True,
+            misfire_grace_time=600,
         )
         if is_catch_up:
             result["catch_up_scheduled"] += 1
