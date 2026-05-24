@@ -385,6 +385,50 @@ class TradableDecisionSnapshot(Base):
     )
 
 
+class SharpMoveJournal(Base):
+    __tablename__ = "sharp_move_journal"
+
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, ForeignKey("games.game_id"), nullable=False, index=True)
+    edge_result_id = Column(Integer, ForeignKey("edge_results.id"), nullable=True, index=True)
+
+    game_date = Column(Date, nullable=False, index=True)
+    captured_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    matchup = Column(String(120), nullable=True)
+    play = Column(String(20), nullable=False, index=True)
+
+    open_fetched_at = Column(DateTime(timezone=True), nullable=True)
+    move_observed_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    latest_fetched_at = Column(DateTime(timezone=True), nullable=True)
+    sportsbook = Column(String(50), nullable=True)
+
+    open_line = Column(Numeric(8, 3), nullable=True)
+    open_price = Column(Integer, nullable=True)
+    pregame_line = Column(Numeric(8, 3), nullable=True)
+    pregame_price = Column(Integer, nullable=True)
+    latest_line = Column(Numeric(8, 3), nullable=True)
+    latest_price = Column(Integer, nullable=True)
+
+    line_move = Column(Numeric(8, 4), nullable=True)
+    price_move = Column(Numeric(8, 4), nullable=True)
+    line_clv = Column(Numeric(8, 4), nullable=True)
+    price_clv = Column(Numeric(8, 4), nullable=True)
+    movement_bucket = Column(String(30), nullable=False, default="no_movement", index=True)
+    market_signal = Column(String(30), nullable=False, default="NO_MOVE", index=True)
+
+    model_recommended_play = Column(String(20), nullable=True)
+    model_agreed = Column(Boolean, nullable=False, default=False, index=True)
+    model_edge_pct = Column(Numeric(8, 4), nullable=True)
+    model_ev = Column(Numeric(8, 4), nullable=True)
+
+    readiness = Column(String(30), nullable=True, index=True)
+    snapshot_json = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("game_date", "game_id", "play", name="uq_sharp_move_game_play_date"),
+    )
+
+
 class PlayByPlayComparison(Base):
     __tablename__ = "playbyplay_comparisons"
 

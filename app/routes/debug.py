@@ -28,6 +28,7 @@ from app.services.ev_math import american_to_decimal, calc_edge, implied_prob_ra
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
 from app.services.decision_journal_service import build_daily_trade_summary, persist_tradable_decisions
 from app.services.odds_service import odds_freshness_metadata
+from app.services.sharp_move_journal_service import persist_sharp_move_journal
 from app.services.totals_policy_service import totals_policy_backtest
 from app.routes.ranked import _build_decision_queue
 
@@ -94,6 +95,13 @@ def tradable_decision_journal_debug(
     if summary:
         return build_daily_trade_summary(db=db, limit=limit, active_only=active_only)
     return persist_tradable_decisions(db=db, limit=limit, active_only=active_only)
+
+
+@router.get("/sharp-move-journal")
+def sharp_move_journal_debug(
+    db: Session = Depends(get_db),
+):
+    return persist_sharp_move_journal(db=db)
 
 
 @router.get("/jobs", dependencies=[Depends(verify_api_key)])

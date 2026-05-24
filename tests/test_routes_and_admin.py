@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, OddsApiRequestLog, Prediction, SnapshotType, TradableDecisionSnapshot
+from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, OddsApiRequestLog, Prediction, SharpMoveJournal, SnapshotType, TradableDecisionSnapshot
 from app.routes.commentary import commentary_today
 from app.routes.admin import admin_backfill_prediction_dashboard_metrics, admin_freshness
 from app.routes.debug import (
@@ -29,6 +29,7 @@ from app.scheduler import _recent_pregame_board_rows, schedule_pregame_jobs_for_
 from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.decision_journal_service import build_daily_trade_summary, persist_tradable_decisions
 from app.services.edge_service import clear_edge_persistence_failures
+from app.services.sharp_move_journal_service import persist_sharp_move_journal
 
 
 class RouteAndAdminTests(unittest.TestCase):
@@ -903,6 +904,64 @@ class RouteAndAdminTests(unittest.TestCase):
         home_ml = next(row for row in report["plays"] if row["play"] == "home_ml")
         self.assertEqual(home_ml["open_price"], -130)
         self.assertEqual(home_ml["pregame_price"], -135)
+
+    def test_sharp_move_journal_persists_market_footprints(self) -> None:
+        game = self._game(229)
+        prediction = self._prediction(game.game_id, run_stage="pregame")
+        open_odds = self._odds(game.game_id)
+        pregame = GameOdds(
+            game_id=game.game_id,
+            sportsbook="draftkings",
+            snapshot_type=SnapshotType.pregame,
+            fetched_at=datetime.now(timezone.utc),
+            away_ml=115,
+            home_ml=-135,
+            total_line=8.0,
+            over_odds=-110,
+            under_odds=-110,
+        )
+        movement = LineMovement(
+            game_id=game.game_id,
+            sportsbook="consensus",
+            calculated_at=datetime.now(timezone.utc),
+            open_total=8.5,
+            pregame_total=8.0,
+            total_move=-0.5,
+            total_steam_under=True,
+        )
+        self.db.add_all([pregame, movement])
+        self.db.commit()
+        self.db.add(
+            EdgeResult(
+                game_id=game.game_id,
+                prediction_id=prediction.prediction_id,
+                odds_id=open_odds.id,
+                movement_id=movement.id,
+                run_stage="pregame",
+                is_active=True,
+                calculated_at=datetime.now(timezone.utc),
+                recommended_play="under",
+                edge_pct=0.08,
+                total_edge=-1.2,
+                ev_under=0.12,
+                book_total=8.5,
+                under_odds=-110,
+            )
+        )
+        self.db.commit()
+
+        first = persist_sharp_move_journal(self.db)
+        second = persist_sharp_move_journal(self.db)
+
+        snapshots = self.db.query(SharpMoveJournal).filter(SharpMoveJournal.game_id == game.game_id).all()
+        under = next(row for row in snapshots if row.play == "under")
+        self.assertEqual(first["created"], 4)
+        self.assertEqual(second["updated"], 4)
+        self.assertEqual(len(snapshots), 4)
+        self.assertEqual(under.market_signal, "TOTAL_STEAM_UNDER")
+        self.assertEqual(under.movement_bucket, "total_steam")
+        self.assertTrue(under.model_agreed)
+        self.assertEqual(float(under.line_move), 0.5)
 
     def test_startup_schedules_future_pregame_jobs(self) -> None:
         game = self._game(130)
