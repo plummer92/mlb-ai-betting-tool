@@ -8,7 +8,7 @@ from apscheduler.triggers.date import DateTrigger
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.db import SessionLocal
-from app.models.schema import EdgeResult, Game, GameOdds, LineMovement
+from app.models.schema import EdgeResult, Game, GameOdds, LineMovement, Prediction
 from app.services.alert_service import create_and_send_alert_for_game, create_and_send_alerts_for_today
 from app.services.backtest_service import apply_backtest_weights, get_latest_calibration_result, run_logistic_regression
 from app.services.edge_service import calculate_edge_for_game
@@ -171,6 +171,19 @@ def _pregame_processing_complete(db, *, game_id: int) -> bool:
         .first()
     )
     return movement is not None and edge is not None
+
+
+def _has_active_prediction(db, *, game_id: int, run_stage: str) -> bool:
+    return (
+        db.query(Prediction)
+        .filter(
+            Prediction.game_id == game_id,
+            Prediction.run_stage == run_stage,
+            Prediction.is_active.is_(True),
+        )
+        .first()
+        is not None
+    )
 
 
 @scheduler.scheduled_job(CronTrigger(hour=9, minute=0, timezone="America/New_York"))
@@ -364,6 +377,17 @@ async def run_pregame_snapshot(game_id: int):
                 f"sharp_away={movement.sharp_away}, "
                 f"sharp_home={movement.sharp_home}"
             )
+
+        if not _has_active_prediction(db, game_id=game_id, run_stage="pregame"):
+            game = db.query(Game).filter(Game.game_id == game_id).first()
+            target_date = game.game_date if game else datetime.now(ET).date()
+            prediction_result = run_predictions_for_date(
+                db,
+                target_date,
+                run_stage="pregame",
+                diagnostic_label="scheduler-pregame",
+            )
+            print(f"[scheduler] Pregame predictions refreshed: {prediction_result}")
 
         odds_by_game = {row.game_id: row for row in stored}
         edge_result = calculate_edge_for_game(

@@ -1085,6 +1085,44 @@ class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual({row.game_id for row in rows}, {21, 22})
 
+    async def test_pregame_snapshot_refreshes_missing_pregame_prediction(self) -> None:
+        game = Game(
+            game_id=23,
+            game_date=date.today(),
+            season=2026,
+            away_team="Away",
+            home_team="Home",
+            away_team_id=1,
+            home_team_id=2,
+            start_time=(datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+        )
+        odds = GameOdds(
+            game_id=23,
+            sportsbook="draftkings",
+            snapshot_type=SnapshotType.pregame,
+            fetched_at=datetime.now(timezone.utc),
+            away_ml=120,
+            home_ml=-130,
+            total_line=8.5,
+        )
+        self.db.add_all([game, odds])
+        self.db.commit()
+
+        with patch("app.scheduler.SessionLocal", return_value=self.db), \
+             patch("app.scheduler.compute_line_movement", return_value=None), \
+             patch("app.scheduler.run_predictions_for_date", return_value={"status": "ok", "ran": 1, "errors": []}) as prediction_mock, \
+             patch("app.scheduler.calculate_edge_for_game", return_value={"status": "created"}) as edge_mock, \
+             patch("app.scheduler.create_and_send_alert_for_game", return_value={"sent": 0}) as alert_mock, \
+             patch("app.scheduler.fetch_and_store_odds", new_callable=AsyncMock) as odds_mock:
+            from app.scheduler import run_pregame_snapshot
+
+            await run_pregame_snapshot(game.game_id)
+
+        prediction_mock.assert_called_once()
+        edge_mock.assert_called_once()
+        alert_mock.assert_called_once()
+        odds_mock.assert_not_called()
+
     def _backtest_result(self, accuracy: float) -> BacktestResult:
         result = BacktestResult(
             seasons="2022,2023,2024",
