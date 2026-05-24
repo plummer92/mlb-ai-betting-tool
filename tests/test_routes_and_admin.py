@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, OddsApiRequestLog, Prediction, SnapshotType
+from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, OddsApiRequestLog, Prediction, SnapshotType, TradableDecisionSnapshot
 from app.routes.commentary import commentary_today
 from app.routes.admin import admin_backfill_prediction_dashboard_metrics, admin_freshness
 from app.routes.debug import (
@@ -27,6 +27,7 @@ from app.routes.ranked import _build_ranked_rows, _decision_row_from_ranked
 from app.routes.reviews import get_review_summary, profitability_report
 from app.scheduler import _recent_pregame_board_rows, schedule_pregame_jobs_for_today
 from app.services.betting_policy import qualifies_for_bet_policy
+from app.services.decision_journal_service import build_daily_trade_summary, persist_tradable_decisions
 from app.services.edge_service import clear_edge_persistence_failures
 
 
@@ -414,6 +415,9 @@ class RouteAndAdminTests(unittest.TestCase):
         row = {
             "rank": 1,
             "game_id": 99,
+            "edge_result_id": 7,
+            "prediction_id": 5,
+            "game_date": date.today().isoformat(),
             "matchup": "Away @ Home",
             "play": "home_ml",
             "raw_edge_pct": 0.05,
@@ -466,6 +470,9 @@ class RouteAndAdminTests(unittest.TestCase):
 
         self.assertEqual(row["decision_status"], "FIRE")
         self.assertEqual(row["tradable_signal"], "TRADE")
+        self.assertEqual(row["edge_result_id"], 7)
+        self.assertEqual(row["prediction_id"], 5)
+        self.assertEqual(row["game_date"], date.today().isoformat())
 
     def test_decision_queue_blocks_agreement_without_clv(self) -> None:
         row = _decision_row_from_ranked(
@@ -520,6 +527,48 @@ class RouteAndAdminTests(unittest.TestCase):
         row = _decision_row_from_ranked(self._decision_base_row(adjusted_edge_pct=-0.01))
 
         self.assertEqual(row["decision_status"], "NO BET")
+
+    def test_persist_tradable_decisions_upserts_by_edge(self) -> None:
+        fake_row = _decision_row_from_ranked(self._decision_base_row())
+
+        with patch("app.services.decision_journal_service._build_decision_queue", return_value=[fake_row]):
+            first = persist_tradable_decisions(db=self.db, active_only=False)
+            second = persist_tradable_decisions(db=self.db, active_only=False)
+
+        snapshots = self.db.query(TradableDecisionSnapshot).all()
+        self.assertEqual(first["created"], 1)
+        self.assertEqual(second["updated"], 1)
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0].tradable_signal, "TRADE")
+        self.assertIn("Away @ Home", snapshots[0].snapshot_json)
+
+    def test_daily_trade_summary_reports_no_trade_board(self) -> None:
+        fake_row = _decision_row_from_ranked(
+            self._decision_base_row(
+                market_respect_score=50,
+                market_respect_tags=["MARKET NEUTRAL"],
+                market_trust_bucket="mixed_market",
+                market_respect={"score": 50, "tags": ["MARKET NEUTRAL"], "components": {}},
+                market_respect_adjustment={
+                    "score": 50,
+                    "bucket": "mixed_market",
+                    "score_bucket": "mixed_market",
+                    "tags": ["MARKET NEUTRAL"],
+                    "raw_edge_pct": 0.1,
+                    "raw_ev": 0.1,
+                    "adjusted_ev": 0.1,
+                    "adjusted_confidence": "strong",
+                    "explanation": "market neutral",
+                },
+            )
+        )
+
+        with patch("app.services.decision_journal_service._build_decision_queue", return_value=[fake_row]):
+            summary = build_daily_trade_summary(db=self.db, active_only=False)
+
+        self.assertEqual(summary["sentiment"], "no_trade")
+        self.assertIn("No live TRADE plays", summary["message"])
+        self.assertEqual(summary["journal"]["created"], 1)
 
     def _pipeline_edge_game(
         self,

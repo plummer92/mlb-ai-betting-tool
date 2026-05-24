@@ -353,6 +353,38 @@ class PaperTrade(Base):
     )
 
 
+class TradableDecisionSnapshot(Base):
+    __tablename__ = "tradable_decision_snapshots"
+
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, ForeignKey("games.game_id"), nullable=False, index=True)
+    edge_result_id = Column(Integer, ForeignKey("edge_results.id"), nullable=True, index=True)
+
+    game_date = Column(Date, nullable=False, index=True)
+    captured_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    matchup = Column(String(120), nullable=True)
+    play = Column(String(20), nullable=True, index=True)
+    decision_status = Column(String(20), nullable=False, index=True)
+    tradable_signal = Column(String(20), nullable=False, index=True)
+    tradable_reason = Column(Text, nullable=True)
+    decision_reason = Column(Text, nullable=True)
+
+    raw_edge_pct = Column(Numeric(8, 4), nullable=True)
+    adjusted_edge_pct = Column(Numeric(8, 4), nullable=True)
+    market_respect_score = Column(Integer, nullable=True)
+    market_respect_tag = Column(String(50), nullable=True)
+    odds_freshness_status = Column(String(30), nullable=True)
+    policy_status = Column(String(30), nullable=True)
+    policy_score = Column(Integer, nullable=True)
+    trade_allowed = Column(Boolean, nullable=False, default=False)
+
+    snapshot_json = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("game_date", "game_id", "edge_result_id", name="uq_tradable_decision_game_edge_date"),
+    )
+
+
 class PlayByPlayComparison(Base):
     __tablename__ = "playbyplay_comparisons"
 

@@ -107,6 +107,9 @@ def _build_ranked_rows(
         ranked.append(
             {
                 "game_id": game.game_id,
+                "edge_result_id": edge.id,
+                "prediction_id": prediction.prediction_id if prediction else None,
+                "game_date": game.game_date.isoformat() if game.game_date else today.isoformat(),
                 "away_team": game.away_team,
                 "home_team": game.home_team,
                 "matchup": f"{game.away_team} @ {game.home_team}",
@@ -274,6 +277,9 @@ def _decision_row_from_ranked(row: dict) -> dict:
     return {
         "rank": row.get("rank"),
         "game_id": row.get("game_id"),
+        "edge_result_id": row.get("edge_result_id"),
+        "prediction_id": row.get("prediction_id"),
+        "game_date": row.get("game_date"),
         "game": row.get("matchup"),
         "matchup": row.get("matchup"),
         "play": row.get("play"),

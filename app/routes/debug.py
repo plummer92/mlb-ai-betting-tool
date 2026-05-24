@@ -25,6 +25,7 @@ from app.services.edge_service import (
 )
 from app.services.ev_math import american_to_decimal, calc_edge, implied_prob_raw, remove_vig
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
+from app.services.decision_journal_service import build_daily_trade_summary, persist_tradable_decisions
 from app.services.odds_service import odds_freshness_metadata
 from app.services.totals_policy_service import totals_policy_backtest
 from app.routes.ranked import _build_decision_queue
@@ -80,6 +81,18 @@ def tradable_signals_debug(
         "pass": pass_rows,
         "research_watch": [row for row in rows if row.get("tradable_signal") == "WATCH"],
     }
+
+
+@router.get("/tradable-decision-journal")
+def tradable_decision_journal_debug(
+    limit: int = Query(50, ge=1, le=50),
+    active_only: bool = Query(True),
+    summary: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    if summary:
+        return build_daily_trade_summary(db=db, limit=limit, active_only=active_only)
+    return persist_tradable_decisions(db=db, limit=limit, active_only=active_only)
 
 
 @router.get("/jobs", dependencies=[Depends(verify_api_key)])

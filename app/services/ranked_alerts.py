@@ -8,6 +8,7 @@ import requests
 
 from app.db import SessionLocal
 from app.models.schema import EdgeResult, Game, GameOdds
+from app.services.decision_journal_service import send_daily_trade_summary
 from app.services.edge_service import get_trustworthy_active_edges
 from app.services.market_respect_service import classify_tradable_signal, market_respect_adjustment, market_respect_for_edge
 from app.services.totals_policy_service import apply_under_cluster_risk, evaluate_totals_policy
@@ -154,6 +155,12 @@ def _alertable_ranked_bets(bets: list[dict]) -> list[dict]:
 
 
 def send_ranked_bets_to_discord_job(limit: int = 10, active_only: bool = True) -> dict:
+    db = SessionLocal()
+    try:
+        return send_daily_trade_summary(db=db, limit=max(limit, 50), active_only=active_only)
+    finally:
+        db.close()
+
     webhook = os.getenv("DISCORD_WEBHOOK_URL")
     if not webhook:
         return {"sent": 0, "error": "DISCORD_WEBHOOK_URL is not set"}
