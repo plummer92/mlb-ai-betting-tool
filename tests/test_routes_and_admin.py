@@ -810,6 +810,31 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(result["catch_up_scheduled"], 1)
         mocked_scheduler.add_job.assert_called_once()
 
+    def test_startup_processes_existing_pregame_odds_without_movement(self) -> None:
+        game = self._game(132)
+        now_utc = datetime.now(timezone.utc)
+        game.start_time = (now_utc + timedelta(minutes=30)).isoformat()
+        self.db.add(
+            GameOdds(
+                game_id=game.game_id,
+                sportsbook="draftkings",
+                snapshot_type=SnapshotType.pregame,
+                fetched_at=now_utc,
+                away_ml=120,
+                home_ml=-130,
+                total_line=8.5,
+            )
+        )
+        self.db.commit()
+
+        with patch("app.scheduler.scheduler") as mocked_scheduler:
+            mocked_scheduler.get_job.return_value = None
+            result = schedule_pregame_jobs_for_today(self.db, now_utc=now_utc, catch_up_missing=True)
+
+        self.assertEqual(result["already_ready"], 0)
+        self.assertEqual(result["catch_up_scheduled"], 1)
+        mocked_scheduler.add_job.assert_called_once()
+
     def test_debug_routes_are_registered(self) -> None:
         from app.main import app
 

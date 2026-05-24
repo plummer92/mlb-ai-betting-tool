@@ -8,7 +8,7 @@ from apscheduler.triggers.date import DateTrigger
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.db import SessionLocal
-from app.models.schema import Game, GameOdds
+from app.models.schema import EdgeResult, Game, GameOdds, LineMovement
 from app.services.alert_service import create_and_send_alert_for_game, create_and_send_alerts_for_today
 from app.services.backtest_service import apply_backtest_weights, get_latest_calibration_result, run_logistic_regression
 from app.services.edge_service import calculate_edge_for_game
@@ -92,7 +92,7 @@ def schedule_pregame_jobs_for_today(
             game_id=game.game_id,
             snapshot_type=SnapshotType.pregame,
         )
-        if latest_pregame is not None:
+        if latest_pregame is not None and _pregame_processing_complete(db, game_id=game.game_id):
             result["already_ready"] += 1
             continue
 
@@ -156,6 +156,21 @@ def _recent_pregame_board_rows(
         )
         .all()
     )
+
+
+def _pregame_processing_complete(db, *, game_id: int) -> bool:
+    movement = db.query(LineMovement).filter(LineMovement.game_id == game_id).first()
+    edge = (
+        db.query(EdgeResult)
+        .filter(
+            EdgeResult.game_id == game_id,
+            EdgeResult.is_active.is_(True),
+            EdgeResult.run_stage == "pregame",
+        )
+        .order_by(EdgeResult.calculated_at.desc(), EdgeResult.id.desc())
+        .first()
+    )
+    return movement is not None and edge is not None
 
 
 @scheduler.scheduled_job(CronTrigger(hour=9, minute=0, timezone="America/New_York"))
