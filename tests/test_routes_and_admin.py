@@ -905,6 +905,49 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(home_ml["open_price"], -130)
         self.assertEqual(home_ml["pregame_price"], -135)
 
+    def test_odds_warehouse_derives_play_movement_from_displayed_snapshots(self) -> None:
+        game = self._game(130)
+        open_odds = self._odds(game.game_id)
+        open_odds.away_ml = 140
+        open_odds.home_ml = -180
+        open_odds.total_line = 7.5
+        open_odds.fetched_at = datetime.now(timezone.utc) - timedelta(hours=3)
+        pregame = GameOdds(
+            game_id=game.game_id,
+            sportsbook="draftkings",
+            snapshot_type=SnapshotType.pregame,
+            fetched_at=datetime.now(timezone.utc),
+            away_ml=-210,
+            home_ml=150,
+            total_line=7.0,
+            over_odds=-108,
+            under_odds=-130,
+        )
+        stale_movement = LineMovement(
+            game_id=game.game_id,
+            sportsbook="consensus",
+            calculated_at=datetime.now(timezone.utc) - timedelta(hours=2),
+            open_total=7.5,
+            pregame_total=7.5,
+            total_move=0.0,
+            away_prob_move=0.0035,
+            home_prob_move=-0.0035,
+        )
+        self.db.add_all([pregame, stale_movement])
+        self.db.commit()
+
+        report = build_odds_warehouse_report(self.db)
+        away_ml = next(row for row in report["plays"] if row["play"] == "away_ml")
+        home_ml = next(row for row in report["plays"] if row["play"] == "home_ml")
+        under = next(row for row in report["plays"] if row["play"] == "under")
+
+        self.assertEqual(away_ml["movement_bucket"], "ml_steam")
+        self.assertEqual(home_ml["movement_bucket"], "ml_steam")
+        self.assertEqual(under["movement_bucket"], "total_steam")
+        self.assertTrue(away_ml["movement_record_stale"])
+        self.assertAlmostEqual(away_ml["price_move"], 0.2608)
+        self.assertEqual(under["line_move"], 0.5)
+
     def test_sharp_move_journal_persists_market_footprints(self) -> None:
         game = self._game(229)
         prediction = self._prediction(game.game_id, run_stage="pregame")

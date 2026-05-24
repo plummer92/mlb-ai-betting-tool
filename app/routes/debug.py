@@ -480,7 +480,59 @@ def _clv_for_play(open_odds: GameOdds | None, close_odds: GameOdds | None, play:
     return {"price_clv": price_clv, "line_clv": line_clv}
 
 
-def _movement_bucket_for_play(movement: LineMovement | None, play: str) -> str:
+def _direct_line_move_for_play(open_odds: GameOdds | None, close_odds: GameOdds | None, play: str) -> float | None:
+    _open_price, open_line = _play_odds_and_line(open_odds, play)
+    _close_price, close_line = _play_odds_and_line(close_odds, play)
+    if open_line is None or close_line is None:
+        return None
+    if play == "over":
+        return round(close_line - open_line, 2)
+    if play == "under":
+        return round(open_line - close_line, 2)
+    return None
+
+
+def _direct_price_move_for_play(open_odds: GameOdds | None, close_odds: GameOdds | None, play: str) -> float | None:
+    open_price, _open_line = _play_odds_and_line(open_odds, play)
+    close_price, _close_line = _play_odds_and_line(close_odds, play)
+    if open_price is None or close_price is None:
+        return None
+    return round(implied_prob_raw(close_price) - implied_prob_raw(open_price), 4)
+
+
+def _movement_record_is_stale(movement: LineMovement | None, pregame_odds: GameOdds | None) -> bool:
+    movement_time = _as_utc(movement.calculated_at) if movement else None
+    pregame_time = _as_utc(pregame_odds.fetched_at) if pregame_odds else None
+    if movement_time is None or pregame_time is None:
+        return False
+    return movement_time < pregame_time
+
+
+def _movement_bucket_for_play(
+    movement: LineMovement | None,
+    play: str,
+    *,
+    open_odds: GameOdds | None = None,
+    pregame_odds: GameOdds | None = None,
+) -> str:
+    line_move = _direct_line_move_for_play(open_odds, pregame_odds, play)
+    price_move = _direct_price_move_for_play(open_odds, pregame_odds, play)
+    if play in {"over", "under"} and line_move is not None:
+        total = abs(line_move)
+        if total >= 0.5:
+            return "total_steam"
+        if total >= 0.2:
+            return "minor_move"
+        if price_move is not None and abs(price_move) >= 0.02:
+            return "price_move"
+        return "flat"
+    if play in {"away_ml", "home_ml"} and price_move is not None:
+        side_move = abs(price_move)
+        if side_move >= 0.04:
+            return "ml_steam"
+        if side_move >= 0.02:
+            return "minor_move"
+        return "flat"
     if movement is None:
         return "no_movement"
     if play in {"over", "under"}:
@@ -514,6 +566,7 @@ def _warehouse_play_row(
     pregame_price, pregame_line = _play_odds_and_line(pregame_odds, play)
     latest_price, latest_line = _play_odds_and_line(latest_odds, play)
     clv = _clv_for_play(open_odds, pregame_odds, play)
+    movement_stale = _movement_record_is_stale(movement, pregame_odds)
     return {
         "game_id": game.game_id,
         "matchup": f"{game.away_team} @ {game.home_team}",
@@ -534,7 +587,15 @@ def _warehouse_play_row(
         "latest_fetched_at": _iso_datetime(latest_odds.fetched_at) if latest_odds else None,
         "line_clv": clv["line_clv"],
         "price_clv": clv["price_clv"],
-        "movement_bucket": _movement_bucket_for_play(movement, play),
+        "line_move": _direct_line_move_for_play(open_odds, pregame_odds, play),
+        "price_move": _direct_price_move_for_play(open_odds, pregame_odds, play),
+        "movement_bucket": _movement_bucket_for_play(
+            movement,
+            play,
+            open_odds=open_odds,
+            pregame_odds=pregame_odds,
+        ),
+        "movement_record_stale": movement_stale,
         "movement_direction": edge.movement_direction if edge and edge.recommended_play == play else None,
         "market_respect_score": respect.get("score") if respect and edge and edge.recommended_play == play else None,
         "market_respect_tags": respect.get("tags") if respect and edge and edge.recommended_play == play else [],
