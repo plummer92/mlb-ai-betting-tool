@@ -113,6 +113,22 @@ class GameOdds(Base):
     )
 
 
+class OddsApiRequestLog(Base):
+    __tablename__ = "odds_api_request_log"
+
+    id = Column(Integer, primary_key=True)
+    requested_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    provider = Column(String(50), nullable=False, default="the_odds_api")
+    endpoint = Column(String(100), nullable=False, default="odds")
+    snapshot_type = Column(String(20), nullable=True, index=True)
+    bookmakers = Column(Text, nullable=True)
+    status = Column(String(20), nullable=False, default="ok", index=True)
+    http_status = Column(Integer, nullable=True)
+    events_returned = Column(Integer, nullable=True)
+    raw_bytes = Column(Integer, nullable=True)
+    error = Column(Text, nullable=True)
+
+
 class LineMovement(Base):
     __tablename__ = "line_movement"
 

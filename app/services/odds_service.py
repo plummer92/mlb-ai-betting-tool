@@ -7,7 +7,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.config import THE_ODDS_API_KEY, THE_ODDS_API_URL
-from app.models.schema import Game, GameOdds, LineMovement, SnapshotType
+from app.models.schema import Game, GameOdds, LineMovement, OddsApiRequestLog, SnapshotType
 from app.services.ev_math import is_sharp_move, ml_to_implied_prob, prob_move, remove_vig
 
 ET = ZoneInfo("America/New_York")
@@ -62,9 +62,27 @@ async def fetch_and_store_odds(
             resp = await client.get(THE_ODDS_API_URL, params=params, timeout=10)
             resp.raise_for_status()
         except httpx.HTTPError as exc:
+            response = getattr(exc, "response", None)
+            _record_odds_api_request(
+                db,
+                snapshot_type=snapshot_type,
+                requested_books=requested_books,
+                status="error",
+                http_status=response.status_code if response is not None else None,
+                error=_sanitize_http_error(exc),
+            )
             raise RuntimeError(_sanitize_http_error(exc)) from exc
         raw_events = resp.json()
         raw_size_bytes = len(resp.content or b"")
+        _record_odds_api_request(
+            db,
+            snapshot_type=snapshot_type,
+            requested_books=requested_books,
+            status="ok",
+            http_status=getattr(resp, "status_code", 200),
+            events_returned=len(raw_events),
+            raw_bytes=raw_size_bytes,
+        )
 
     print(
         f"[odds] fetch snapshot={snapshot_type.value} books={requested_books} "
@@ -202,6 +220,33 @@ async def fetch_and_store_odds(
         print(f"[odds] unresolved_matched_games={unresolved_matched_games[:20]}")
 
     return list(selected_rows.values())
+
+
+def _record_odds_api_request(
+    db: Session,
+    *,
+    snapshot_type: SnapshotType,
+    requested_books: list[str],
+    status: str,
+    http_status: int | None = None,
+    events_returned: int | None = None,
+    raw_bytes: int | None = None,
+    error: str | None = None,
+) -> None:
+    db.add(
+        OddsApiRequestLog(
+            provider="the_odds_api",
+            endpoint="odds",
+            snapshot_type=snapshot_type.value,
+            bookmakers=",".join(requested_books),
+            status=status,
+            http_status=http_status,
+            events_returned=events_returned,
+            raw_bytes=raw_bytes,
+            error=error,
+        )
+    )
+    db.flush()
 
 
 def is_odds_snapshot_fresh(

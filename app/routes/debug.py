@@ -11,10 +11,10 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.config import DEBUG
+from app.config import DEBUG, ODDS_API_MONTHLY_QUOTA
 from app.middleware.auth import verify_api_key
 from app.middleware.limiter import limiter
-from app.models.schema import EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, Prediction, SnapshotType
+from app.models.schema import EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, OddsApiRequestLog, Prediction, SnapshotType
 from app.scheduler import scheduler
 from app.services.betting_policy import get_betting_profile, qualifies_for_bet_policy
 from app.services.edge_service import (
@@ -285,6 +285,7 @@ def build_market_readiness_report(db: Session) -> dict:
     return {
         "status": "ok",
         "date": today.isoformat(),
+        "quota": build_odds_quota_report(db),
         "total_games": len(games),
         "counts": dict(readiness_counts),
         "clv_ready_games": readiness_counts.get("CLV_READY", 0),
@@ -292,6 +293,143 @@ def build_market_readiness_report(db: Session) -> dict:
         "missing_open_odds": readiness_counts.get("MISSING_OPEN_ODDS", 0),
         "missing_pregame_snapshots": readiness_counts.get("PREGAME_SNAPSHOT_MISSING", 0),
         "missing_line_movement": readiness_counts.get("MOVEMENT_MISSING", 0),
+        "games": rows,
+    }
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def build_odds_quota_report(db: Session) -> dict:
+    now_et = datetime.now(ET)
+    month_start = now_et.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    today = now_et.date()
+    rows = (
+        db.query(OddsApiRequestLog)
+        .filter(OddsApiRequestLog.requested_at >= month_start.astimezone(timezone.utc))
+        .order_by(OddsApiRequestLog.requested_at.desc(), OddsApiRequestLog.id.desc())
+        .all()
+    )
+    ok_rows = [row for row in rows if row.status == "ok"]
+    today_rows = [
+        row for row in ok_rows
+        if _as_utc(row.requested_at) and _as_utc(row.requested_at).astimezone(ET).date() == today
+    ]
+    by_snapshot = Counter(row.snapshot_type or "unknown" for row in ok_rows)
+    used = len(ok_rows)
+    remaining = max(ODDS_API_MONTHLY_QUOTA - used, 0)
+    return {
+        "month": month_start.strftime("%Y-%m"),
+        "provider": "the_odds_api",
+        "monthly_quota": ODDS_API_MONTHLY_QUOTA,
+        "month_used": used,
+        "month_remaining": remaining,
+        "month_usage_pct": round(used / ODDS_API_MONTHLY_QUOTA, 4) if ODDS_API_MONTHLY_QUOTA else None,
+        "today_used": len(today_rows),
+        "errors_this_month": len([row for row in rows if row.status != "ok"]),
+        "by_snapshot_type": dict(by_snapshot),
+        "recent_requests": [
+            {
+                "requested_at": _iso_datetime(_as_utc(row.requested_at)),
+                "snapshot_type": row.snapshot_type,
+                "status": row.status,
+                "events_returned": row.events_returned,
+                "raw_bytes": row.raw_bytes,
+                "bookmakers": row.bookmakers,
+                "error": row.error,
+            }
+            for row in rows[:10]
+        ],
+    }
+
+
+def _latest_rows_by_game(db: Session, game_ids: list[int], snapshot_type: SnapshotType) -> dict[int, GameOdds]:
+    latest: dict[int, GameOdds] = {}
+    if not game_ids:
+        return latest
+    rows = (
+        db.query(GameOdds)
+        .filter(GameOdds.game_id.in_(game_ids), GameOdds.snapshot_type == snapshot_type)
+        .order_by(GameOdds.game_id.asc(), GameOdds.fetched_at.desc(), GameOdds.id.desc())
+        .all()
+    )
+    for row in rows:
+        latest.setdefault(row.game_id, row)
+    return latest
+
+
+def build_odds_warehouse_report(db: Session) -> dict:
+    today = datetime.now(ET).date()
+    games = db.query(Game).filter(Game.game_date == today).order_by(Game.start_time.asc(), Game.game_id.asc()).all()
+    game_ids = [game.game_id for game in games]
+    open_by_game = _latest_rows_by_game(db, game_ids, SnapshotType.open)
+    pregame_by_game = _latest_rows_by_game(db, game_ids, SnapshotType.pregame)
+    movement_by_game = _latest_by_game(
+        db.query(LineMovement)
+        .filter(LineMovement.game_id.in_(game_ids))
+        .order_by(LineMovement.game_id.asc(), LineMovement.calculated_at.desc(), LineMovement.id.desc())
+        .all()
+    ) if game_ids else {}
+    edge_by_game = _latest_by_game(
+        db.query(EdgeResult)
+        .filter(EdgeResult.game_id.in_(game_ids), EdgeResult.is_active.is_(True))
+        .order_by(EdgeResult.game_id.asc(), EdgeResult.calculated_at.desc(), EdgeResult.id.desc())
+        .all()
+    ) if game_ids else {}
+
+    rows = []
+    for game in games:
+        open_odds = open_by_game.get(game.game_id)
+        pregame_odds = pregame_by_game.get(game.game_id)
+        movement = movement_by_game.get(game.game_id)
+        edge = edge_by_game.get(game.game_id)
+        respect = market_respect_for_edge(db, edge, odds=open_odds, game=game) if edge else None
+        components = respect.get("components", {}) if respect else {}
+        rows.append({
+            "game_id": game.game_id,
+            "matchup": f"{game.away_team} @ {game.home_team}",
+            "start_time": game.start_time,
+            "play": edge.recommended_play if edge else None,
+            "run_stage": edge.run_stage if edge else None,
+            "edge_pct": float(edge.edge_pct or 0) if edge else None,
+            "market_respect_score": respect.get("score") if respect else None,
+            "market_respect_tags": respect.get("tags") if respect else [],
+            "line_clv": components.get("line_clv"),
+            "price_clv": components.get("price_clv"),
+            "open": _odds_snapshot_summary(open_odds),
+            "pregame": _odds_snapshot_summary(pregame_odds),
+            "movement": {
+                "calculated_at": _iso_datetime(movement.calculated_at),
+                "total_move": float(movement.total_move) if movement and movement.total_move is not None else None,
+                "home_prob_move": float(movement.home_prob_move) if movement and movement.home_prob_move is not None else None,
+                "away_prob_move": float(movement.away_prob_move) if movement and movement.away_prob_move is not None else None,
+                "sharp_home": bool(movement.sharp_home),
+                "sharp_away": bool(movement.sharp_away),
+                "total_steam_over": bool(movement.total_steam_over),
+                "total_steam_under": bool(movement.total_steam_under),
+            } if movement else None,
+            "readiness": (
+                "CLV_READY" if pregame_odds and movement else
+                "PREGAME_SNAPSHOT_MISSING" if not pregame_odds else
+                "MOVEMENT_MISSING"
+            ),
+        })
+
+    return {
+        "status": "ok",
+        "date": today.isoformat(),
+        "quota": build_odds_quota_report(db),
+        "summary": {
+            "games": len(rows),
+            "open_snapshots": sum(1 for row in rows if row["open"]),
+            "pregame_snapshots": sum(1 for row in rows if row["pregame"]),
+            "clv_ready": sum(1 for row in rows if row["readiness"] == "CLV_READY"),
+        },
         "games": rows,
     }
 
@@ -1035,6 +1173,11 @@ def odds_freshness(db: Session = Depends(get_db)):
 @router.get("/market-readiness")
 def market_readiness(db: Session = Depends(get_db)):
     return build_market_readiness_report(db)
+
+
+@router.get("/odds-warehouse")
+def odds_warehouse(db: Session = Depends(get_db)):
+    return build_odds_warehouse_report(db)
 
 
 def _edge_result_sample(edge: EdgeResult, game: Game | None = None) -> dict:

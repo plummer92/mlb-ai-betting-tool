@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, Prediction, SnapshotType
+from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, OddsApiRequestLog, Prediction, SnapshotType
 from app.routes.commentary import commentary_today
 from app.routes.admin import admin_backfill_prediction_dashboard_metrics, admin_freshness
 from app.routes.debug import (
@@ -17,6 +17,7 @@ from app.routes.debug import (
     build_edge_db_state,
     build_edge_persistence_report,
     build_market_readiness_report,
+    build_odds_warehouse_report,
     build_odds_freshness_report,
     build_raw_edge_board,
     build_totals_bias_report,
@@ -782,6 +783,65 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(by_game[ready_game.game_id]["readiness"], "CLV_READY")
         self.assertTrue(by_game[ready_game.game_id]["has_line_movement"])
 
+    def test_odds_warehouse_reports_quota_and_snapshots(self) -> None:
+        game = self._game(129)
+        prediction = self._prediction(game.game_id, run_stage="pregame")
+        open_odds = self._odds(game.game_id)
+        pregame = GameOdds(
+            game_id=game.game_id,
+            sportsbook="draftkings",
+            snapshot_type=SnapshotType.pregame,
+            fetched_at=datetime.now(timezone.utc),
+            away_ml=115,
+            home_ml=-135,
+            total_line=8.0,
+            over_odds=-110,
+            under_odds=-110,
+        )
+        movement = LineMovement(
+            game_id=game.game_id,
+            sportsbook="consensus",
+            calculated_at=datetime.now(timezone.utc),
+            open_total=8.5,
+            pregame_total=8.0,
+            total_move=-0.5,
+        )
+        log = OddsApiRequestLog(
+            provider="the_odds_api",
+            endpoint="odds",
+            snapshot_type="pregame",
+            bookmakers="draftkings",
+            status="ok",
+            http_status=200,
+            events_returned=1,
+            raw_bytes=1000,
+        )
+        self.db.add_all([pregame, movement, log])
+        self.db.commit()
+        self.db.add(
+            EdgeResult(
+                game_id=game.game_id,
+                prediction_id=prediction.prediction_id,
+                odds_id=open_odds.id,
+                movement_id=movement.id,
+                run_stage="pregame",
+                is_active=True,
+                calculated_at=datetime.now(timezone.utc),
+                recommended_play="under",
+                edge_pct=0.08,
+                book_total=8.5,
+                under_odds=-110,
+            )
+        )
+        self.db.commit()
+
+        report = build_odds_warehouse_report(self.db)
+
+        self.assertEqual(report["quota"]["month_used"], 1)
+        self.assertEqual(report["quota"]["by_snapshot_type"]["pregame"], 1)
+        self.assertEqual(report["summary"]["clv_ready"], 1)
+        self.assertEqual(report["games"][0]["readiness"], "CLV_READY")
+
     def test_startup_schedules_future_pregame_jobs(self) -> None:
         game = self._game(130)
         now_utc = datetime.now(timezone.utc)
@@ -848,6 +908,7 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertIn("/api/debug/totals-bias", paths)
         self.assertIn("/api/debug/totals-policy", paths)
         self.assertIn("/api/debug/market-readiness", paths)
+        self.assertIn("/api/debug/odds-warehouse", paths)
 
     def test_totals_bias_report_flags_supported_under_edge(self) -> None:
         self._totals_review_game(104, model_total=7.0, book_total=9.0, final_total=6, play="under", bet_result="win", pregame_total=8.5)

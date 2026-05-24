@@ -18,6 +18,7 @@ if not DATABASE_URL:
 
 THE_ODDS_API_KEY = os.getenv("THE_ODDS_API_KEY", "")
 THE_ODDS_API_URL = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
+ODDS_API_MONTHLY_QUOTA = int(os.getenv("ODDS_API_MONTHLY_QUOTA", "500"))
 
 ALERT_MIN_EV = float(os.getenv("ALERT_MIN_EV", "0.03"))
 ALERT_MIN_EDGE = float(os.getenv("ALERT_MIN_EDGE", "0.04"))

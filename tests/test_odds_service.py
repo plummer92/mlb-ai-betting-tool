@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models.schema import Game, GameOdds, SnapshotType
+from app.models.schema import Game, GameOdds, OddsApiRequestLog, SnapshotType
 from app.services.odds_service import _event_game_date, _match_game, compute_line_movement, fetch_and_store_odds, odds_freshness_metadata
 
 
@@ -128,6 +128,8 @@ class OddsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].id, existing.id)
+        self.assertEqual(self.db.query(OddsApiRequestLog).count(), 1)
+        self.assertEqual(self.db.query(OddsApiRequestLog).first().snapshot_type, "open")
 
     async def test_fetch_and_store_keeps_new_rows_when_other_rows_are_duplicates(self) -> None:
         self._game(1, date(2026, 4, 2), "Toronto Blue Jays", "Chicago White Sox")
