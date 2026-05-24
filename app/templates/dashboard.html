@@ -2318,9 +2318,9 @@ async function loadMarketShadow() {
         <tbody>${liveRows || '<tr><td colspan="7"><div class="empty compact">No sharp move rows yet.</div></td></tr>'}</tbody>
       </table>`;
   } catch(e) {
-    $('market-shadow-badge').textContent = 'ERROR';
+    $('market-shadow-badge').textContent = 'SLOW';
     $('market-shadow-summary').innerHTML = '';
-    $('market-shadow-table').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+    $('market-shadow-table').innerHTML = `<div class="empty">Market Shadow is still calculating. The odds warehouse and decision queue are available.</div>`;
   }
 }
 
