@@ -898,6 +898,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <a class="quick-tab" href="#decision-queue-section">Action</a>
     <a class="quick-tab" href="#today-read-section">Today</a>
     <a class="quick-tab" href="#market-audit-section">Markets</a>
+    <a class="quick-tab" href="#market-shadow-section">Shadow</a>
     <a class="quick-tab" href="#debrief-section">Debrief</a>
     <a class="quick-tab" href="#active-intel-section">Intel</a>
     <a class="quick-tab" href="#signals-section">Model</a>
@@ -1020,6 +1021,20 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <div class="card" style="padding:0;margin-top:12px">
       <div class="tbl-wrap" id="market-audit-table">
         <div class="loading">Loading CLV and movement audit</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="market-shadow-section">
+    <div class="section-head">
+      <div class="section-label">Market Shadow</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="market-shadow-badge">LOADING</div>
+    </div>
+    <div id="market-shadow-summary"></div>
+    <div class="card" style="padding:0;margin-top:12px">
+      <div class="tbl-wrap" id="market-shadow-table">
+        <div class="loading">Loading sharp move journal</div>
       </div>
     </div>
   </div>
@@ -2077,6 +2092,101 @@ async function loadMarketAudit() {
   }
 }
 
+async function loadMarketShadow() {
+  try {
+    const [journalRes, gradeRes] = await Promise.all([
+      fetch('/api/debug/sharp-move-journal'),
+      fetch('/api/debug/sharp-move-grade?min_sample=1'),
+    ]);
+    const journal = await journalRes.json();
+    const grade = await gradeRes.json();
+    const rows = journal.rows || [];
+    const summary = grade.summary || {};
+    const bySignal = grade.by_signal || [];
+    const gradedBets = summary.bets ?? 0;
+    const roi = summary.roi_per_bet != null ? fmt(summary.roi_per_bet, 3) : '---';
+    const winRate = summary.win_rate != null ? (summary.win_rate * 100).toFixed(1) + '%' : '---';
+    const agreedMoves = journal.model_agreed_moves ?? 0;
+
+    $('market-shadow-badge').textContent = `${rows.length || 0} ROWS / ${gradedBets} GRADED`;
+    $('market-shadow-summary').innerHTML = `
+      <div class="summary-bar" style="border-left-color: var(--cyan); background: var(--surface3);">
+        <div class="s-stat">
+          <div class="s-stat-val">${rows.length || 0}</div>
+          <div class="s-stat-lbl">Journal Rows</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val green">${agreedMoves}</div>
+          <div class="s-stat-lbl">Model-Agreed Moves</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val">${gradedBets}</div>
+          <div class="s-stat-lbl">Graded Shadows</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val ${summary.roi_per_bet > 0 ? 'green' : summary.roi_per_bet < 0 ? 'red' : 'muted'}">${roi}</div>
+          <div class="s-stat-lbl">Shadow ROI / Bet</div>
+        </div>
+        <div class="s-stat">
+          <div class="s-stat-val">${winRate}</div>
+          <div class="s-stat-lbl">Shadow Win Rate</div>
+        </div>
+      </div>
+      <div class="audit-note">
+        ${(Object.entries(journal.by_signal || {}).length)
+          ? `Signals today: ${Object.entries(journal.by_signal || {}).map(([k,v]) => `${esc(k)} (${v})`).join(', ')}`
+          : 'No market-shadow signals captured yet.'}
+      </div>`;
+
+    const signalRows = bySignal
+      .sort((a, b) => (b.bets ?? 0) - (a.bets ?? 0) || (b.roi_per_bet ?? 0) - (a.roi_per_bet ?? 0))
+      .map(row => {
+        const wr = row.win_rate != null ? (row.win_rate * 100).toFixed(1) + '%' : '---';
+        return `<tr>
+          <td class="mono">${esc(row.market_signal || '---')}</td>
+          <td class="mono">${row.bets ?? 0}</td>
+          <td class="mono ${row.roi_per_bet > 0 ? 'green' : row.roi_per_bet < 0 ? 'red' : 'muted'}">${fmt(row.roi_per_bet, 3)}</td>
+          <td class="mono">${wr}</td>
+        </tr>`;
+      }).join('');
+
+    const liveRows = rows.slice(0, 20).map(row => {
+      const clvCls = (row.line_clv || 0) > 0 || (row.price_clv || 0) > 0 ? 'green' : (row.line_clv || row.price_clv) ? 'red' : 'muted';
+      return `<tr>
+        <td style="font-weight:600;white-space:nowrap">${esc(row.matchup || '---')}<div class="muted mono" style="font-size:10px">${esc(row.game_date || '')}</div></td>
+        <td class="mono">${row.model_agreed ? '<span class="pill green">AGREE</span><br>' : ''}${esc((row.play || '---').replace('_', ' ').toUpperCase())}</td>
+        <td class="mono">${esc(row.market_signal || '---')}<div class="muted">${esc(row.movement_bucket || '---')}</div></td>
+        <td class="mono">${row.open_line ?? 'ML'}<div class="muted">${row.open_price ?? '---'}</div></td>
+        <td class="mono">${row.pregame_line ?? 'ML'}<div class="muted">${row.pregame_price ?? '---'}</div></td>
+        <td class="mono ${clvCls}">L ${row.line_clv ?? '---'}<div>P ${row.price_clv ?? '---'}</div></td>
+        <td class="mono">${esc(row.readiness || '---')}</td>
+      </tr>`;
+    }).join('');
+
+    $('market-shadow-table').innerHTML = `
+      <table>
+        <thead><tr>
+          <th colspan="4">Graded Shadow Signals</th>
+        </tr><tr>
+          <th>Signal</th><th>Bets</th><th>ROI / Bet</th><th>Win Rate</th>
+        </tr></thead>
+        <tbody>${signalRows || '<tr><td colspan="4"><div class="empty compact">No graded shadow rows yet.</div></td></tr>'}</tbody>
+      </table>
+      <table style="margin-top:14px;">
+        <thead><tr>
+          <th colspan="7">Current Sharp Move Journal</th>
+        </tr><tr>
+          <th>Game</th><th>Play</th><th>Signal</th><th>Open</th><th>Pregame</th><th>CLV</th><th>State</th>
+        </tr></thead>
+        <tbody>${liveRows || '<tr><td colspan="7"><div class="empty compact">No sharp move rows yet.</div></td></tr>'}</tbody>
+      </table>`;
+  } catch(e) {
+    $('market-shadow-badge').textContent = 'ERROR';
+    $('market-shadow-summary').innerHTML = '';
+    $('market-shadow-table').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
+}
+
 async function loadDebrief() {
   try {
     const res = await fetch('/api/reviews/recent?limit=100');
@@ -2639,7 +2749,7 @@ async function loadBullpen() {
 }
 
 async function loadAll() {
-  await Promise.all([loadDecisionQueue(), loadTotalsRegime(), loadDecisionDebug(), loadOddsDebug(), loadOddsWarehouse(), loadTodayRead(), loadAccuracy(), loadTopBets(), loadBestPlaysWeek(), loadMarketAudit(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
+  await Promise.all([loadDecisionQueue(), loadTotalsRegime(), loadDecisionDebug(), loadOddsDebug(), loadOddsWarehouse(), loadTodayRead(), loadAccuracy(), loadTopBets(), loadBestPlaysWeek(), loadMarketAudit(), loadMarketShadow(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
 }
 
 let countdown = 60;
