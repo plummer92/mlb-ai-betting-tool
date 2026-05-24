@@ -1904,9 +1904,13 @@ async function loadBestPlaysWeek() {
 
 async function loadMarketAudit() {
   try {
+    const auditTimeout = (promise, label) => Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} is still calculating; try refresh in a minute.`)), 25000)),
+    ]);
     const [clvRes, movementRes] = await Promise.all([
-      fetch('/api/paper/clv'),
-      fetch('/api/reviews/movement-report?min_sample=1'),
+      auditTimeout(fetch('/api/paper/clv'), 'CLV report'),
+      auditTimeout(fetch('/api/reviews/movement-report?min_sample=1'), 'Movement report'),
     ]);
     const clv = await clvRes.json();
     const movement = await movementRes.json();
