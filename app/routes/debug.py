@@ -277,6 +277,7 @@ def build_market_readiness_report(db: Session) -> dict:
 
     rows = []
     readiness_counts: Counter[str] = Counter()
+    movement_stale_count = 0
     for game in games:
         open_odds = open_by_game.get(game.game_id)
         pregame_odds = pregame_by_game.get(game.game_id)
@@ -309,6 +310,9 @@ def build_market_readiness_report(db: Session) -> dict:
             readiness = "UNKNOWN"
             reason = "Readiness could not be classified."
 
+        movement_stale = _movement_record_is_stale(movement, pregame_odds)
+        if movement_stale:
+            movement_stale_count += 1
         readiness_counts[readiness] += 1
         rows.append({
             "game_id": game.game_id,
@@ -318,10 +322,18 @@ def build_market_readiness_report(db: Session) -> dict:
             "pregame_snapshot_due_at": _iso_datetime(pregame_due_at),
             "readiness": readiness,
             "readiness_reason": reason,
+            "clv_usable": readiness == "CLV_READY" and not movement_stale,
+            "integrity_reason": _integrity_reason(
+                readiness=readiness,
+                movement_stale=movement_stale,
+                pregame_due_at=pregame_due_at,
+                post_start_pregame=post_start_pregame,
+            ),
             "has_open_snapshot": open_odds is not None,
             "has_pregame_snapshot": pregame_odds is not None,
             "has_post_start_pregame_snapshot": post_start_pregame is not None,
             "has_line_movement": movement is not None,
+            "movement_record_stale": movement_stale,
             "has_active_edge": edge is not None,
             "active_edge": {
                 "id": edge.id,
@@ -360,6 +372,17 @@ def build_market_readiness_report(db: Session) -> dict:
         "missing_pregame_snapshots": readiness_counts.get("PREGAME_SNAPSHOT_MISSING", 0),
         "post_start_pregame_snapshots": readiness_counts.get("PREGAME_AFTER_START", 0),
         "missing_line_movement": readiness_counts.get("MOVEMENT_MISSING", 0),
+        "movement_stale_games": movement_stale_count,
+        "trusted_pregame_snapshots": sum(1 for row in rows if row["has_pregame_snapshot"]),
+        "clv_usable_games": sum(1 for row in rows if row["clv_usable"]),
+        "integrity": {
+            "trusted_pregame": sum(1 for row in rows if row["has_pregame_snapshot"]),
+            "post_start_quarantined": readiness_counts.get("PREGAME_AFTER_START", 0),
+            "missing_pregame": readiness_counts.get("PREGAME_SNAPSHOT_MISSING", 0),
+            "movement_stale": movement_stale_count,
+            "movement_missing": readiness_counts.get("MOVEMENT_MISSING", 0),
+            "clv_usable": sum(1 for row in rows if row["clv_usable"]),
+        },
         "games": rows,
     }
 
@@ -543,6 +566,30 @@ def _movement_record_is_stale(movement: LineMovement | None, pregame_odds: GameO
     if movement_time is None or pregame_time is None:
         return False
     return movement_time < pregame_time
+
+
+def _integrity_reason(
+    *,
+    readiness: str,
+    movement_stale: bool,
+    pregame_due_at: datetime | None,
+    post_start_pregame: GameOdds | None,
+) -> str:
+    if movement_stale:
+        return "STALE: movement calculated before latest valid pregame odds."
+    if readiness == "CLV_READY":
+        return "OK: valid open + valid pregame + movement."
+    if readiness == "PREGAME_AFTER_START" and post_start_pregame:
+        return f"BLOCKED: pregame-labeled odds fetched after first pitch at {_iso_datetime(_as_utc(post_start_pregame.fetched_at))}."
+    if readiness == "WAITING_FOR_PREGAME_WINDOW":
+        return f"WAIT: pregame snapshot due at {_iso_datetime(pregame_due_at)}."
+    if readiness == "MISSING_OPEN_ODDS":
+        return "BLOCKED: missing opening odds snapshot."
+    if readiness == "PREGAME_SNAPSHOT_MISSING":
+        return "BLOCKED: no valid pregame snapshot."
+    if readiness == "MOVEMENT_MISSING":
+        return "BLOCKED: valid pregame exists, but movement has not been computed."
+    return "UNKNOWN: odds integrity could not be classified."
 
 
 def _movement_bucket_for_play(

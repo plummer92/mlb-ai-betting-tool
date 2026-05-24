@@ -993,6 +993,13 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertIsNone(shadow_away["pregame_price"])
         self.assertEqual(shadow_away["latest_price"], open_odds.away_ml)
 
+        readiness = build_market_readiness_report(self.db)
+        readiness_row = readiness["games"][0]
+        self.assertEqual(readiness["integrity"]["post_start_quarantined"], 1)
+        self.assertEqual(readiness["integrity"]["clv_usable"], 0)
+        self.assertFalse(readiness_row["clv_usable"])
+        self.assertIn("after first pitch", readiness_row["integrity_reason"])
+
     def test_sharp_move_journal_persists_market_footprints(self) -> None:
         game = self._game(229)
         prediction = self._prediction(game.game_id, run_stage="pregame")

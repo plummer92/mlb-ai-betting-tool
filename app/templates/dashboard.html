@@ -897,6 +897,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
   <div class="quick-tabs">
     <a class="quick-tab" href="#decision-queue-section">Action</a>
     <a class="quick-tab" href="#today-read-section">Today</a>
+    <a class="quick-tab" href="#odds-integrity-section">Odds Trust</a>
     <a class="quick-tab" href="#market-audit-section">Markets</a>
     <a class="quick-tab" href="#market-shadow-section">Shadow</a>
     <a class="quick-tab" href="#debrief-section">Debrief</a>
@@ -948,6 +949,20 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     </div>
     <div id="odds-debug-panel">
       <div class="loading">Loading odds freshness</div>
+    </div>
+  </div>
+
+  <div class="section" id="odds-integrity-section">
+    <div class="section-head">
+      <div class="section-label">Pregame Odds Integrity</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="odds-integrity-badge">LOADING</div>
+    </div>
+    <div id="odds-integrity-summary"></div>
+    <div class="card" style="padding:0;margin-top:12px">
+      <div class="tbl-wrap" id="odds-integrity-table">
+        <div class="loading">Loading odds integrity</div>
+      </div>
     </div>
   </div>
 
@@ -1503,6 +1518,79 @@ async function loadOddsDebug() {
     $('odds-debug-section').style.display = '';
     $('odds-debug-badge').textContent = 'ERROR';
     $('odds-debug-panel').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+function integrityChip(readiness, usable) {
+  if (usable) return decisionStatusChip('CLV READY');
+  if (readiness === 'PREGAME_AFTER_START') return decisionStatusChip('POST START');
+  if (readiness === 'WAITING_FOR_PREGAME_WINDOW') return decisionStatusChip('WAIT FOR ODDS');
+  if (readiness === 'MOVEMENT_MISSING') return decisionStatusChip('WAIT FOR ODDS');
+  return decisionStatusChip('BLOCKED');
+}
+
+async function loadOddsIntegrity() {
+  try {
+    const res = await fetch('/api/debug/market-readiness');
+    const data = await res.json();
+    const integrity = data.integrity || {};
+    const rows = data.games || [];
+    const total = data.total_games || rows.length || 0;
+    const blocked = total - (integrity.clv_usable || 0);
+    const trustPct = total ? Math.round(((integrity.clv_usable || 0) / total) * 100) : 0;
+    const badge = blocked ? `${blocked} BLOCKED` : `${integrity.clv_usable || 0} USABLE`;
+    $('odds-integrity-badge').textContent = badge;
+    $('odds-integrity-summary').innerHTML = `
+      <div class="today-read" style="margin-bottom:12px;">
+        <div class="read-tile">
+          <div class="read-label">CLV Usable</div>
+          <div class="read-main ${blocked ? 'yellow' : 'green'}">${integrity.clv_usable || 0}/${total}</div>
+          <div class="read-sub">${trustPct}% of today's board can trust pregame CLV</div>
+        </div>
+        <div class="read-tile">
+          <div class="read-label">Trusted Pregame</div>
+          <div class="read-main green">${integrity.trusted_pregame || 0}</div>
+          <div class="read-sub">Fetched before first pitch</div>
+        </div>
+        <div class="read-tile">
+          <div class="read-label">Post-Start Quarantined</div>
+          <div class="read-main ${(integrity.post_start_quarantined || 0) ? 'red' : 'green'}">${integrity.post_start_quarantined || 0}</div>
+          <div class="read-sub">Pregame-labeled odds ignored after start</div>
+        </div>
+        <div class="read-tile">
+          <div class="read-label">Missing / Stale</div>
+          <div class="read-main ${(integrity.missing_pregame || integrity.movement_stale || integrity.movement_missing) ? 'yellow' : 'green'}">${(integrity.missing_pregame || 0) + (integrity.movement_stale || 0) + (integrity.movement_missing || 0)}</div>
+          <div class="read-sub">${integrity.missing_pregame || 0} missing Â· ${integrity.movement_stale || 0} stale Â· ${integrity.movement_missing || 0} no movement</div>
+        </div>
+      </div>`;
+
+    $('odds-integrity-table').innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Game</th><th>CLV</th><th>Open</th><th>Pregame</th><th>Movement</th><th>Reason</th>
+        </tr></thead>
+        <tbody>
+          ${rows.length ? rows.map(r => {
+            const openAt = r.open_snapshot && r.open_snapshot.fetched_at ? gameTime(r.open_snapshot.fetched_at) : '---';
+            const preAt = r.pregame_snapshot && r.pregame_snapshot.fetched_at ? gameTime(r.pregame_snapshot.fetched_at) : '---';
+            const postAt = r.post_start_pregame_snapshot && r.post_start_pregame_snapshot.fetched_at ? gameTime(r.post_start_pregame_snapshot.fetched_at) : null;
+            const moveAt = r.line_movement && r.line_movement.calculated_at ? gameTime(r.line_movement.calculated_at) : '---';
+            const movementLabel = r.movement_record_stale ? 'STALE' : (r.has_line_movement ? 'READY' : 'MISSING');
+            const movementClass = r.movement_record_stale || !r.has_line_movement ? 'yellow' : 'green';
+            return `<tr>
+              <td style="font-weight:600;white-space:nowrap">${esc(r.matchup || '---')}<div class="muted mono" style="font-size:10px">${gameTime(r.start_time)}</div></td>
+              <td>${integrityChip(r.readiness, r.clv_usable)}</td>
+              <td class="mono">${r.has_open_snapshot ? 'YES' : 'NO'}<div class="muted">${esc(openAt)}</div></td>
+              <td class="mono">${r.has_pregame_snapshot ? 'TRUSTED' : '---'}<div class="muted">${esc(preAt)}${postAt ? ` · post ${esc(postAt)}` : ''}</div></td>
+              <td class="mono ${movementClass}">${movementLabel}<div class="muted">${esc(moveAt)}</div></td>
+              <td>${esc(r.integrity_reason || r.readiness_reason || '---')}</td>
+            </tr>`;
+          }).join('') : '<tr><td colspan="6"><div class="empty compact">No odds integrity rows yet.</div></td></tr>'}
+        </tbody>
+      </table>`;
+  } catch(e) {
+    $('odds-integrity-badge').textContent = 'ERROR';
+    $('odds-integrity-table').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
   }
 }
 
@@ -2761,7 +2849,7 @@ async function loadBullpen() {
 }
 
 async function loadAll() {
-  await Promise.all([loadDecisionQueue(), loadTotalsRegime(), loadDecisionDebug(), loadOddsDebug(), loadOddsWarehouse(), loadTodayRead(), loadAccuracy(), loadTopBets(), loadBestPlaysWeek(), loadMarketAudit(), loadMarketShadow(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
+  await Promise.all([loadDecisionQueue(), loadTotalsRegime(), loadDecisionDebug(), loadOddsDebug(), loadOddsIntegrity(), loadOddsWarehouse(), loadTodayRead(), loadAccuracy(), loadTopBets(), loadBestPlaysWeek(), loadMarketAudit(), loadMarketShadow(), loadDebrief(), loadCommentary(), loadIntel(), loadSignals(), loadBullpen()]);
 }
 
 let countdown = 60;
