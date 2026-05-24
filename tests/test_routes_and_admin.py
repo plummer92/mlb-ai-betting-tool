@@ -16,6 +16,7 @@ from app.routes.debug import (
     build_decision_pipeline_diagnostics,
     build_edge_db_state,
     build_edge_persistence_report,
+    build_market_readiness_report,
     build_odds_freshness_report,
     build_raw_edge_board,
     build_totals_bias_report,
@@ -717,6 +718,69 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(report["stale_games"], 1)
         self.assertTrue(any(row["reason"] == "stale_feed" for row in report["stale_reason_counts"]))
 
+    def test_market_readiness_report_explains_missing_clv(self) -> None:
+        waiting_game = self._game(97)
+        waiting_game.start_time = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+        waiting_prediction = self._prediction(waiting_game.game_id)
+        waiting_odds = self._odds(waiting_game.game_id)
+        ready_game = self._game(98)
+        ready_prediction = self._prediction(ready_game.game_id)
+        ready_open = self._odds(ready_game.game_id)
+        ready_pregame = GameOdds(
+            game_id=ready_game.game_id,
+            sportsbook="draftkings",
+            snapshot_type=SnapshotType.pregame,
+            fetched_at=datetime.now(timezone.utc),
+            away_ml=115,
+            home_ml=-135,
+            total_line=8.0,
+            over_odds=-110,
+            under_odds=-110,
+        )
+        movement = LineMovement(
+            game_id=ready_game.game_id,
+            sportsbook="consensus",
+            calculated_at=datetime.now(timezone.utc),
+            open_total=8.5,
+            pregame_total=8.0,
+            total_move=-0.5,
+        )
+        self.db.add_all([ready_pregame, movement])
+        self.db.commit()
+        self.db.add_all([
+            EdgeResult(
+                game_id=waiting_game.game_id,
+                prediction_id=waiting_prediction.prediction_id,
+                odds_id=waiting_odds.id,
+                run_stage="daily_open",
+                is_active=True,
+                calculated_at=datetime.now(timezone.utc),
+                recommended_play="under",
+                edge_pct=0.1,
+            ),
+            EdgeResult(
+                game_id=ready_game.game_id,
+                prediction_id=ready_prediction.prediction_id,
+                odds_id=ready_open.id,
+                movement_id=movement.id,
+                run_stage="pregame",
+                is_active=True,
+                calculated_at=datetime.now(timezone.utc),
+                recommended_play="under",
+                edge_pct=0.08,
+            ),
+        ])
+        self.db.commit()
+
+        report = build_market_readiness_report(self.db)
+        by_game = {row["game_id"]: row for row in report["games"]}
+
+        self.assertEqual(report["counts"]["WAITING_FOR_PREGAME_WINDOW"], 1)
+        self.assertEqual(report["counts"]["CLV_READY"], 1)
+        self.assertEqual(by_game[waiting_game.game_id]["readiness"], "WAITING_FOR_PREGAME_WINDOW")
+        self.assertEqual(by_game[ready_game.game_id]["readiness"], "CLV_READY")
+        self.assertTrue(by_game[ready_game.game_id]["has_line_movement"])
+
     def test_debug_routes_are_registered(self) -> None:
         from app.main import app
 
@@ -729,6 +793,7 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertIn("/api/debug/rebuild-edge-results", paths)
         self.assertIn("/api/debug/totals-bias", paths)
         self.assertIn("/api/debug/totals-policy", paths)
+        self.assertIn("/api/debug/market-readiness", paths)
 
     def test_totals_bias_report_flags_supported_under_edge(self) -> None:
         self._totals_review_game(104, model_total=7.0, book_total=9.0, final_total=6, play="under", bet_result="win", pregame_total=8.5)

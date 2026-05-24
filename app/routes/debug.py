@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -137,6 +137,163 @@ def _profit_for_result(result: str, odds_american: int | None = None) -> float:
     if odds_american is None:
         return 100 / 110
     return american_to_decimal(int(odds_american)) - 1.0
+
+
+def _aware_utc_from_start_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _iso_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _odds_snapshot_summary(odds: GameOdds | None) -> dict | None:
+    if odds is None:
+        return None
+    return {
+        "id": odds.id,
+        "sportsbook": odds.sportsbook,
+        "fetched_at": _iso_datetime(odds.fetched_at),
+        "away_ml": odds.away_ml,
+        "home_ml": odds.home_ml,
+        "total_line": float(odds.total_line) if odds.total_line is not None else None,
+        "over_odds": odds.over_odds,
+        "under_odds": odds.under_odds,
+    }
+
+
+def _latest_by_game(rows) -> dict[int, object]:
+    latest: dict[int, object] = {}
+    for row in rows:
+        latest.setdefault(row.game_id, row)
+    return latest
+
+
+def build_market_readiness_report(db: Session) -> dict:
+    today = datetime.now(ET).date()
+    now_utc = datetime.now(timezone.utc)
+    games = db.query(Game).filter(Game.game_date == today).order_by(Game.start_time.asc(), Game.game_id.asc()).all()
+    game_ids = [game.game_id for game in games]
+
+    open_by_game: dict[int, GameOdds] = {}
+    pregame_by_game: dict[int, GameOdds] = {}
+    movement_by_game: dict[int, LineMovement] = {}
+    edge_by_game: dict[int, EdgeResult] = {}
+
+    if game_ids:
+        odds_rows = (
+            db.query(GameOdds)
+            .filter(GameOdds.game_id.in_(game_ids))
+            .order_by(GameOdds.game_id.asc(), GameOdds.fetched_at.desc(), GameOdds.id.desc())
+            .all()
+        )
+        open_by_game = _latest_by_game(row for row in odds_rows if row.snapshot_type == SnapshotType.open)
+        pregame_by_game = _latest_by_game(row for row in odds_rows if row.snapshot_type == SnapshotType.pregame)
+
+        movement_by_game = _latest_by_game(
+            db.query(LineMovement)
+            .filter(LineMovement.game_id.in_(game_ids))
+            .order_by(LineMovement.game_id.asc(), LineMovement.calculated_at.desc(), LineMovement.id.desc())
+            .all()
+        )
+        edge_by_game = _latest_by_game(
+            db.query(EdgeResult)
+            .filter(EdgeResult.game_id.in_(game_ids), EdgeResult.is_active.is_(True))
+            .order_by(EdgeResult.game_id.asc(), EdgeResult.calculated_at.desc(), EdgeResult.id.desc())
+            .all()
+        )
+
+    rows = []
+    readiness_counts: Counter[str] = Counter()
+    for game in games:
+        open_odds = open_by_game.get(game.game_id)
+        pregame_odds = pregame_by_game.get(game.game_id)
+        movement = movement_by_game.get(game.game_id)
+        edge = edge_by_game.get(game.game_id)
+        start_utc = _aware_utc_from_start_time(game.start_time)
+        minutes_to_start = round((start_utc - now_utc).total_seconds() / 60, 1) if start_utc else None
+        pregame_due_at = start_utc - timedelta(minutes=45) if start_utc else None
+
+        if pregame_odds and movement:
+            readiness = "CLV_READY"
+            reason = "Pregame snapshot and line movement are available."
+        elif pregame_due_at and now_utc < pregame_due_at:
+            readiness = "WAITING_FOR_PREGAME_WINDOW"
+            reason = "Pregame snapshot is not due until 45 minutes before first pitch."
+        elif not open_odds:
+            readiness = "MISSING_OPEN_ODDS"
+            reason = "No opening odds snapshot is stored for this game."
+        elif not pregame_odds:
+            readiness = "PREGAME_SNAPSHOT_MISSING"
+            reason = "Pregame snapshot should be available before CLV can be trusted."
+        elif not movement:
+            readiness = "MOVEMENT_MISSING"
+            reason = "Pregame odds exist, but line movement has not been computed."
+        else:
+            readiness = "UNKNOWN"
+            reason = "Readiness could not be classified."
+
+        readiness_counts[readiness] += 1
+        rows.append({
+            "game_id": game.game_id,
+            "matchup": f"{game.away_team} @ {game.home_team}",
+            "start_time": game.start_time,
+            "minutes_to_start": minutes_to_start,
+            "pregame_snapshot_due_at": _iso_datetime(pregame_due_at),
+            "readiness": readiness,
+            "readiness_reason": reason,
+            "has_open_snapshot": open_odds is not None,
+            "has_pregame_snapshot": pregame_odds is not None,
+            "has_line_movement": movement is not None,
+            "has_active_edge": edge is not None,
+            "active_edge": {
+                "id": edge.id,
+                "run_stage": edge.run_stage,
+                "play": edge.recommended_play,
+                "edge_pct": float(edge.edge_pct or 0),
+                "calculated_at": _iso_datetime(edge.calculated_at),
+                "odds_snapshot_type": edge.odds_snapshot_type,
+                "movement_id": edge.movement_id,
+            } if edge else None,
+            "open_snapshot": _odds_snapshot_summary(open_odds),
+            "pregame_snapshot": _odds_snapshot_summary(pregame_odds),
+            "line_movement": {
+                "id": movement.id,
+                "calculated_at": _iso_datetime(movement.calculated_at),
+                "open_total": float(movement.open_total) if movement.open_total is not None else None,
+                "pregame_total": float(movement.pregame_total) if movement.pregame_total is not None else None,
+                "total_move": float(movement.total_move) if movement.total_move is not None else None,
+                "sharp_home": bool(movement.sharp_home),
+                "sharp_away": bool(movement.sharp_away),
+                "total_steam_over": bool(movement.total_steam_over),
+                "total_steam_under": bool(movement.total_steam_under),
+            } if movement else None,
+        })
+
+    return {
+        "status": "ok",
+        "date": today.isoformat(),
+        "total_games": len(games),
+        "counts": dict(readiness_counts),
+        "clv_ready_games": readiness_counts.get("CLV_READY", 0),
+        "waiting_for_pregame_window": readiness_counts.get("WAITING_FOR_PREGAME_WINDOW", 0),
+        "missing_open_odds": readiness_counts.get("MISSING_OPEN_ODDS", 0),
+        "missing_pregame_snapshots": readiness_counts.get("PREGAME_SNAPSHOT_MISSING", 0),
+        "missing_line_movement": readiness_counts.get("MOVEMENT_MISSING", 0),
+        "games": rows,
+    }
 
 
 def _total_play_odds(play: str, edge: EdgeResult | None, odds: GameOdds | None) -> int | None:
@@ -873,6 +1030,11 @@ def build_odds_freshness_report(db: Session) -> dict:
 @router.get("/odds-freshness")
 def odds_freshness(db: Session = Depends(get_db)):
     return build_odds_freshness_report(db)
+
+
+@router.get("/market-readiness")
+def market_readiness(db: Session = Depends(get_db)):
+    return build_market_readiness_report(db)
 
 
 def _edge_result_sample(edge: EdgeResult, game: Game | None = None) -> dict:
