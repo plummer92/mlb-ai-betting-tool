@@ -207,6 +207,37 @@ class OddsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(existing.over_odds, -105)
         self.assertEqual(existing.under_odds, -115)
 
+    async def test_fetch_and_store_pregame_skips_games_after_first_pitch(self) -> None:
+        start = datetime.now(timezone.utc) - timedelta(minutes=10)
+        game = self._game(8, start.astimezone(timezone.utc).date(), "Toronto Blue Jays", "Chicago White Sox")
+        game.start_time = start.isoformat()
+        self.db.commit()
+        payload = [{
+            "away_team": "Toronto Blue Jays",
+            "home_team": "Chicago White Sox",
+            "commence_time": start.isoformat().replace("+00:00", "Z"),
+            "bookmakers": [{
+                "key": "draftkings",
+                "markets": [
+                    {"key": "h2h", "outcomes": [
+                        {"name": "Toronto Blue Jays", "price": -210},
+                        {"name": "Chicago White Sox", "price": 150},
+                    ]},
+                    {"key": "totals", "outcomes": [
+                        {"name": "Over", "price": -108, "point": 7.0},
+                        {"name": "Under", "price": -130, "point": 7.0},
+                    ]},
+                ],
+            }],
+        }]
+
+        with patch("app.services.odds_service.httpx.AsyncClient", return_value=_FakeAsyncClient(payload)):
+            rows = await fetch_and_store_odds(self.db, SnapshotType.pregame, books=["draftkings"])
+
+        self.assertEqual(rows, [])
+        self.assertEqual(self.db.query(GameOdds).filter(GameOdds.snapshot_type == SnapshotType.pregame).count(), 0)
+        self.assertEqual(self.db.query(OddsApiRequestLog).count(), 1)
+
     def test_match_game_normalizes_safe_team_name_variants(self) -> None:
         game = self._game(3, date(2026, 4, 2), "St. Louis Cardinals", "Kansas City Royals")
         matched, reason = _match_game(self.db, {

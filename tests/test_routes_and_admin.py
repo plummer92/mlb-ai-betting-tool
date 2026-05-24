@@ -1469,6 +1469,36 @@ class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):
         alert_mock.assert_called_once()
         odds_mock.assert_not_called()
 
+    async def test_pregame_snapshot_skips_when_job_runs_after_first_pitch(self) -> None:
+        game = Game(
+            game_id=24,
+            game_date=date.today(),
+            season=2026,
+            away_team="Away",
+            home_team="Home",
+            away_team_id=1,
+            home_team_id=2,
+            start_time=(datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(),
+        )
+        self.db.add(game)
+        self.db.commit()
+
+        with patch("app.scheduler.SessionLocal", return_value=self.db), \
+             patch("app.scheduler.fetch_and_store_odds", new_callable=AsyncMock) as odds_mock, \
+             patch("app.scheduler.compute_line_movement") as movement_mock, \
+             patch("app.scheduler.calculate_edge_for_game") as edge_mock, \
+             patch("app.scheduler.create_and_send_alert_for_game") as alert_mock:
+            from app.scheduler import run_pregame_snapshot
+
+            result = await run_pregame_snapshot(game.game_id)
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "past_start")
+        odds_mock.assert_not_called()
+        movement_mock.assert_not_called()
+        edge_mock.assert_not_called()
+        alert_mock.assert_not_called()
+
     def _backtest_result(self, accuracy: float) -> BacktestResult:
         result = BacktestResult(
             seasons="2022,2023,2024",

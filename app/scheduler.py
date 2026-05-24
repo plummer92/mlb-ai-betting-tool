@@ -339,6 +339,20 @@ def send_morning_alerts_job():
 async def run_pregame_snapshot(game_id: int):
     db = SessionLocal()
     try:
+        game = db.query(Game).filter(Game.game_id == game_id).first()
+        game_dt = _parse_game_start_time(game) if game else None
+        now_utc = datetime.now(UTC)
+        if game_dt is not None and now_utc > game_dt:
+            print(
+                f"[scheduler] Pregame snapshot skipped for game {game_id}: "
+                f"past first pitch start={game_dt} now={now_utc}"
+            )
+            return {
+                "status": "skipped",
+                "reason": "past_start",
+                "game_id": game_id,
+            }
+
         latest_existing = get_latest_odds_snapshot(
             db,
             game_id=game_id,
@@ -380,7 +394,6 @@ async def run_pregame_snapshot(game_id: int):
             )
 
         if not _has_active_prediction(db, game_id=game_id, run_stage="pregame"):
-            game = db.query(Game).filter(Game.game_id == game_id).first()
             target_date = game.game_date if game else datetime.now(ET).date()
             prediction_result = run_predictions_for_date(
                 db,

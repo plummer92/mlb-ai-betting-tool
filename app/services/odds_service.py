@@ -110,6 +110,13 @@ async def fetch_and_store_odds(
         matched_event_count += 1
         matched_game_ids.add(game.game_id)
 
+        if snapshot_type == SnapshotType.pregame and _is_after_game_start(game):
+            skipped_inserts.append(
+                f"game_id={game.game_id} snapshot={snapshot_type.value} "
+                f"reason=pregame_fetch_after_start"
+            )
+            continue
+
         valid_for_game = False
         bookmakers = _sorted_bookmakers(event, requested_books)
         if not bookmakers:
@@ -247,6 +254,28 @@ def _record_odds_api_request(
         )
     )
     db.flush()
+
+
+def _game_start_utc(game: Game) -> datetime | None:
+    if not game.start_time:
+        return None
+    try:
+        start = datetime.fromisoformat(game.start_time.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    return start.astimezone(timezone.utc)
+
+
+def _is_after_game_start(game: Game, value: datetime | None = None) -> bool:
+    start = _game_start_utc(game)
+    if start is None:
+        return False
+    current = value or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current.astimezone(timezone.utc) > start
 
 
 def is_odds_snapshot_fresh(
