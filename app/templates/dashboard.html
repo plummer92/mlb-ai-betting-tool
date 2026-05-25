@@ -1256,15 +1256,37 @@ function fetchWithTimeout(url, label, ms = 12000) {
     .finally(() => clearTimeout(timer));
 }
 
+async function fetchJsonWithTimeout(url, label, ms = 12000) {
+  const res = await fetchWithTimeout(url, label, ms);
+  if (!res.ok) {
+    throw new Error(`${label} returned ${res.status}; try refresh in a minute.`);
+  }
+  try {
+    return await res.json();
+  } catch(e) {
+    throw new Error(`${label} returned a non-JSON response; try refresh in a minute.`);
+  }
+}
+
 function runPanel(loader, label) {
   return loader().catch(err => console.error(`Error loading ${label}`, err));
+}
+
+function pause(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function runPanelsSequential(loaders, delayMs = 250) {
+  for (const [loader, label] of loaders) {
+    await runPanel(loader, label);
+    if (delayMs) await pause(delayMs);
+  }
 }
 
 let decisionPipelineCache = null;
 async function loadDecisionPipelineSummary(ms = 8000) {
   if (decisionPipelineCache) return decisionPipelineCache;
-  const res = await fetchWithTimeout('/api/debug/decision-pipeline', 'Decision pipeline', ms);
-  decisionPipelineCache = await res.json();
+  decisionPipelineCache = await fetchJsonWithTimeout('/api/debug/decision-pipeline', 'Decision pipeline', ms);
   return decisionPipelineCache;
 }
 
@@ -1399,14 +1421,14 @@ async function loadDecisionQueue() {
         </tbody>
       </table>`;
   } catch(e) {
-    $('decision-queue-badge').textContent = 'ERROR';
-    $('decision-queue-table').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+    $('decision-queue-badge').textContent = 'SLOW';
+    $('decision-queue-table').innerHTML = `<div class="empty compact">Decision queue is still calculating. The odds integrity panel below has the current blocker state.</div>`;
   }
 }
 
 async function loadTotalsRegime() {
   try {
-    const res = await fetchWithTimeout('/api/debug/totals-policy', 'Totals policy report', 25000);
+    const res = await fetchWithTimeout('/api/debug/totals-policy', 'Totals policy report', 10000);
     const data = await res.json();
     const board = data.current_board || {};
     const backtest = data.backtest || {};
@@ -1763,8 +1785,8 @@ async function loadTodayRead() {
         </div>
       </div>`;
   } catch(e) {
-    $('today-read-badge').textContent = 'ERROR';
-    $('today-read').innerHTML = `<div class="empty compact">Today read unavailable: ${esc(e.message)}</div>`;
+    $('today-read-badge').textContent = 'SLOW';
+    $('today-read').innerHTML = `<div class="empty compact">Today read is still calculating. The live intel and odds panels are available below.</div>`;
   }
 }
 
@@ -1987,7 +2009,8 @@ async function loadTopBets() {
       </table>
     `;
   } catch (e) {
-    $('top-bets-table').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+    $('top-bets-badge').textContent = 'SLOW';
+    $('top-bets-table').innerHTML = `<div class="empty compact">Ranked bets are still calculating. Check the Decision Queue blocker above.</div>`;
   }
 }
 
@@ -2034,7 +2057,8 @@ async function loadBestPlaysWeek() {
         <tbody>${rows}</tbody>
       </table>`;
   } catch(e) {
-    $('best-week-table').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+    $('best-week-badge').textContent = 'SLOW';
+    $('best-week-table').innerHTML = `<div class="empty">Best plays report is still calculating.</div>`;
   }
 }
 
@@ -2486,7 +2510,8 @@ async function loadDebrief() {
       </table>`;
 
   } catch(e) {
-    $('debrief-summary').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+    $('debrief-badge').textContent = 'SLOW';
+    $('debrief-summary').innerHTML = `<div class="empty">Debrief is still calculating.</div>`;
     $('debrief-table').innerHTML = '';
   }
 }
@@ -2887,44 +2912,60 @@ async function loadBullpen() {
 }
 
 let loadAllInFlight = false;
-async function loadAll() {
+let secondaryLoadInFlight = false;
+const primaryLoaders = [
+  [loadDecisionQueue, 'decision queue'],
+  [loadOddsIntegrity, 'pregame integrity'],
+  [loadOddsWarehouse, 'odds warehouse'],
+  [loadTodayRead, 'today read'],
+  [loadTopBets, 'top bets'],
+  [loadCommentary, 'commentary'],
+  [loadIntel, 'active intel'],
+  [loadSignals, 'signals'],
+];
+const secondaryLoaders = [
+  [loadTotalsRegime, 'totals regime'],
+  [loadDecisionDebug, 'decision debug'],
+  [loadOddsDebug, 'odds freshness'],
+  [loadAccuracy, 'accuracy'],
+  [loadBestPlaysWeek, 'best plays week'],
+  [loadMarketAudit, 'market audit'],
+  [loadMarketShadow, 'market shadow'],
+  [loadDebrief, 'debrief'],
+  [loadBullpen, 'bullpen'],
+];
+
+async function loadPrimaryBoard() {
   if (loadAllInFlight) return;
   loadAllInFlight = true;
   decisionPipelineCache = null;
-  const primaryLoaders = [
-    [loadDecisionQueue, 'decision queue'],
-    [loadOddsIntegrity, 'pregame integrity'],
-    [loadOddsWarehouse, 'odds warehouse'],
-    [loadTodayRead, 'today read'],
-    [loadTopBets, 'top bets'],
-    [loadCommentary, 'commentary'],
-    [loadIntel, 'active intel'],
-    [loadSignals, 'signals'],
-  ];
-  const secondaryLoaders = [
-    [loadTotalsRegime, 'totals regime'],
-    [loadDecisionDebug, 'decision debug'],
-    [loadOddsDebug, 'odds freshness'],
-    [loadAccuracy, 'accuracy'],
-    [loadBestPlaysWeek, 'best plays week'],
-    [loadMarketAudit, 'market audit'],
-    [loadMarketShadow, 'market shadow'],
-    [loadDebrief, 'debrief'],
-    [loadBullpen, 'bullpen'],
-  ];
+  try {
+    await runPanelsSequential(primaryLoaders, 175);
+  } finally {
+    loadAllInFlight = false;
+  }
+}
 
-  await Promise.all(primaryLoaders.map(([loader, label]) => runPanel(loader, label)));
-  setTimeout(() => {
-    Promise.all(secondaryLoaders.map(([loader, label]) => runPanel(loader, label)))
-      .finally(() => { loadAllInFlight = false; });
-  }, 150);
+async function loadSecondaryReports() {
+  if (secondaryLoadInFlight) return;
+  secondaryLoadInFlight = true;
+  try {
+    await runPanelsSequential(secondaryLoaders, 500);
+  } finally {
+    secondaryLoadInFlight = false;
+  }
+}
+
+async function loadAll() {
+  await loadPrimaryBoard();
+  setTimeout(() => { loadSecondaryReports(); }, 2500);
 }
 
 let countdown = 60;
 function tick() {
   countdown--;
   $('cdown').textContent = countdown;
-  if (countdown <= 0) { loadAll(); countdown = 60; }
+  if (countdown <= 0) { loadPrimaryBoard(); countdown = 60; }
 }
 
 document.addEventListener('DOMContentLoaded', () => {

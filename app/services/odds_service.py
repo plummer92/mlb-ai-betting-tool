@@ -71,7 +71,8 @@ async def fetch_and_store_odds(
                 http_status=response.status_code if response is not None else None,
                 error=_sanitize_http_error(exc),
             )
-            raise RuntimeError(_sanitize_http_error(exc)) from exc
+            db.commit()
+            raise RuntimeError(_sanitize_http_error(exc)) from None
         raw_events = resp.json()
         raw_size_bytes = len(resp.content or b"")
         _record_odds_api_request(
