@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import calendar
+import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -218,8 +219,7 @@ def _odds_fetched_after_start(game: Game, odds: GameOdds | None) -> bool:
     fetched_utc = _as_utc(odds.fetched_at)
     if start_utc is None or fetched_utc is None:
         return False
-    same_game_day = fetched_utc.astimezone(ET).date() == start_utc.astimezone(ET).date()
-    return same_game_day and fetched_utc > start_utc
+    return start_utc < fetched_utc < start_utc + timedelta(hours=24)
 
 
 def _latest_pregame_rows_by_game(
@@ -249,6 +249,8 @@ def _latest_pregame_rows_by_game(
 def build_market_readiness_report(db: Session) -> dict:
     today = datetime.now(ET).date()
     now_utc = datetime.now(timezone.utc)
+    quota = build_odds_quota_report(db)
+    odds_credits_exhausted = bool(quota.get("provider_out_of_usage_credits"))
     games = db.query(Game).filter(Game.game_date == today).order_by(Game.start_time.asc(), Game.game_id.asc()).all()
     game_ids = [game.game_id for game in games]
 
@@ -297,6 +299,9 @@ def build_market_readiness_report(db: Session) -> dict:
         elif pregame_due_at and now_utc < pregame_due_at:
             readiness = "WAITING_FOR_PREGAME_WINDOW"
             reason = "Pregame snapshot is not due until 45 minutes before first pitch."
+        elif odds_credits_exhausted and not open_odds:
+            readiness = "ODDS_PROVIDER_CREDITS_EXHAUSTED"
+            reason = "The Odds API says usage credits are exhausted, so no new odds snapshots can be fetched."
         elif not open_odds:
             readiness = "MISSING_OPEN_ODDS"
             reason = "No opening odds snapshot is stored for this game."
@@ -363,7 +368,7 @@ def build_market_readiness_report(db: Session) -> dict:
     return {
         "status": "ok",
         "date": today.isoformat(),
-        "quota": build_odds_quota_report(db),
+        "quota": quota,
         "total_games": len(games),
         "counts": dict(readiness_counts),
         "clv_ready_games": readiness_counts.get("CLV_READY", 0),
@@ -378,6 +383,7 @@ def build_market_readiness_report(db: Session) -> dict:
         "integrity": {
             "trusted_pregame": sum(1 for row in rows if row["has_pregame_snapshot"]),
             "post_start_quarantined": readiness_counts.get("PREGAME_AFTER_START", 0),
+            "provider_blocked": readiness_counts.get("ODDS_PROVIDER_CREDITS_EXHAUSTED", 0),
             "missing_pregame": readiness_counts.get("PREGAME_SNAPSHOT_MISSING", 0),
             "movement_stale": movement_stale_count,
             "movement_missing": readiness_counts.get("MOVEMENT_MISSING", 0),
@@ -406,6 +412,12 @@ def build_odds_quota_report(db: Session) -> dict:
         .all()
     )
     ok_rows = [row for row in rows if row.status == "ok"]
+    error_rows = [row for row in rows if row.status != "ok"]
+    provider_error_codes = Counter(_provider_error_code(row.error) for row in error_rows)
+    provider_error_codes.pop(None, None)
+    latest_error = error_rows[0] if error_rows else None
+    latest_provider_error_code = _provider_error_code(latest_error.error if latest_error else None)
+    latest_provider_message = _provider_error_message(latest_error.error if latest_error else None)
     today_rows = [
         row for row in ok_rows
         if _as_utc(row.requested_at) and _as_utc(row.requested_at).astimezone(ET).date() == today
@@ -433,11 +445,21 @@ def build_odds_quota_report(db: Session) -> dict:
         "projected_over_cap": projected_over_cap,
         "projected_warning": projected_warning,
         "quota_alert": (
+            "OUT_OF_USAGE_CREDITS" if provider_error_codes.get("OUT_OF_USAGE_CREDITS") else
             "OVER_CAP_PROJECTION" if projected_over_cap else
             "NEAR_CAP_PROJECTION" if projected_warning else
             "OK"
         ),
-        "errors_this_month": len([row for row in rows if row.status != "ok"]),
+        "provider_status": (
+            "OUT_OF_USAGE_CREDITS" if provider_error_codes.get("OUT_OF_USAGE_CREDITS") else
+            "ERROR" if error_rows else
+            "OK"
+        ),
+        "provider_out_of_usage_credits": bool(provider_error_codes.get("OUT_OF_USAGE_CREDITS")),
+        "latest_provider_error_code": latest_provider_error_code,
+        "latest_provider_message": latest_provider_message,
+        "provider_error_code_counts": dict(provider_error_codes),
+        "errors_this_month": len(error_rows),
         "by_snapshot_type": dict(by_snapshot),
         "recent_requests": [
             {
@@ -452,6 +474,26 @@ def build_odds_quota_report(db: Session) -> dict:
             for row in rows[:10]
         ],
     }
+
+
+def _provider_error_code(error: str | None) -> str | None:
+    if not error:
+        return None
+    match = re.search(r"provider_error_code=([A-Z0-9_]+)", error)
+    if match:
+        return match.group(1)
+    if "OUT_OF_USAGE_CREDITS" in error:
+        return "OUT_OF_USAGE_CREDITS"
+    return None
+
+
+def _provider_error_message(error: str | None) -> str | None:
+    if not error:
+        return None
+    match = re.search(r"provider_message=([^\n]+)", error)
+    if match:
+        return match.group(1).strip()
+    return None
 
 
 def _latest_rows_by_game(db: Session, game_ids: list[int], snapshot_type: SnapshotType) -> dict[int, GameOdds]:
@@ -583,6 +625,8 @@ def _integrity_reason(
         return f"BLOCKED: pregame-labeled odds fetched after first pitch at {_iso_datetime(_as_utc(post_start_pregame.fetched_at))}."
     if readiness == "WAITING_FOR_PREGAME_WINDOW":
         return f"WAIT: pregame snapshot due at {_iso_datetime(pregame_due_at)}."
+    if readiness == "ODDS_PROVIDER_CREDITS_EXHAUSTED":
+        return "BLOCKED: Odds API usage credits are exhausted; no new open or pregame snapshots can be fetched."
     if readiness == "MISSING_OPEN_ODDS":
         return "BLOCKED: missing opening odds snapshot."
     if readiness == "PREGAME_SNAPSHOT_MISSING":
@@ -646,6 +690,7 @@ def _warehouse_play_row(
     movement: LineMovement | None,
     edge: EdgeResult | None,
     respect: dict | None,
+    odds_credits_exhausted: bool = False,
 ) -> dict:
     open_price, open_line = _play_odds_and_line(open_odds, play)
     pregame_price, pregame_line = _play_odds_and_line(pregame_odds, play)
@@ -689,6 +734,7 @@ def _warehouse_play_row(
         "readiness": (
             "CLV_READY" if pregame_odds and movement else
             "PREGAME_AFTER_START" if has_post_start_pregame and not pregame_odds else
+            "ODDS_PROVIDER_CREDITS_EXHAUSTED" if odds_credits_exhausted and not open_odds else
             "PREGAME_SNAPSHOT_MISSING" if not pregame_odds else
             "MOVEMENT_MISSING"
         ),
@@ -697,6 +743,8 @@ def _warehouse_play_row(
 
 def build_odds_warehouse_report(db: Session) -> dict:
     today = datetime.now(ET).date()
+    quota = build_odds_quota_report(db)
+    odds_credits_exhausted = bool(quota.get("provider_out_of_usage_credits"))
     games = db.query(Game).filter(Game.game_date == today).order_by(Game.start_time.asc(), Game.game_id.asc()).all()
     game_ids = [game.game_id for game in games]
     open_by_game = _latest_rows_by_game(db, game_ids, SnapshotType.open)
@@ -737,6 +785,7 @@ def build_odds_warehouse_report(db: Session) -> dict:
                     movement=movement,
                     edge=edge,
                     respect=respect,
+                    odds_credits_exhausted=odds_credits_exhausted,
                 )
             )
         rows.append({
@@ -767,6 +816,7 @@ def build_odds_warehouse_report(db: Session) -> dict:
             "readiness": (
                 "CLV_READY" if pregame_odds and movement else
                 "PREGAME_AFTER_START" if post_start_pregame_odds and not pregame_odds else
+                "ODDS_PROVIDER_CREDITS_EXHAUSTED" if odds_credits_exhausted and not open_odds else
                 "PREGAME_SNAPSHOT_MISSING" if not pregame_odds else
                 "MOVEMENT_MISSING"
             ),
@@ -775,7 +825,7 @@ def build_odds_warehouse_report(db: Session) -> dict:
     return {
         "status": "ok",
         "date": today.isoformat(),
-        "quota": build_odds_quota_report(db),
+        "quota": quota,
         "summary": {
             "games": len(rows),
             "play_rows": len(play_rows),

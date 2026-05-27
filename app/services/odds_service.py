@@ -1,12 +1,16 @@
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy.orm import Session
 
-from app.config import THE_ODDS_API_KEY, THE_ODDS_API_URL
+from app.config import (
+    ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES,
+    THE_ODDS_API_KEY,
+    THE_ODDS_API_URL,
+)
 from app.models.schema import Game, GameOdds, LineMovement, OddsApiRequestLog, SnapshotType
 from app.services.ev_math import is_sharp_move, ml_to_implied_prob, prob_move, remove_vig
 
@@ -49,6 +53,13 @@ async def fetch_and_store_odds(
     for the same snapshot type within the freshness window.
     """
     requested_books = books or list(DEFAULT_BOOKS)
+    exhausted_log = _recent_out_of_usage_log(db)
+    if exhausted_log is not None:
+        requested_at = exhausted_log.requested_at.isoformat() if exhausted_log.requested_at else "unknown"
+        raise RuntimeError(
+            "Odds API quota exhausted; provider fetch paused "
+            f"for {ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES} minutes after {requested_at}."
+        )
     params = {
         "apiKey": THE_ODDS_API_KEY,
         "regions": "us",
@@ -63,16 +74,17 @@ async def fetch_and_store_odds(
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             response = getattr(exc, "response", None)
+            error = _sanitize_http_error(exc)
             _record_odds_api_request(
                 db,
                 snapshot_type=snapshot_type,
                 requested_books=requested_books,
                 status="error",
                 http_status=response.status_code if response is not None else None,
-                error=_sanitize_http_error(exc),
+                error=error,
             )
             db.commit()
-            raise RuntimeError(_sanitize_http_error(exc)) from None
+            raise RuntimeError(error) from None
         raw_events = resp.json()
         raw_size_bytes = len(resp.content or b"")
         _record_odds_api_request(
@@ -255,6 +267,25 @@ def _record_odds_api_request(
         )
     )
     db.flush()
+
+
+def _recent_out_of_usage_log(db: Session) -> OddsApiRequestLog | None:
+    if ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES <= 0:
+        return None
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        minutes=ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES
+    )
+    return (
+        db.query(OddsApiRequestLog)
+        .filter(
+            OddsApiRequestLog.provider == "the_odds_api",
+            OddsApiRequestLog.status == "error",
+            OddsApiRequestLog.requested_at >= cutoff,
+            OddsApiRequestLog.error.ilike("%OUT_OF_USAGE_CREDITS%"),
+        )
+        .order_by(OddsApiRequestLog.requested_at.desc(), OddsApiRequestLog.id.desc())
+        .first()
+    )
 
 
 def _game_start_utc(game: Game) -> datetime | None:
@@ -689,16 +720,39 @@ def _sanitize_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
+def _provider_error_details(response: httpx.Response | None) -> tuple[str | None, str | None]:
+    if response is None:
+        return None, None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    error_code = payload.get("error_code")
+    message = payload.get("message")
+    return (
+        str(error_code) if error_code else None,
+        str(message) if message else None,
+    )
+
+
 def _sanitize_http_error(exc: httpx.HTTPError) -> str:
     request = getattr(exc, "request", None)
     response = getattr(exc, "response", None)
     sanitized_url = _sanitize_url(str(request.url)) if request is not None else None
     status_code = response.status_code if response is not None else None
+    error_code, message = _provider_error_details(response)
+    provider_suffix = ""
+    if error_code:
+        provider_suffix += f" provider_error_code={error_code}"
+    if message:
+        provider_suffix += f" provider_message={message}"
     if status_code is not None and sanitized_url is not None:
-        return f"Odds API request failed with status {status_code} for {sanitized_url}"
+        return f"Odds API request failed with status {status_code} for {sanitized_url}{provider_suffix}"
     if sanitized_url is not None:
-        return f"Odds API request failed for {sanitized_url}"
-    return "Odds API request failed"
+        return f"Odds API request failed for {sanitized_url}{provider_suffix}"
+    return f"Odds API request failed{provider_suffix}"
 
 
 def _normalize_team_name(value: str | None) -> str:

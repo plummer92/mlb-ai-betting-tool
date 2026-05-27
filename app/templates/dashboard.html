@@ -1580,10 +1580,19 @@ async function loadOddsDebug() {
 
 function integrityChip(readiness, usable) {
   if (usable) return decisionStatusChip('CLV READY');
+  if (readiness === 'ODDS_PROVIDER_CREDITS_EXHAUSTED') return decisionStatusChip('QUOTA HIT');
   if (readiness === 'PREGAME_AFTER_START') return decisionStatusChip('POST START');
   if (readiness === 'WAITING_FOR_PREGAME_WINDOW') return decisionStatusChip('WAIT FOR ODDS');
   if (readiness === 'MOVEMENT_MISSING') return decisionStatusChip('WAIT FOR ODDS');
   return decisionStatusChip('BLOCKED');
+}
+
+function oddsProviderBanner(quota) {
+  if (!quota || !quota.provider_out_of_usage_credits) return '';
+  const msg = quota.latest_provider_message || 'The Odds API says usage credits are exhausted.';
+  return `<div class="empty compact red" style="margin-bottom:12px;">
+    Odds feed paused: ${esc(msg)} New odds snapshots and CLV will stay unavailable until credits reset, the plan is upgraded, or another odds source is configured.
+  </div>`;
 }
 
 async function loadOddsIntegrity() {
@@ -1591,6 +1600,7 @@ async function loadOddsIntegrity() {
     const res = await fetch('/api/debug/market-readiness');
     const data = await res.json();
     const integrity = data.integrity || {};
+    const quota = data.quota || {};
     const rows = data.games || [];
     const total = data.total_games || rows.length || 0;
     const blocked = total - (integrity.clv_usable || 0);
@@ -1598,7 +1608,13 @@ async function loadOddsIntegrity() {
     const badge = blocked ? `${blocked} BLOCKED` : `${integrity.clv_usable || 0} USABLE`;
     $('odds-integrity-badge').textContent = badge;
     $('odds-integrity-summary').innerHTML = `
+      ${oddsProviderBanner(quota)}
       <div class="today-read" style="margin-bottom:12px;">
+        <div class="read-tile">
+          <div class="read-label">Odds Provider</div>
+          <div class="read-main ${quota.provider_out_of_usage_credits ? 'red' : quota.errors_this_month ? 'yellow' : 'green'}">${esc(quota.provider_status || 'OK')}</div>
+          <div class="read-sub">${esc(quota.latest_provider_error_code || quota.quota_alert || 'OK')}</div>
+        </div>
         <div class="read-tile">
           <div class="read-label">CLV Usable</div>
           <div class="read-main ${blocked ? 'yellow' : 'green'}">${integrity.clv_usable || 0}/${total}</div>
@@ -1646,8 +1662,8 @@ async function loadOddsIntegrity() {
         </tbody>
       </table>`;
   } catch(e) {
-    $('odds-integrity-badge').textContent = 'ERROR';
-    $('odds-integrity-table').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+    $('odds-integrity-badge').textContent = 'SLOW';
+    $('odds-integrity-table').innerHTML = `<div class="empty">Odds integrity is still calculating. The odds warehouse may have the current provider state.</div>`;
   }
 }
 
@@ -1659,9 +1675,15 @@ async function loadOddsWarehouse() {
     const summary = data.summary || {};
     const rows = data.plays || data.games || [];
     const pct = quota.month_usage_pct != null ? (quota.month_usage_pct * 100).toFixed(1) : '0.0';
-    $('odds-warehouse-badge').textContent = `${summary.clv_ready || 0} CLV READY`;
+    $('odds-warehouse-badge').textContent = quota.provider_out_of_usage_credits ? 'QUOTA HIT' : `${summary.clv_ready || 0} CLV READY`;
     $('odds-warehouse-summary').innerHTML = `
+      ${oddsProviderBanner(quota)}
       <div class="today-read" style="margin-bottom:12px;">
+        <div class="read-tile">
+          <div class="read-label">Provider Status</div>
+          <div class="read-main ${quota.provider_out_of_usage_credits ? 'red' : quota.errors_this_month ? 'yellow' : 'green'}">${esc(quota.provider_status || 'OK')}</div>
+          <div class="read-sub">${esc(quota.latest_provider_error_code || quota.quota_alert || 'OK')}</div>
+        </div>
         <div class="read-tile">
           <div class="read-label">Odds API Used</div>
           <div class="read-main ${quota.month_usage_pct >= 0.8 ? 'red' : quota.month_usage_pct >= 0.55 ? 'yellow' : 'green'}">${quota.month_used ?? 0}/${quota.monthly_quota ?? 500}</div>
@@ -1701,7 +1723,7 @@ async function loadOddsWarehouse() {
             const moveBucket = r.movement_bucket || (r.movement && r.movement.total_move != null ? 'total_move' : 'no_movement');
             const moveDetail = r.line_move != null ? `L ${r.line_move}` : (r.price_move != null ? `P ${r.price_move}` : '');
             const staleMove = r.movement_record_stale ? '<div class="muted">stored move stale</div>' : '';
-            const readinessLabel = r.readiness === 'CLV_READY' ? 'CLV READY' : (r.readiness === 'PREGAME_AFTER_START' ? 'POST START' : 'WAIT FOR ODDS');
+            const readinessLabel = r.readiness === 'CLV_READY' ? 'CLV READY' : (r.readiness === 'PREGAME_AFTER_START' ? 'POST START' : (r.readiness === 'ODDS_PROVIDER_CREDITS_EXHAUSTED' ? 'QUOTA HIT' : 'WAIT FOR ODDS'));
             const clvCls = (r.line_clv || 0) > 0 || (r.price_clv || 0) > 0 ? 'green' : 'muted';
             const lineText = v => v != null ? v : 'ML';
             const priceText = v => v != null ? v : '---';
@@ -1720,8 +1742,8 @@ async function loadOddsWarehouse() {
         </tbody>
       </table>`;
   } catch(e) {
-    $('odds-warehouse-badge').textContent = 'ERROR';
-    $('odds-warehouse-table').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+    $('odds-warehouse-badge').textContent = 'SLOW';
+    $('odds-warehouse-table').innerHTML = `<div class="empty">Odds warehouse is still calculating. Try refresh in a minute.</div>`;
   }
 }
 

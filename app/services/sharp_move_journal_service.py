@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -70,8 +70,7 @@ def _odds_fetched_after_start(game: Game, odds: GameOdds | None) -> bool:
     fetched_utc = _as_utc(odds.fetched_at)
     if start_utc is None or fetched_utc is None:
         return False
-    same_game_day = fetched_utc.astimezone(ET).date() == start_utc.astimezone(ET).date()
-    return same_game_day and fetched_utc > start_utc
+    return start_utc < fetched_utc < start_utc + timedelta(hours=24)
 
 
 def _latest_pregame_rows_by_game(
