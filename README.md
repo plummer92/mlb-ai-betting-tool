@@ -61,6 +61,9 @@ Required:
 Optional:
 
 - `THE_ODDS_API_KEY`
+- `ODDS_DATA_PROVIDER` (`the_odds_api`, `betstack`, or `auto`)
+- `BETSTACK_API_KEY`
+- `BETSTACK_API_URL`
 - `DISCORD_WEBHOOK_URL`
 - `DISCORD_SANDBOX_WEBHOOK_URL`
 - `ALERT_DESTINATION`

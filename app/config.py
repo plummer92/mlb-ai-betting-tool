@@ -18,6 +18,9 @@ if not DATABASE_URL:
 
 THE_ODDS_API_KEY = os.getenv("THE_ODDS_API_KEY", "")
 THE_ODDS_API_URL = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
+ODDS_DATA_PROVIDER = os.getenv("ODDS_DATA_PROVIDER", "the_odds_api").strip().lower()
+BETSTACK_API_KEY = os.getenv("BETSTACK_API_KEY", "")
+BETSTACK_API_URL = os.getenv("BETSTACK_API_URL", "https://api.betstack.dev/api/v1")
 ODDS_API_MONTHLY_QUOTA = int(os.getenv("ODDS_API_MONTHLY_QUOTA", "500"))
 ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES = int(
     os.getenv("ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES", "180")

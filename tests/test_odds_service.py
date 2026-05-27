@@ -9,7 +9,14 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.models.schema import Game, GameOdds, OddsApiRequestLog, SnapshotType
-from app.services.odds_service import _event_game_date, _match_game, compute_line_movement, fetch_and_store_odds, odds_freshness_metadata
+from app.services.odds_service import (
+    _event_game_date,
+    _match_game,
+    _normalize_betstack_events,
+    compute_line_movement,
+    fetch_and_store_odds,
+    odds_freshness_metadata,
+)
 
 
 class _FakeResponse:
@@ -130,6 +137,56 @@ class OddsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0].id, existing.id)
         self.assertEqual(self.db.query(OddsApiRequestLog).count(), 1)
         self.assertEqual(self.db.query(OddsApiRequestLog).first().snapshot_type, "open")
+
+    async def test_fetch_and_store_uses_betstack_consensus_provider(self) -> None:
+        self._game(11, date(2026, 4, 2), "Toronto Blue Jays", "Chicago White Sox")
+        payload = [{
+            "id": 1234,
+            "away_team": "Toronto Blue Jays",
+            "home_team": "Chicago White Sox",
+            "commence_time": "2026-04-02T20:10:00Z",
+            "lines": [{
+                "money_line_home": -150,
+                "money_line_away": 130,
+                "total_number": 8.5,
+                "over_line": -108,
+                "under_line": -112,
+                "last_updated": "2026-04-02T12:00:00Z",
+            }],
+        }]
+
+        with patch("app.services.odds_service.ODDS_DATA_PROVIDER", "betstack"), \
+             patch("app.services.odds_service.BETSTACK_API_KEY", "test-key"), \
+             patch("app.services.odds_service.httpx.AsyncClient", return_value=_FakeAsyncClient(payload)):
+            rows = await fetch_and_store_odds(self.db, SnapshotType.open)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].sportsbook, "betstack_consensus")
+        self.assertEqual(rows[0].away_ml, 130)
+        self.assertEqual(rows[0].home_ml, -150)
+        self.assertEqual(float(rows[0].total_line), 8.5)
+        log = self.db.query(OddsApiRequestLog).one()
+        self.assertEqual(log.provider, "betstack")
+        self.assertEqual(log.endpoint, "events")
+
+    def test_normalize_betstack_events_maps_consensus_line(self) -> None:
+        events = _normalize_betstack_events([{
+            "away_team": "A",
+            "home_team": "H",
+            "commence_time": "2026-04-02T20:10:00Z",
+            "line": {
+                "money_line_home": -120,
+                "money_line_away": 105,
+                "total_number": 9.0,
+                "over_line": -110,
+                "under_line": -110,
+            },
+        }])
+
+        self.assertEqual(events[0]["bookmakers"][0]["key"], "betstack_consensus")
+        markets = {market["key"]: market for market in events[0]["bookmakers"][0]["markets"]}
+        self.assertIn("h2h", markets)
+        self.assertIn("totals", markets)
 
     async def test_fetch_and_store_keeps_new_rows_when_other_rows_are_duplicates(self) -> None:
         self._game(1, date(2026, 4, 2), "Toronto Blue Jays", "Chicago White Sox")

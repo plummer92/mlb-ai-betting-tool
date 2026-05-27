@@ -7,6 +7,9 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.config import (
+    BETSTACK_API_KEY,
+    BETSTACK_API_URL,
+    ODDS_DATA_PROVIDER,
     ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES,
     THE_ODDS_API_KEY,
     THE_ODDS_API_URL,
@@ -53,7 +56,47 @@ async def fetch_and_store_odds(
     for the same snapshot type within the freshness window.
     """
     requested_books = books or list(DEFAULT_BOOKS)
+    provider = _select_odds_provider(db)
     exhausted_log = _recent_out_of_usage_log(db)
+    if provider == "betstack":
+        raw_events, raw_size_bytes = await _fetch_betstack_events(db, snapshot_type=snapshot_type)
+        requested_books = ["betstack_consensus"]
+    elif provider == "the_odds_api":
+        raw_events, raw_size_bytes = await _fetch_the_odds_api_events(
+            db,
+            snapshot_type=snapshot_type,
+            requested_books=requested_books,
+            exhausted_log=exhausted_log,
+        )
+    else:
+        raise RuntimeError(f"Unsupported odds data provider: {provider}")
+
+    return _store_provider_events(
+        db,
+        snapshot_type=snapshot_type,
+        requested_books=requested_books,
+        raw_events=raw_events,
+        raw_size_bytes=raw_size_bytes,
+        provider=provider,
+    )
+
+
+def _select_odds_provider(db: Session) -> str:
+    provider = (ODDS_DATA_PROVIDER or "the_odds_api").strip().lower()
+    if provider == "betstack":
+        return "betstack"
+    if provider == "auto" and BETSTACK_API_KEY and _recent_out_of_usage_log(db) is not None:
+        return "betstack"
+    return "the_odds_api"
+
+
+async def _fetch_the_odds_api_events(
+    db: Session,
+    *,
+    snapshot_type: SnapshotType,
+    requested_books: list[str],
+    exhausted_log: OddsApiRequestLog | None,
+) -> tuple[list[dict], int]:
     if exhausted_log is not None:
         requested_at = exhausted_log.requested_at.isoformat() if exhausted_log.requested_at else "unknown"
         raise RuntimeError(
@@ -97,8 +140,62 @@ async def fetch_and_store_odds(
             raw_bytes=raw_size_bytes,
         )
 
+    return raw_events, raw_size_bytes
+
+
+async def _fetch_betstack_events(db: Session, *, snapshot_type: SnapshotType) -> tuple[list[dict], int]:
+    if not BETSTACK_API_KEY:
+        raise RuntimeError("BETSTACK_API_KEY is missing; set it or use ODDS_DATA_PROVIDER=the_odds_api.")
+    url = f"{BETSTACK_API_URL.rstrip('/')}/events"
+    params = {"league": "baseball_mlb", "include_lines": "true"}
+    headers = {"X-API-Key": BETSTACK_API_KEY}
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(url, params=params, headers=headers, timeout=10)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            response = getattr(exc, "response", None)
+            error = _sanitize_http_error(exc)
+            _record_odds_api_request(
+                db,
+                provider="betstack",
+                endpoint="events",
+                snapshot_type=snapshot_type,
+                requested_books=["betstack_consensus"],
+                status="error",
+                http_status=response.status_code if response is not None else None,
+                error=error,
+            )
+            db.commit()
+            raise RuntimeError(error) from None
+        payload = resp.json()
+        raw_size_bytes = len(resp.content or b"")
+        raw_events = _normalize_betstack_events(payload)
+        _record_odds_api_request(
+            db,
+            provider="betstack",
+            endpoint="events",
+            snapshot_type=snapshot_type,
+            requested_books=["betstack_consensus"],
+            status="ok",
+            http_status=getattr(resp, "status_code", 200),
+            events_returned=len(raw_events),
+            raw_bytes=raw_size_bytes,
+        )
+    return raw_events, raw_size_bytes
+
+
+def _store_provider_events(
+    db: Session,
+    *,
+    snapshot_type: SnapshotType,
+    requested_books: list[str],
+    raw_events: list[dict],
+    raw_size_bytes: int,
+    provider: str,
+) -> list[GameOdds]:
     print(
-        f"[odds] fetch snapshot={snapshot_type.value} books={requested_books} "
+        f"[odds] fetch provider={provider} snapshot={snapshot_type.value} books={requested_books} "
         f"events_returned={len(raw_events)} mlb_events={len(raw_events)} raw_bytes={raw_size_bytes}"
     )
 
@@ -245,6 +342,8 @@ async def fetch_and_store_odds(
 def _record_odds_api_request(
     db: Session,
     *,
+    provider: str = "the_odds_api",
+    endpoint: str = "odds",
     snapshot_type: SnapshotType,
     requested_books: list[str],
     status: str,
@@ -255,8 +354,8 @@ def _record_odds_api_request(
 ) -> None:
     db.add(
         OddsApiRequestLog(
-            provider="the_odds_api",
-            endpoint="odds",
+            provider=provider,
+            endpoint=endpoint,
             snapshot_type=snapshot_type.value,
             bookmakers=",".join(requested_books),
             status=status,
@@ -797,6 +896,58 @@ def _sorted_bookmakers(event: dict, requested_books: list[str]) -> list[dict]:
     return sorted(bookmakers, key=lambda book: priority.get(book.get("key"), len(priority)))
 
 
+def _normalize_betstack_events(payload: list[dict] | dict) -> list[dict]:
+    source_events = payload.get("data", payload.get("events", [])) if isinstance(payload, dict) else payload
+    normalized: list[dict] = []
+    for event in source_events or []:
+        line = _betstack_line(event)
+        if not line:
+            continue
+        home_team = event.get("home_team")
+        away_team = event.get("away_team")
+        if not home_team or not away_team:
+            continue
+        bookmaker = {
+            "key": "betstack_consensus",
+            "last_update": line.get("last_updated"),
+            "markets": [],
+        }
+        h2h = []
+        if line.get("money_line_away") is not None:
+            h2h.append({"name": away_team, "price": line.get("money_line_away")})
+        if line.get("money_line_home") is not None:
+            h2h.append({"name": home_team, "price": line.get("money_line_home")})
+        if h2h:
+            bookmaker["markets"].append({"key": "h2h", "outcomes": h2h})
+        if line.get("total_number") is not None:
+            totals = []
+            if line.get("over_line") is not None:
+                totals.append({"name": "Over", "price": line.get("over_line"), "point": line.get("total_number")})
+            if line.get("under_line") is not None:
+                totals.append({"name": "Under", "price": line.get("under_line"), "point": line.get("total_number")})
+            if totals:
+                bookmaker["markets"].append({"key": "totals", "outcomes": totals})
+        normalized.append({
+            "id": event.get("id"),
+            "away_team": away_team,
+            "home_team": home_team,
+            "commence_time": event.get("commence_time"),
+            "bookmakers": [bookmaker],
+        })
+    return normalized
+
+
+def _betstack_line(event: dict) -> dict | None:
+    for key in ("line", "lines", "odds"):
+        value = event.get(key)
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, list) and value:
+            first = value[0]
+            return first if isinstance(first, dict) else None
+    return None
+
+
 def _get_existing_snapshot(
     db: Session,
     *,
@@ -866,7 +1017,7 @@ def _parse_bookmaker(
         game_id=game_id,
         sportsbook=bookmaker["key"],
         snapshot_type=snapshot_type,
-        fetched_at=datetime.now(timezone.utc),
+        fetched_at=_parse_provider_timestamp(bookmaker.get("last_update")) or datetime.now(timezone.utc),
     )
 
     for market in bookmaker.get("markets", []):
@@ -887,3 +1038,15 @@ def _parse_bookmaker(
     if row.away_ml is None or row.home_ml is None:
         return None, "missing_h2h_prices"
     return row, None
+
+
+def _parse_provider_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
