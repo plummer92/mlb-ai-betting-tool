@@ -44,6 +44,24 @@ class _ConsensusSnapshot:
     books: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class OddsProviderPause:
+    reason: str
+    provider_status: str
+    paused_since: datetime
+    paused_until: datetime
+    cooldown_minutes: int
+
+
+class OddsProviderPaused(RuntimeError):
+    def __init__(self, pause: OddsProviderPause):
+        self.pause = pause
+        super().__init__(
+            "Odds API quota exhausted; provider fetch paused "
+            f"until {pause.paused_until.isoformat()}."
+        )
+
+
 async def fetch_and_store_odds(
     db: Session,
     snapshot_type: SnapshotType,
@@ -98,11 +116,9 @@ async def _fetch_the_odds_api_events(
     exhausted_log: OddsApiRequestLog | None,
 ) -> tuple[list[dict], int]:
     if exhausted_log is not None:
-        requested_at = exhausted_log.requested_at.isoformat() if exhausted_log.requested_at else "unknown"
-        raise RuntimeError(
-            "Odds API quota exhausted; provider fetch paused "
-            f"for {ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES} minutes after {requested_at}."
-        )
+        pause = get_odds_provider_pause(db)
+        if pause is not None:
+            raise OddsProviderPaused(pause)
     params = {
         "apiKey": THE_ODDS_API_KEY,
         "regions": "us",
@@ -366,6 +382,25 @@ def _record_odds_api_request(
         )
     )
     db.flush()
+
+
+def get_odds_provider_pause(db: Session) -> OddsProviderPause | None:
+    exhausted_log = _recent_out_of_usage_log(db)
+    if exhausted_log is None or exhausted_log.requested_at is None:
+        return None
+    paused_since = exhausted_log.requested_at
+    if paused_since.tzinfo is None:
+        paused_since = paused_since.replace(tzinfo=timezone.utc)
+    paused_until = paused_since + timedelta(minutes=ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES)
+    if paused_until <= datetime.now(timezone.utc):
+        return None
+    return OddsProviderPause(
+        reason="out_of_usage_credits",
+        provider_status="OUT_OF_USAGE_CREDITS",
+        paused_since=paused_since,
+        paused_until=paused_until,
+        cooldown_minutes=ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES,
+    )
 
 
 def _recent_out_of_usage_log(db: Session) -> OddsApiRequestLog | None:

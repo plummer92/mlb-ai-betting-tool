@@ -13,10 +13,12 @@ from app.services.alert_service import create_and_send_alert_for_game, create_an
 from app.services.backtest_service import apply_backtest_weights, get_latest_calibration_result, run_logistic_regression
 from app.services.edge_service import calculate_edge_for_game
 from app.services.odds_service import (
+    OddsProviderPaused,
     SnapshotType,
     compute_line_movement,
     fetch_and_store_odds,
     get_latest_odds_snapshot,
+    get_odds_provider_pause,
     is_odds_snapshot_fresh,
 )
 from app.services.pipeline_service import (
@@ -36,6 +38,25 @@ UTC = ZoneInfo("UTC")
 PREGAME_REUSE_WINDOW_MINUTES = 15
 PREGAME_BOARD_REUSE_WINDOW_MINUTES = 60
 logger = logging.getLogger(__name__)
+
+
+def _odds_pause_payload(db) -> dict | None:
+    pause = get_odds_provider_pause(db)
+    if pause is None:
+        return None
+    return {
+        "status": "skipped",
+        "reason": pause.reason,
+        "provider_status": pause.provider_status,
+        "paused_until": pause.paused_until.isoformat(),
+    }
+
+
+def _log_odds_pause(context: str, pause_payload: dict) -> None:
+    print(
+        f"[scheduler] {context} skipped: "
+        f"{pause_payload['provider_status']} until {pause_payload['paused_until']}"
+    )
 
 
 def _parse_game_start_time(game: Game) -> datetime | None:
@@ -259,8 +280,16 @@ def sync_today_games_job():
 async def morning_odds_snapshot():
     db = SessionLocal()
     try:
+        if pause_payload := _odds_pause_payload(db):
+            _log_odds_pause("Morning odds", pause_payload)
+            return pause_payload
         stored = await fetch_and_store_odds(db, snapshot_type=SnapshotType.open)
         print(f"[scheduler] Morning snapshot: {len(stored)} odds rows stored")
+    except OddsProviderPaused as exc:
+        _log_odds_pause("Morning odds", {
+            "provider_status": exc.pause.provider_status,
+            "paused_until": exc.pause.paused_until.isoformat(),
+        })
     except (SQLAlchemyError, RuntimeError, ValueError):
         logger.exception("[scheduler] Morning odds error")
     finally:
@@ -308,7 +337,11 @@ async def calculate_edges_job():
             if latest_open is not None and is_odds_snapshot_fresh(latest_open):
                 stored.append(latest_open)
         if len(stored) != len(games):
-            stored = await fetch_and_store_odds(db, snapshot_type=SnapshotType.open)
+            if pause_payload := _odds_pause_payload(db):
+                _log_odds_pause("Edge odds refresh", pause_payload)
+                stored = []
+            else:
+                stored = await fetch_and_store_odds(db, snapshot_type=SnapshotType.open)
 
         result = calculate_edges_for_today(
             db,
@@ -380,6 +413,12 @@ async def run_pregame_snapshot(game_id: int):
                 f"rows={len(stored)} fetched_at={stored[0].fetched_at}"
             )
         else:
+            if pause_payload := _odds_pause_payload(db):
+                _log_odds_pause(f"Pregame snapshot for game {game_id}", pause_payload)
+                return {
+                    **pause_payload,
+                    "game_id": game_id,
+                }
             stored = await fetch_and_store_odds(db, snapshot_type=SnapshotType.pregame)
             print(f"[scheduler] Pregame snapshot fetched: {len(stored)} rows")
 
@@ -417,6 +456,11 @@ async def run_pregame_snapshot(game_id: int):
 
         alert_result = create_and_send_alert_for_game(db, game_id)
         print(f"[scheduler] Pregame alert for game {game_id}: {alert_result}")
+    except OddsProviderPaused as exc:
+        _log_odds_pause(f"Pregame snapshot for game {game_id}", {
+            "provider_status": exc.pause.provider_status,
+            "paused_until": exc.pause.paused_until.isoformat(),
+        })
     except (SQLAlchemyError, RuntimeError, ValueError):
         logger.exception("[scheduler] Pregame snapshot error for game %s", game_id)
     finally:
