@@ -34,6 +34,13 @@ _MANAGER_SEEDS: dict[int, tuple[str, float, int]] = {
 }
 _DEFAULT_B2B = 0.30
 _DEFAULT_CAP = 30
+_MAX_WORKLOAD_NOTE_LENGTH = 64
+
+
+def _normalize_pitching_note(value) -> str | None:
+    """Keep MLB boxscore note text within the stored workload-note width."""
+    note = (value or "").strip()
+    return note[:_MAX_WORKLOAD_NOTE_LENGTH] or None
 
 
 def seed_manager_tendencies(db: Session) -> None:
@@ -165,7 +172,7 @@ def collect_reliever_workload(team_id: int, target_date: date, db: Session) -> i
                         pitching_stats = player_info.get("stats", {}).get("pitching", {})
                         pitches = int(pitching_stats.get("pitchesThrown") or 0)
                         ip = _parse_innings_pitched(pitching_stats.get("inningsPitched"))
-                        note = (pitching_stats.get("note") or "").strip() or None
+                        note = _normalize_pitching_note(pitching_stats.get("note"))
 
                         # Appearances in last 3 days (excluding this game)
                         appearances = (

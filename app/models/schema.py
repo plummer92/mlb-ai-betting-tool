@@ -545,7 +545,7 @@ class RelieverWorkload(Base):
     innings_pitched = Column(Float, nullable=True)
     days_rest = Column(Integer, default=99)
     appearances_last_3_days = Column(Integer, default=0)
-    note = Column(String(10), nullable=True)
+    note = Column(String(64), nullable=True)
     player_name = Column(String(100), nullable=True)
     collected_at = Column(DateTime(timezone=True), server_default=func.now())
 
