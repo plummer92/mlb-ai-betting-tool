@@ -7,6 +7,7 @@ from statistics import pstdev
 from sqlalchemy.orm import Session
 
 from app.models.schema import EdgeResult, Game, GameOdds, LineMovement, SnapshotType
+from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.ev_math import american_to_decimal, implied_prob_raw, kelly_fraction
 from app.services.odds_service import odds_freshness_metadata
 
@@ -130,9 +131,11 @@ def classify_tradable_signal(
     *,
     market_respect: dict | None,
     market_adjustment: dict | None,
+    play: str | None = None,
     raw_edge_pct: float | None = None,
     raw_ev: float | None = None,
     adjusted_confidence: str | None = None,
+    confidence_score: float | None = None,
 ) -> dict:
     respect = market_respect or {"score": 50, "tags": ["MARKET NEUTRAL"], "components": {}}
     adjustment = market_adjustment or {}
@@ -150,6 +153,13 @@ def classify_tradable_signal(
     positive_clv = has_positive_market_clv(respect)
     positive_ev = float(adjustment.get("adjusted_ev") or 0) > 0
     confidence = (adjusted_confidence or adjustment.get("adjusted_confidence") or "").lower()
+    policy_qualified = qualifies_for_bet_policy(
+        play=play,
+        edge_pct=adjustment.get("adjusted_edge_pct", raw_edge_pct),
+        ev=adjustment.get("adjusted_ev", raw_ev),
+        confidence=confidence,
+        confidence_score=confidence_score,
+    )
     strong_model = (
         confidence == "strong"
         or abs(float(raw_edge_pct if raw_edge_pct is not None else adjustment.get("raw_edge_pct") or 0)) >= 0.08
@@ -160,8 +170,10 @@ def classify_tradable_signal(
         signal, reason = "PASS", "stale market context"
     elif rejected:
         signal, reason = "PASS", "market rejected model side"
-    elif agreed and positive_ev and positive_clv:
+    elif agreed and positive_ev and positive_clv and policy_qualified:
         signal, reason = "TRADE", "market agreed with positive CLV and adjusted EV"
+    elif agreed and positive_ev and positive_clv:
+        signal, reason = "PASS", "outside tightened profitable policy"
     elif neutral and strong_model and positive_ev:
         signal = "WATCH"
         reason = "market neutral with strong model"
@@ -185,6 +197,7 @@ def classify_tradable_signal(
         "market_rejected": rejected,
         "stale": stale,
         "strong_model": strong_model,
+        "policy_qualified": policy_qualified,
     }
 
 

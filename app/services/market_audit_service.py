@@ -279,6 +279,7 @@ def _tradable_signal(row: dict) -> tuple[str, str]:
             "components": row.get("market_respect_components") or {},
         },
         market_adjustment=row.get("market_respect_adjustment"),
+        play=row.get("play"),
         raw_edge_pct=row.get("raw_edge_pct"),
         raw_ev=row.get("raw_ev"),
         adjusted_confidence=row.get("adjusted_confidence"),

@@ -72,6 +72,7 @@ def _build_ranked_rows(limit: int = 10, active_only: bool = True) -> list[dict]:
             tradable = classify_tradable_signal(
                 market_respect=market_respect,
                 market_adjustment=adjustment,
+                play=edge.recommended_play,
                 raw_edge_pct=adjustment["raw_edge_pct"],
                 raw_ev=adjustment["raw_ev"],
                 adjusted_confidence=adjustment["adjusted_confidence"],

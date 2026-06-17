@@ -319,9 +319,11 @@ def create_and_send_alerts_for_today(db: Session) -> dict:
         tradable = classify_tradable_signal(
             market_respect=market_respect,
             market_adjustment=adjustment,
+            play=edge.recommended_play,
             raw_edge_pct=adjustment["raw_edge_pct"],
             raw_ev=adjustment["raw_ev"],
             adjusted_confidence=adjustment["adjusted_confidence"],
+            confidence_score=prediction.confidence_score if prediction else None,
         )
         totals_policy = evaluate_totals_policy(
             db,
@@ -436,9 +438,11 @@ def create_and_send_alert_for_game(db: Session, game_id: int) -> dict:
     tradable = classify_tradable_signal(
         market_respect=market_respect,
         market_adjustment=adjustment,
+        play=edge.recommended_play,
         raw_edge_pct=adjustment["raw_edge_pct"],
         raw_ev=adjustment["raw_ev"],
         adjusted_confidence=adjustment["adjusted_confidence"],
+        confidence_score=prediction.confidence_score if prediction else None,
     )
     totals_policy = evaluate_totals_policy(
         db,

@@ -232,13 +232,13 @@ class MarketAuditServiceTests(unittest.TestCase):
         self.assertIn("market_respect_weighting_backtest", report)
         self.assertIn("new_metrics", report)
         self.assertIn("market_respect_v2_backtest", report)
-        self.assertEqual(report["by_tradable_signal"][0]["tradable_signal"], "TRADE")
+        self.assertEqual(report["by_tradable_signal"][0]["tradable_signal"], "PASS")
         self.assertEqual(report["by_play_tradable_signal"][0]["play"], "away_ml")
-        self.assertEqual(report["by_play_tradable_signal"][0]["tradable_signal"], "TRADE")
+        self.assertEqual(report["by_play_tradable_signal"][0]["tradable_signal"], "PASS")
         self.assertEqual(report["market_respect_weighting_backtest"]["after"]["bets"], 1)
         self.assertEqual(report["market_respect_v2_backtest"]["model_only"]["bets"], 1)
         self.assertEqual(report["market_respect_v2_backtest"]["market_respect_only"]["bets"], 1)
-        self.assertEqual(report["market_respect_v2_backtest"]["model_plus_market_respect"]["bets"], 1)
+        self.assertEqual(report["market_respect_v2_backtest"]["model_plus_market_respect"]["bets"], 0)
 
     def test_market_respect_scores_late_sharp_buy(self) -> None:
         game, _prediction, _entry_odds, edge, _alert = self._base_rows(game_id=3)

@@ -90,9 +90,11 @@ def _build_ranked_rows(
         tradable = classify_tradable_signal(
             market_respect=market_respect,
             market_adjustment=adjustment,
+            play=edge.recommended_play,
             raw_edge_pct=adjustment["raw_edge_pct"],
             raw_ev=adjustment["raw_ev"],
             adjusted_confidence=adjustment["adjusted_confidence"],
+            confidence_score=prediction.confidence_score if prediction else None,
         )
         totals_policy = evaluate_totals_policy(
             db,
@@ -155,6 +157,7 @@ def _build_ranked_rows(
                     edge_pct=adjustment["adjusted_edge_pct"],
                     ev=adjustment["adjusted_ev"],
                     confidence=adjustment["adjusted_confidence"],
+                    confidence_score=prediction.confidence_score if prediction else None,
                 ),
             }
         )
@@ -241,9 +244,11 @@ def _decision_row_from_ranked(row: dict) -> dict:
         tradable = classify_tradable_signal(
             market_respect=row.get("market_respect"),
             market_adjustment=adjustment,
+            play=row.get("play"),
             raw_edge_pct=row.get("raw_edge_pct", row.get("edge_pct")),
             raw_ev=adjustment.get("raw_ev"),
             adjusted_confidence=adjustment.get("adjusted_confidence"),
+            confidence_score=row.get("confidence_score"),
         )
         tradable_signal = tradable["tradable_signal"]
         tradable_reason = tradable["tradable_reason"]
