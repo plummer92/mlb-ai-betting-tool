@@ -329,6 +329,8 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(report["summary"]["total"], 5)
         self.assertTrue(any(row["play"] == "home_ml" for row in report["by_play"]))
         self.assertIn("profiles", report["policy_backtest"])
+        self.assertTrue(any(row["month"] == game.game_date.strftime("%Y-%m") for row in report["by_month"]))
+        self.assertIn("forward_policy_ledger", report)
 
     def test_betting_policy_tightens_high_edge_tails(self) -> None:
         self.assertTrue(
@@ -462,6 +464,7 @@ class RouteAndAdminTests(unittest.TestCase):
             "odds_freshness_status": "FRESH",
             "movement_direction": "toward_model",
             "market_respect": {"score": 82, "tags": ["MARKET AGREED"], "components": {"line_clv": 0.5}},
+            "policy_qualified": True,
             "market_respect_adjustment": {
                 "score": 82,
                 "bucket": "strong_market_agreement",
@@ -506,6 +509,7 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(row["edge_result_id"], 7)
         self.assertEqual(row["prediction_id"], 5)
         self.assertEqual(row["game_date"], date.today().isoformat())
+        self.assertTrue(row["policy_qualified"])
 
     def test_decision_queue_blocks_agreement_without_clv(self) -> None:
         row = _decision_row_from_ranked(
@@ -574,6 +578,7 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(len(snapshots), 1)
         self.assertEqual(snapshots[0].tradable_signal, "TRADE")
         self.assertIn("Away @ Home", snapshots[0].snapshot_json)
+        self.assertIn('"policy_qualified": true', snapshots[0].snapshot_json)
 
     def test_daily_trade_summary_reports_no_trade_board(self) -> None:
         fake_row = _decision_row_from_ranked(

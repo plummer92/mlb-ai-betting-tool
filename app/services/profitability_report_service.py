@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 
 from sqlalchemy.orm import Session
 
-from app.models.schema import EdgeResult, GameOdds, GameOutcomeReview
+from app.models.schema import EdgeResult, GameOdds, GameOutcomeReview, TradableDecisionSnapshot
 from app.services.betting_policy import BETTING_PROFILES, qualifies_for_bet_policy
 from app.services.ev_math import american_to_decimal
 
@@ -112,6 +113,96 @@ def _sorted_segment_list(grouped: dict, *, key_names: tuple[str, ...], min_sampl
     return sorted(items, key=lambda item: (item["roi_per_bet"], item["win_rate"] or 0, item["total"]), reverse=True)
 
 
+def _timeline_segment_list(grouped: dict, *, key_names: tuple[str, ...], min_sample: int = 1) -> list[dict]:
+    items = []
+    for key, rows in grouped.items():
+        if len(rows) < min_sample:
+            continue
+        row = _segment_stats(rows)
+        if len(key_names) == 1:
+            row[key_names[0]] = key
+        else:
+            for idx, key_name in enumerate(key_names):
+                row[key_name] = key[idx]
+        items.append(row)
+    return sorted(items, key=lambda item: item.get(key_names[0]) or "")
+
+
+def _forward_policy_ledger(db: Session) -> dict:
+    review_by_edge = {
+        review.edge_result_id: review
+        for review in db.query(GameOutcomeReview)
+        .filter(GameOutcomeReview.edge_result_id.isnot(None))
+        .all()
+    }
+    snapshots = (
+        db.query(TradableDecisionSnapshot)
+        .order_by(TradableDecisionSnapshot.game_date.asc(), TradableDecisionSnapshot.id.asc())
+        .all()
+    )
+
+    rows = []
+    for snapshot in snapshots:
+        try:
+            payload = json.loads(snapshot.snapshot_json or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        policy_qualified = bool(payload.get("policy_qualified"))
+        would_have_bet = bool(snapshot.trade_allowed and snapshot.decision_status == "FIRE")
+        review = review_by_edge.get(snapshot.edge_result_id)
+        result = (review.bet_result if review else None)
+        odds = None
+        rows.append({
+            "game_date": snapshot.game_date,
+            "month": snapshot.game_date.strftime("%Y-%m") if snapshot.game_date else "unknown",
+            "play": (snapshot.play or "").lower(),
+            "decision_status": snapshot.decision_status,
+            "tradable_signal": snapshot.tradable_signal,
+            "policy_qualified": policy_qualified,
+            "would_have_bet": would_have_bet,
+            "did_bet": would_have_bet,
+            "bet_result": result,
+            "profit_units": _profit_units(review, odds) if review and would_have_bet else 0.0,
+            "profit_dollars_flat_100": _profit_dollars_flat_100(review, odds) if review and would_have_bet else 0.0,
+            "edge_pct": float(snapshot.adjusted_edge_pct) if snapshot.adjusted_edge_pct is not None else None,
+            "ev": None,
+        })
+
+    qualified_rows = [row for row in rows if row["policy_qualified"]]
+    would_rows = [row for row in rows if row["would_have_bet"]]
+    graded_would_rows = [row for row in would_rows if row["bet_result"] in {"win", "loss", "push"}]
+
+    by_month: dict[str, list[dict]] = defaultdict(list)
+    by_play_month: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for row in graded_would_rows:
+        by_month[row["month"]].append(row)
+        by_play_month[(row["play"], row["month"])].append(row)
+
+    recent = rows[-25:]
+    return {
+        "total_snapshots": len(rows),
+        "policy_qualified_snapshots": len(qualified_rows),
+        "would_have_bet": len(would_rows),
+        "graded_would_have_bet": _segment_stats(graded_would_rows),
+        "by_month": _timeline_segment_list(by_month, key_names=("month",)),
+        "by_play_month": _timeline_segment_list(by_play_month, key_names=("play", "month")),
+        "recent": [
+            {
+                "game_date": row["game_date"].isoformat() if row["game_date"] else None,
+                "play": row["play"],
+                "decision_status": row["decision_status"],
+                "tradable_signal": row["tradable_signal"],
+                "policy_qualified": row["policy_qualified"],
+                "would_have_bet": row["would_have_bet"],
+                "did_bet": row["did_bet"],
+                "result": row["bet_result"],
+                "edge_pct": row["edge_pct"],
+            }
+            for row in recent
+        ],
+    }
+
+
 def get_profitability_report(db: Session, *, min_sample: int = 5) -> dict:
     pairs = (
         db.query(GameOutcomeReview, EdgeResult, GameOdds)
@@ -131,6 +222,8 @@ def get_profitability_report(db: Session, *, min_sample: int = 5) -> dict:
             {
                 "play": play,
                 "confidence": confidence,
+                "season": review.game_date.year if review.game_date else None,
+                "month": review.game_date.strftime("%Y-%m") if review.game_date else "unknown",
                 "edge_bucket": _edge_bucket(edge_pct),
                 "bet_result": review.bet_result,
                 "edge_pct": edge_pct,
@@ -151,6 +244,9 @@ def get_profitability_report(db: Session, *, min_sample: int = 5) -> dict:
     by_edge_bucket: dict[str, list[dict]] = defaultdict(list)
     by_play_edge: dict[tuple[str, str], list[dict]] = defaultdict(list)
     by_play_conf: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    by_season: dict[int, list[dict]] = defaultdict(list)
+    by_month: dict[str, list[dict]] = defaultdict(list)
+    by_play_month: dict[tuple[str, str], list[dict]] = defaultdict(list)
 
     for row in normalized_rows:
         by_play[row["play"]].append(row)
@@ -158,6 +254,10 @@ def get_profitability_report(db: Session, *, min_sample: int = 5) -> dict:
         by_edge_bucket[row["edge_bucket"]].append(row)
         by_play_edge[(row["play"], row["edge_bucket"])].append(row)
         by_play_conf[(row["play"], row["confidence"])].append(row)
+        if row["season"] is not None:
+            by_season[row["season"]].append(row)
+        by_month[row["month"]].append(row)
+        by_play_month[(row["play"], row["month"])].append(row)
 
     all_stats = _segment_stats(normalized_rows) if normalized_rows else _segment_stats([])
     policy_rows = [row for row in normalized_rows if row["policy_qualified"]]
@@ -191,5 +291,9 @@ def get_profitability_report(db: Session, *, min_sample: int = 5) -> dict:
         "by_edge_bucket": _sorted_segment_list(by_edge_bucket, key_names=("edge_bucket",), min_sample=min_sample),
         "by_play_edge_bucket": play_edge_segments,
         "by_play_confidence": _sorted_segment_list(by_play_conf, key_names=("play", "confidence"), min_sample=min_sample),
+        "by_season": _timeline_segment_list(by_season, key_names=("season",), min_sample=min_sample),
+        "by_month": _timeline_segment_list(by_month, key_names=("month",), min_sample=min_sample),
+        "by_play_month": _timeline_segment_list(by_play_month, key_names=("play", "month"), min_sample=min_sample),
+        "forward_policy_ledger": _forward_policy_ledger(db),
         "insights": insights,
     }

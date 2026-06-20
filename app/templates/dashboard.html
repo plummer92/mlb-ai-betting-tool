@@ -931,6 +931,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
   <div class="quick-tabs">
     <a class="quick-tab" href="#decision-queue-section">Action</a>
     <a class="quick-tab" href="#health-section">Health</a>
+    <a class="quick-tab" href="#qualified-policy-section">Qualified</a>
     <a class="quick-tab" href="#today-read-section">Today</a>
     <a class="quick-tab" href="#odds-integrity-section">Odds Trust</a>
     <a class="quick-tab" href="#market-audit-section">Markets</a>
@@ -1003,6 +1004,20 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     </div>
     <div id="odds-debug-panel">
       <div class="loading">Loading odds freshness</div>
+    </div>
+  </div>
+
+  <div class="section" id="qualified-policy-section">
+    <div class="section-head">
+      <div class="section-label">Qualified Policy Plays Today</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="qualified-policy-badge">LOADING</div>
+    </div>
+    <div id="qualified-policy-summary"></div>
+    <div class="card" style="padding:0;margin-top:12px">
+      <div class="tbl-wrap" id="qualified-policy-table">
+        <div class="loading">Loading policy-qualified plays</div>
+      </div>
     </div>
   </div>
 
@@ -1629,6 +1644,56 @@ async function loadDecisionQueue() {
   } catch(e) {
     $('decision-queue-badge').textContent = 'SLOW';
     $('decision-queue-table').innerHTML = `<div class="empty compact">Decision queue is still calculating. The odds integrity panel below has the current blocker state.</div>`;
+  }
+}
+
+async function loadQualifiedPolicyToday() {
+  try {
+    const live = await loadDashboardLive();
+    const rows = live.decision_queue || [];
+    const qualified = rows.filter(r => r.policy_qualified);
+    const fire = qualified.filter(r => r.decision_status === 'FIRE').length;
+    const blocked = rows.filter(r => !r.policy_qualified);
+    const blockerCounts = blocked.reduce((acc, row) => {
+      const reason = row.tradable_reason || row.policy_status || row.decision_status || 'unknown';
+      acc[reason] = (acc[reason] || 0) + 1;
+      return acc;
+    }, {});
+    const topBlocker = Object.entries(blockerCounts).sort((a, b) => b[1] - a[1])[0];
+    $('qualified-policy-badge').textContent = qualified.length ? `${qualified.length} QUALIFIED` : '0 QUALIFIED';
+    $('qualified-policy-summary').innerHTML = `
+      <div class="summary-bar" style="border-left-color: ${qualified.length ? 'var(--green)' : 'var(--yellow)'}; background: var(--surface3);">
+        <div class="s-stat"><div class="s-stat-val">${rows.length}</div><div class="s-stat-lbl">Queue Rows</div></div>
+        <div class="s-stat"><div class="s-stat-val ${qualified.length ? 'green' : 'muted'}">${qualified.length}</div><div class="s-stat-lbl">Policy Qualified</div></div>
+        <div class="s-stat"><div class="s-stat-val ${fire ? 'green' : 'muted'}">${fire}</div><div class="s-stat-lbl">Would Bet Now</div></div>
+        <div class="s-stat"><div class="s-stat-val">${rows.filter(r => r.decision_status === 'WATCH').length}</div><div class="s-stat-lbl">Research Watch</div></div>
+        <div class="s-stat"><div class="s-stat-val">${rows.filter(r => r.decision_status === 'BLOCKED').length}</div><div class="s-stat-lbl">Blocked</div></div>
+        <div class="s-stat"><div class="s-stat-val">${topBlocker ? topBlocker[1] : 0}</div><div class="s-stat-lbl">${topBlocker ? esc(topBlocker[0]).slice(0, 24) : 'No Blocker'}</div></div>
+      </div>`;
+
+    const displayRows = qualified.length ? qualified : rows.slice(0, 10);
+    $('qualified-policy-table').innerHTML = `
+      <table>
+        <thead><tr><th>Game</th><th>Play</th><th>Policy</th><th>Status</th><th>Edge</th><th>Market</th><th>Why</th></tr></thead>
+        <tbody>
+          ${displayRows.map(r => `
+            <tr>
+              <td style="font-weight:600;white-space:nowrap">${esc(r.game || r.matchup || '---')}</td>
+              <td class="mono">${esc((r.play || '---').replace('_', ' ').toUpperCase())}</td>
+              <td>${r.policy_qualified ? '<span class="chip c-strong">QUALIFIED</span>' : '<span class="chip c-loss">OUTSIDE POLICY</span>'}</td>
+              <td>${decisionStatusChip(r.decision_status)}</td>
+              <td class="mono ${r.adjusted_edge_pct > 0 ? 'green' : 'red'}">${r.adjusted_edge_pct != null ? (r.adjusted_edge_pct * 100).toFixed(1) + '%' : '---'}</td>
+              <td>${marketRespectChip(r.market_respect)}</td>
+              <td style="min-width:260px;font-size:11px;color:var(--muted);line-height:1.45">${esc(r.decision_reason || r.tradable_reason || '')}</td>
+            </tr>
+          `).join('') || '<tr><td colspan="7"><div class="empty compact">No decision rows are available yet.</div></td></tr>'}
+        </tbody>
+      </table>
+      ${qualified.length ? '' : '<div class="empty compact">No plays currently pass the tightened profitable policy. Showing the top queue rows so the blockers are visible.</div>'}`;
+  } catch(e) {
+    $('qualified-policy-badge').textContent = 'ERROR';
+    $('qualified-policy-summary').innerHTML = '';
+    $('qualified-policy-table').innerHTML = `<div class="empty compact">Qualified policy panel unavailable: ${esc(e.message)}</div>`;
   }
 }
 
@@ -2650,9 +2715,12 @@ async function loadProfitabilityDrilldowns() {
     const data = research.reports?.profitability_report || await fetchJsonWithTimeout('/api/reviews/profitability-report', 'Profitability report', 10000);
     const summary = data.summary || {};
     const policy = data.policy_backtest?.current_tightened_policy || {};
+    const ledger = data.forward_policy_ledger || {};
+    const ledgerStats = ledger.graded_would_have_bet || {};
     const winRate = summary.win_rate != null ? (summary.win_rate * 100).toFixed(1) + '%' : '---';
     const roi = summary.roi_per_bet != null ? fmt(summary.roi_per_bet, 3) : '---';
     const policyRoi = policy.roi_per_bet != null ? fmt(policy.roi_per_bet, 3) : '---';
+    const ledgerRoi = ledgerStats.roi_per_bet != null ? fmt(ledgerStats.roi_per_bet, 3) : '---';
     $('profitability-badge').textContent = `${summary.total ?? 0} BETS`;
     $('profitability-summary').innerHTML = `
       ${snapshotLine(data, 'Profitability snapshot')}
@@ -2663,6 +2731,15 @@ async function loadProfitabilityDrilldowns() {
         <div class="s-stat"><div class="s-stat-val ${summary.roi_per_bet > 0 ? 'green' : summary.roi_per_bet < 0 ? 'red' : 'muted'}">${roi}</div><div class="s-stat-lbl">ROI / Bet</div></div>
         <div class="s-stat"><div class="s-stat-val ${policy.roi_per_bet > 0 ? 'green' : policy.roi_per_bet < 0 ? 'red' : 'muted'}">${policyRoi}</div><div class="s-stat-lbl">Policy ROI / Bet</div></div>
         <div class="s-stat"><div class="s-stat-val">${policy.total ?? 0}</div><div class="s-stat-lbl">Policy Bets</div></div>
+        <div class="s-stat"><div class="s-stat-val ${ledgerStats.roi_per_bet > 0 ? 'green' : ledgerStats.roi_per_bet < 0 ? 'red' : 'muted'}">${ledgerRoi}</div><div class="s-stat-lbl">Forward Ledger ROI</div></div>
+      </div>
+      <div class="summary-bar" style="border-left-color: var(--blue); background: var(--surface2);">
+        <div class="s-stat"><div class="s-stat-val">${ledger.total_snapshots ?? 0}</div><div class="s-stat-lbl">Ledger Rows</div></div>
+        <div class="s-stat"><div class="s-stat-val">${ledger.policy_qualified_snapshots ?? 0}</div><div class="s-stat-lbl">Policy Qualified</div></div>
+        <div class="s-stat"><div class="s-stat-val">${ledger.would_have_bet ?? 0}</div><div class="s-stat-lbl">Would Have Bet</div></div>
+        <div class="s-stat"><div class="s-stat-val">${ledgerStats.total ?? 0}</div><div class="s-stat-lbl">Graded Would-Bets</div></div>
+        <div class="s-stat"><div class="s-stat-val">${ledgerStats.wins ?? 0}-${ledgerStats.losses ?? 0}-${ledgerStats.pushes ?? 0}</div><div class="s-stat-lbl">Forward Record</div></div>
+        <div class="s-stat"><div class="s-stat-val">${ledgerStats.win_rate != null ? (ledgerStats.win_rate * 100).toFixed(1) + '%' : '---'}</div><div class="s-stat-lbl">Forward Win Rate</div></div>
       </div>
       ${(data.insights || []).length ? `<div class="audit-note">${(data.insights || []).map(esc).join(' ')}</div>` : ''}`;
 
@@ -2682,6 +2759,22 @@ async function loadProfitabilityDrilldowns() {
       <table style="margin-top:14px;">
         <thead><tr><th colspan="7">By Confidence</th></tr><tr><th>Segment</th><th>Bets</th><th>Record</th><th>Win Rate</th><th>ROI / Bet</th><th>Avg Edge</th><th>Avg EV</th></tr></thead>
         <tbody>${segmentRows(data.by_confidence, ['confidence']) || '<tr><td colspan="7"><div class="empty compact">No confidence segments yet.</div></td></tr>'}</tbody>
+      </table>
+      <table style="margin-top:14px;">
+        <thead><tr><th colspan="7">By Season</th></tr><tr><th>Segment</th><th>Bets</th><th>Record</th><th>Win Rate</th><th>ROI / Bet</th><th>Avg Edge</th><th>Avg EV</th></tr></thead>
+        <tbody>${segmentRows(data.by_season, ['season']) || '<tr><td colspan="7"><div class="empty compact">No season segments yet.</div></td></tr>'}</tbody>
+      </table>
+      <table style="margin-top:14px;">
+        <thead><tr><th colspan="7">By Month</th></tr><tr><th>Segment</th><th>Bets</th><th>Record</th><th>Win Rate</th><th>ROI / Bet</th><th>Avg Edge</th><th>Avg EV</th></tr></thead>
+        <tbody>${segmentRows(data.by_month, ['month']) || '<tr><td colspan="7"><div class="empty compact">No month segments yet.</div></td></tr>'}</tbody>
+      </table>
+      <table style="margin-top:14px;">
+        <thead><tr><th colspan="7">By Market + Month</th></tr><tr><th>Segment</th><th>Bets</th><th>Record</th><th>Win Rate</th><th>ROI / Bet</th><th>Avg Edge</th><th>Avg EV</th></tr></thead>
+        <tbody>${segmentRows(data.by_play_month, ['play', 'month']) || '<tr><td colspan="7"><div class="empty compact">No market/month segments yet.</div></td></tr>'}</tbody>
+      </table>
+      <table style="margin-top:14px;">
+        <thead><tr><th colspan="7">Forward Ledger By Month</th></tr><tr><th>Segment</th><th>Bets</th><th>Record</th><th>Win Rate</th><th>ROI / Bet</th><th>Avg Edge</th><th>Avg EV</th></tr></thead>
+        <tbody>${segmentRows(ledger.by_month, ['month']) || '<tr><td colspan="7"><div class="empty compact">No graded forward ledger rows yet.</div></td></tr>'}</tbody>
       </table>`;
   } catch(e) {
     $('profitability-badge').textContent = 'ERROR';
@@ -3294,6 +3387,7 @@ const primaryLoaders = [
   }, 'dashboard bundles'],
   [loadHealthScore, 'health score'],
   [loadDecisionQueue, 'decision queue'],
+  [loadQualifiedPolicyToday, 'qualified policy'],
   [loadOddsIntegrity, 'pregame integrity'],
   [loadOddsWarehouse, 'odds warehouse'],
   [loadTodayRead, 'today read'],

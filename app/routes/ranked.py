@@ -301,6 +301,7 @@ def _decision_row_from_ranked(row: dict) -> dict:
         "tradable_signal": tradable_signal,
         "tradable_reason": tradable_reason,
         "trade_allowed": trade_allowed,
+        "policy_qualified": bool(row.get("policy_qualified")),
         "totals_policy_score": row.get("totals_policy_score"),
         "policy_status": policy_status,
         "policy_reason": totals_policy.get("policy_reason") or row.get("policy_reason"),
