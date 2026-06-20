@@ -17,6 +17,8 @@ from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.edge_service import get_trustworthy_active_edges
 from app.services.market_respect_service import classify_tradable_signal, market_respect_adjustment, market_respect_for_edge
 from app.services.odds_service import odds_freshness_metadata
+from app.services.report_cache import get_ttl_cached
+from app.services.report_snapshot_service import get_report_snapshot
 from app.services.totals_policy_service import apply_under_cluster_risk, evaluate_totals_policy
 
 router = APIRouter(prefix="/api/ranked", tags=["ranked"])
@@ -337,6 +339,34 @@ def _build_decision_queue(db: Session, limit: int = 20, active_only: bool = True
     return limited
 
 
+def get_cached_ranked_rows(db: Session, limit: int = 10, active_only: bool = True) -> list[dict]:
+    today = datetime.now(ET).date().isoformat()
+    if active_only:
+        snapshot = get_report_snapshot(db, "ranked_rows", report_date=datetime.now(ET).date(), max_age_seconds=3600)
+        if snapshot and isinstance(snapshot.get("rows"), list):
+            return snapshot["rows"][:limit]
+    rows = get_ttl_cached(
+        ("ranked_rows", today, active_only),
+        ttl_seconds=30,
+        builder=lambda: _build_ranked_rows(db=db, limit=50, active_only=active_only),
+    )
+    return rows[:limit]
+
+
+def get_cached_decision_queue(db: Session, limit: int = 20, active_only: bool = True) -> list[dict]:
+    today = datetime.now(ET).date().isoformat()
+    if active_only:
+        snapshot = get_report_snapshot(db, "decision_queue", report_date=datetime.now(ET).date(), max_age_seconds=3600)
+        if snapshot and isinstance(snapshot.get("rows"), list):
+            return snapshot["rows"][:limit]
+    rows = get_ttl_cached(
+        ("decision_queue", today, active_only),
+        ttl_seconds=30,
+        builder=lambda: _build_decision_queue(db=db, limit=50, active_only=active_only),
+    )
+    return rows[:limit]
+
+
 def _build_discord_lines(bets: list[dict], title: str = "📊 **Ranked MLB Bets**") -> list[str]:
     lines = [title]
     for bet in bets:
@@ -372,7 +402,7 @@ def get_ranked_bets(
     active_only: bool = Query(True),
     db: Session = Depends(get_db),
 ):
-    return _build_ranked_rows(db=db, limit=limit, active_only=active_only)
+    return get_cached_ranked_rows(db=db, limit=limit, active_only=active_only)
 
 
 @router.get("/decision-queue")
@@ -381,7 +411,7 @@ def get_decision_queue(
     active_only: bool = Query(True),
     db: Session = Depends(get_db),
 ):
-    return _build_decision_queue(db=db, limit=limit, active_only=active_only)
+    return get_cached_decision_queue(db=db, limit=limit, active_only=active_only)
 
 
 @router.post("/discord", dependencies=[Depends(verify_api_key)])

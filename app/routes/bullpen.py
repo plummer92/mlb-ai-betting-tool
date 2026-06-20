@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models.schema import Game
 from app.services.manager_service import get_bullpen_fatigue_report
+from app.services.report_cache import get_ttl_cached
+from app.services.report_snapshot_service import get_report_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,17 @@ def bullpen_today(db: Session = Depends(get_db)):
     Sorted by bullpen_strength ascending (most fatigued first).
     """
     today = date.today()
+    snapshot = get_report_snapshot(db, "bullpen_today", report_date=today)
+    if snapshot is not None:
+        return snapshot.get("reports", [])
+    return get_ttl_cached(
+        ("bullpen_today", today.isoformat()),
+        ttl_seconds=300,
+        builder=lambda: _build_bullpen_today(db, today),
+    )
+
+
+def _build_bullpen_today(db: Session, today: date) -> list[dict]:
     games = db.query(Game).filter(Game.game_date == today).all()
 
     team_ids: set[int] = set()

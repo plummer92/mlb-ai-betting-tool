@@ -9,6 +9,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    Index,
     Numeric,
     String,
     Text,
@@ -127,6 +128,24 @@ class OddsApiRequestLog(Base):
     events_returned = Column(Integer, nullable=True)
     raw_bytes = Column(Integer, nullable=True)
     error = Column(Text, nullable=True)
+
+
+class ReportSnapshot(Base):
+    __tablename__ = "report_snapshots"
+
+    id = Column(Integer, primary_key=True)
+    report_name = Column(String(80), nullable=False)
+    report_date = Column(Date, nullable=True)
+    generated_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    status = Column(String(20), nullable=False, default="ok")
+    runtime_ms = Column(Integer, nullable=True)
+    payload_json = Column(Text, nullable=False)
+    error = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("report_name", "report_date", name="uq_report_snapshot_name_date"),
+        Index("ix_report_snapshots_name_generated", "report_name", "generated_at"),
+    )
 
 
 class LineMovement(Base):

@@ -77,11 +77,12 @@ def _signed_clv(trade: PaperTrade, close_odds: int | None, close_line: float | N
     }
 
 
-def get_clv_report(db: Session) -> dict:
+def get_clv_report(db: Session, *, limit: int = 25) -> dict:
     rows = (
         db.query(PaperTrade, EdgeResult)
         .outerjoin(EdgeResult, EdgeResult.id == PaperTrade.edge_result_id)
         .order_by(PaperTrade.game_date.desc(), PaperTrade.id.desc())
+        .limit(limit)
         .all()
     )
 
@@ -124,6 +125,8 @@ def get_clv_report(db: Session) -> dict:
 
     return {
         "summary": summarize(details),
+        "sample_limit": limit,
+        "sampled_rows": len(details),
         "by_play": [
             {"play": play, **summarize(items)}
             for play, items in sorted(by_play.items())
@@ -287,7 +290,7 @@ def _tradable_signal(row: dict) -> tuple[str, str]:
     return signal["tradable_signal"], signal["tradable_reason"]
 
 
-def get_movement_backtest_report(db: Session, *, min_sample: int = 3) -> dict:
+def get_movement_backtest_report(db: Session, *, min_sample: int = 3, limit: int = 50) -> dict:
     rows = (
         db.query(GameOutcomeReview, EdgeResult, GameOdds, LineMovement, Game)
         .outerjoin(EdgeResult, EdgeResult.id == GameOutcomeReview.edge_result_id)
@@ -295,6 +298,8 @@ def get_movement_backtest_report(db: Session, *, min_sample: int = 3) -> dict:
         .outerjoin(LineMovement, LineMovement.id == EdgeResult.movement_id)
         .outerjoin(Game, Game.game_id == GameOutcomeReview.game_id)
         .filter(GameOutcomeReview.bet_result.in_(["win", "loss", "push"]))
+        .order_by(GameOutcomeReview.game_date.desc(), GameOutcomeReview.id.desc())
+        .limit(limit)
         .all()
     )
 
@@ -462,4 +467,6 @@ def get_movement_backtest_report(db: Session, *, min_sample: int = 3) -> dict:
         "by_tradable_signal": rows_for(by_tradable_signal, ("tradable_signal",)),
         "by_play_tradable_signal": rows_for(by_play_tradable_signal, ("play", "tradable_signal")),
         "min_sample": min_sample,
+        "sample_limit": limit,
+        "sampled_rows": len(normalized),
     }

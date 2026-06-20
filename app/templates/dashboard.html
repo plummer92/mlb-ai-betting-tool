@@ -214,6 +214,40 @@ body::after {
   background: rgba(6,182,212,0.05);
 }
 
+.freshness-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(160px, 1fr));
+  gap: 8px;
+  margin-bottom: 18px;
+}
+.freshness-pill {
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  border-radius: 6px;
+  padding: 9px 12px;
+  font-family: monospace;
+}
+.freshness-name {
+  color: var(--muted);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}
+.freshness-age {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  margin-top: 3px;
+}
+.panel-freshness {
+  color: var(--muted);
+  font-family: monospace;
+  font-size: 10px;
+  margin: -5px 0 10px;
+}
+@media (max-width: 900px) { .freshness-strip { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 560px) { .freshness-strip { grid-template-columns: 1fr; } }
+
 /* ── Section ── */
 .section { margin-bottom: 36px; }
 
@@ -906,6 +940,13 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <a class="quick-tab" href="#bullpen-section">Bullpen</a>
   </div>
 
+  <div class="freshness-strip" id="dashboard-freshness">
+    <div class="freshness-pill"><div class="freshness-name">Live Board</div><div class="freshness-age">Loading</div></div>
+    <div class="freshness-pill"><div class="freshness-name">Decision Queue</div><div class="freshness-age">Loading</div></div>
+    <div class="freshness-pill"><div class="freshness-name">Research Reports</div><div class="freshness-age">Loading</div></div>
+    <div class="freshness-pill"><div class="freshness-name">Slow Endpoint Watch</div><div class="freshness-age">Loading</div></div>
+  </div>
+
   <div class="section" id="decision-queue-section">
     <div class="section-head">
       <div class="section-label">Decision Queue</div>
@@ -949,6 +990,19 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     </div>
     <div id="odds-debug-panel">
       <div class="loading">Loading odds freshness</div>
+    </div>
+  </div>
+
+  <div class="section" id="slow-endpoints-section">
+    <div class="section-head">
+      <div class="section-label">Dashboard Speed Watch</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="slow-endpoints-badge">LOADING</div>
+    </div>
+    <div class="card" style="padding:0;">
+      <div class="tbl-wrap" id="slow-endpoints-table">
+        <div class="loading">Loading endpoint timings</div>
+      </div>
     </div>
   </div>
 
@@ -1295,6 +1349,59 @@ async function runPanelsSequential(loaders, delayMs = 250) {
 }
 
 let decisionPipelineCache = null;
+let dashboardLiveCache = null;
+let dashboardResearchCache = null;
+
+async function loadDashboardLive(ms = 10000) {
+  if (dashboardLiveCache) return dashboardLiveCache;
+  dashboardLiveCache = await fetchJsonWithTimeout('/api/dashboard/live', 'Live dashboard', ms);
+  return dashboardLiveCache;
+}
+
+async function loadDashboardResearch(ms = 10000) {
+  if (dashboardResearchCache) return dashboardResearchCache;
+  dashboardResearchCache = await fetchJsonWithTimeout('/api/dashboard/research', 'Research dashboard', ms);
+  return dashboardResearchCache;
+}
+
+function ageLabel(iso) {
+  if (!iso) return 'not built yet';
+  const d = new Date(iso);
+  if (isNaN(d)) return 'unknown age';
+  const seconds = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
+  if (seconds < 90) return `${seconds}s old`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return `${minutes}m old`;
+  const hours = Math.round(minutes / 60);
+  return `${hours}h old`;
+}
+
+function snapshotLine(payload, label = 'Snapshot') {
+  const snap = payload?.snapshot;
+  if (!snap) return '';
+  const generated = snap.generated_at ? gameTime(snap.generated_at) : 'unknown';
+  const age = ageLabel(snap.generated_at);
+  const runtime = snap.runtime_ms != null ? ` · built in ${snap.runtime_ms}ms` : '';
+  return `<div class="panel-freshness">${esc(label)}: ${esc(generated)} (${esc(age)})${runtime}</div>`;
+}
+
+function renderFreshness(live, research, slowCount = null) {
+  const liveTime = new Date().toISOString();
+  const decisionSnap = live?.snapshots?.decision_queue;
+  const reports = research?.reports || {};
+  const reportTimes = Object.values(reports)
+    .map(r => r?.snapshot?.generated_at)
+    .filter(Boolean)
+    .sort();
+  const researchGenerated = reportTimes.length ? reportTimes[0] : null;
+  $('dashboard-freshness').innerHTML = `
+    <div class="freshness-pill"><div class="freshness-name">Live Board</div><div class="freshness-age">${esc(gameTime(liveTime))}</div></div>
+    <div class="freshness-pill"><div class="freshness-name">Decision Queue</div><div class="freshness-age">${esc(ageLabel(decisionSnap?.generated_at))}</div></div>
+    <div class="freshness-pill"><div class="freshness-name">Research Reports</div><div class="freshness-age">${esc(ageLabel(researchGenerated))}</div></div>
+    <div class="freshness-pill"><div class="freshness-name">Slow Endpoint Watch</div><div class="freshness-age">${slowCount == null ? 'checking' : `${slowCount} recent`}</div></div>
+  `;
+}
+
 async function loadDecisionPipelineSummary(ms = 8000) {
   if (decisionPipelineCache) return decisionPipelineCache;
   decisionPipelineCache = await fetchJsonWithTimeout('/api/debug/decision-pipeline', 'Decision pipeline', ms);
@@ -1395,20 +1502,20 @@ function totalsPolicyMeter(policy) {
 
 async function loadDecisionQueue() {
   try {
-    const [rows, pipeline] = await Promise.all([
-      fetchWithTimeout('/api/ranked/decision-queue?limit=20&active_only=true', 'Decision queue', 10000).then(res => res.json()),
-      loadDecisionPipelineSummary(8000).catch(() => null),
-    ]);
+    const live = await loadDashboardLive();
+    const rows = live.decision_queue || [];
+    const pipeline = rows.length ? null : await loadDecisionPipelineSummary(8000).catch(() => null);
     const fire = rows.filter(r => r.decision_status === 'FIRE').length;
     const watch = rows.filter(r => r.decision_status === 'WATCH').length;
     $('decision-queue-badge').textContent = rows.length ? `${fire} FIRE / ${watch} WATCH` : 'NO ACTION';
 
     if (!rows.length) {
-      $('decision-queue-table').innerHTML = rankedEmptyHtml(pipeline);
+      $('decision-queue-table').innerHTML = `${snapshotLine({snapshot: live.snapshots?.decision_queue}, 'Decision snapshot')}${rankedEmptyHtml(pipeline)}`;
       return;
     }
 
     $('decision-queue-table').innerHTML = `
+      ${snapshotLine({snapshot: live.snapshots?.decision_queue}, 'Decision snapshot')}
       <table>
         <thead><tr>
           <th>Rank</th><th>Game</th><th>Play</th><th>Raw Edge</th><th>Adjusted Edge</th><th>Market Trust</th><th>Totals Policy</th><th>Respect Tag</th><th>Odds</th><th>Status</th><th>Reason</th>
@@ -1439,8 +1546,8 @@ async function loadDecisionQueue() {
 
 async function loadTotalsRegime() {
   try {
-    const res = await fetchWithTimeout('/api/debug/totals-policy', 'Totals policy report', 10000);
-    const data = await res.json();
+    const research = await loadDashboardResearch();
+    const data = research.reports?.totals_policy || await fetchJsonWithTimeout('/api/debug/totals-policy', 'Totals policy report', 10000);
     const board = data.current_board || {};
     const backtest = data.backtest || {};
     const raw = backtest.raw_totals_model || {};
@@ -1456,6 +1563,7 @@ async function loadTotalsRegime() {
       ...blocked.slice(0, Math.max(0, 8 - actionable.length - watchlist.length)).map(p => ({...p, queue_label: 'BLOCKED', queue_sub: 'no bet'})),
     ];
     $('totals-regime-panel').innerHTML = `
+      ${snapshotLine(data, 'Totals snapshot')}
       <div class="today-read" style="margin-bottom:12px;">
         <div class="read-tile">
           <div class="read-label">Current Mix</div>
@@ -1608,8 +1716,8 @@ function oddsProviderBanner(quota) {
 
 async function loadOddsIntegrity() {
   try {
-    const res = await fetch('/api/debug/market-readiness');
-    const data = await res.json();
+    const live = await loadDashboardLive();
+    const data = live.market_readiness || {};
     const integrity = data.integrity || {};
     const quota = data.quota || {};
     const rows = data.games || [];
@@ -1680,14 +1788,15 @@ async function loadOddsIntegrity() {
 
 async function loadOddsWarehouse() {
   try {
-    const res = await fetch('/api/debug/odds-warehouse');
-    const data = await res.json();
+    const research = await loadDashboardResearch();
+    const data = research.reports?.odds_warehouse || await fetchJsonWithTimeout('/api/debug/odds-warehouse', 'Odds warehouse', 10000);
     const quota = data.quota || {};
     const summary = data.summary || {};
     const rows = data.plays || data.games || [];
     const pct = quota.month_usage_pct != null ? (quota.month_usage_pct * 100).toFixed(1) : '0.0';
     $('odds-warehouse-badge').textContent = quota.provider_out_of_usage_credits ? 'QUOTA HIT' : `${summary.clv_ready || 0} CLV READY`;
     $('odds-warehouse-summary').innerHTML = `
+      ${snapshotLine(data, 'Odds warehouse snapshot')}
       ${oddsProviderBanner(quota)}
       <div class="today-read" style="margin-bottom:12px;">
         <div class="read-tile">
@@ -1812,17 +1921,16 @@ async function loadTotalsBiasDebug() {
 
 async function loadTodayRead() {
   try {
-    const [gamesRes, rankedRes, clvRes, bullpenRes, signalsRes] = await Promise.all([
+    const [live, research, gamesRes, signalsRes] = await Promise.all([
+      loadDashboardLive(),
+      loadDashboardResearch().catch(() => null),
       fetchWithTimeout('/api/games/today', 'Games board', 8000),
-      fetchWithTimeout('/api/ranked/bets?limit=10&active_only=true', 'Ranked bets', 8000).catch(() => null),
-      fetchWithTimeout('/api/paper/clv', 'CLV report', 8000).catch(() => null),
-      fetchWithTimeout('/api/bullpen/today', 'Bullpen report', 8000).catch(() => null),
       fetchWithTimeout('/api/sandbox/signals/today', 'Signal intelligence', 8000).catch(() => null),
     ]);
     const games = await gamesRes.json();
-    const ranked = rankedRes ? await rankedRes.json() : [];
-    const clv = clvRes ? await clvRes.json() : { summary: null };
-    const bullpen = bullpenRes ? await bullpenRes.json() : [];
+    const ranked = live.ranked_bets || [];
+    const clv = research?.reports?.paper_clv || { summary: null };
+    const bullpen = research?.reports?.bullpen_today?.reports || [];
     const signals = signalsRes ? await signalsRes.json() : [];
 
     const top = strongestEdge(ranked);
@@ -2060,10 +2168,9 @@ async function loadAccuracy() {
 
 async function loadTopBets() {
   try {
-    const [rows, pipeline] = await Promise.all([
-      fetchWithTimeout('/api/ranked/bets?limit=10&active_only=true', 'Ranked bets', 10000).then(res => res.json()),
-      loadDecisionPipelineSummary(8000).catch(() => null),
-    ]);
+    const live = await loadDashboardLive();
+    const rows = live.ranked_bets || [];
+    const pipeline = rows.length ? null : await loadDecisionPipelineSummary(8000).catch(() => null);
     $('top-bets-badge').textContent = rows.length ? `${rows.length} LIVE RANKS` : 'NO LIVE BETS';
     if (!rows.length) {
       $('top-bets-table').innerHTML = rankedEmptyHtml(pipeline);
@@ -2149,12 +2256,9 @@ async function loadBestPlaysWeek() {
 
 async function loadMarketAudit() {
   try {
-    const [clvRes, movementRes] = await Promise.all([
-      fetchWithTimeout('/api/paper/clv', 'CLV report', 10000),
-      fetchWithTimeout('/api/reviews/movement-report?min_sample=1', 'Movement report', 10000),
-    ]);
-    const clv = await clvRes.json();
-    const movement = await movementRes.json();
+    const research = await loadDashboardResearch();
+    const clv = research.reports?.paper_clv || await fetchJsonWithTimeout('/api/paper/clv', 'CLV report', 10000);
+    const movement = research.reports?.movement_report || await fetchJsonWithTimeout('/api/reviews/movement-report?min_sample=1', 'Movement report', 10000);
     const clvSummary = clv.summary || {};
     const moveSummary = movement.summary || {};
     const byPlay = clv.by_play || [];
@@ -2182,6 +2286,8 @@ async function loadMarketAudit() {
 
     $('market-audit-badge').textContent = `${clvSummary.bets ?? 0} CLV / ${moveBets} MOVES`;
     $('market-audit-summary').innerHTML = `
+      ${snapshotLine(clv, 'CLV snapshot')}
+      ${snapshotLine(movement, 'Movement snapshot')}
       <div class="summary-bar" style="border-left-color: var(--orange); background: var(--surface3);">
         <div class="s-stat">
           <div class="s-stat-val ${colorClass((clvSummary.beat_close_rate || 0) * 100, 52, 45)}">${beatRate}</div>
@@ -2430,6 +2536,39 @@ async function loadMarketShadow() {
     $('market-shadow-badge').textContent = 'SLOW';
     $('market-shadow-summary').innerHTML = '';
     $('market-shadow-table').innerHTML = `<div class="empty">Market Shadow is still calculating. The odds warehouse and decision queue are available.</div>`;
+  }
+}
+
+async function loadSlowEndpoints() {
+  try {
+    const data = await fetchJsonWithTimeout('/api/dashboard/slow-endpoints?limit=12', 'Slow endpoint watch', 5000);
+    const rows = data.events || [];
+    $('slow-endpoints-badge').textContent = rows.length ? `${rows.length} RECENT` : 'CLEAR';
+    renderFreshness(dashboardLiveCache, dashboardResearchCache, rows.length);
+    if (!rows.length) {
+      $('slow-endpoints-table').innerHTML = '<div class="empty compact">No slow dashboard endpoints recorded since the service started.</div>';
+      return;
+    }
+    $('slow-endpoints-table').innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Observed</th><th>Method</th><th>Path</th><th>Status</th><th>Elapsed</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map(row => `
+            <tr>
+              <td class="mono">${esc(gameTime(row.observed_at))}</td>
+              <td class="mono">${esc(row.method || 'GET')}</td>
+              <td class="mono">${esc(row.path || '---')}</td>
+              <td class="mono">${row.status_code ?? '---'}</td>
+              <td class="mono ${row.elapsed_ms >= 5000 ? 'red' : row.elapsed_ms >= 2000 ? 'yellow' : 'green'}">${row.elapsed_ms ?? '---'}ms</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>`;
+  } catch(e) {
+    $('slow-endpoints-badge').textContent = 'ERROR';
+    $('slow-endpoints-table').innerHTML = `<div class="empty compact">Slow endpoint watch unavailable: ${esc(e.message)}</div>`;
   }
 }
 
@@ -2917,15 +3056,16 @@ async function loadSignals() {
 
 async function loadBullpen() {
   try {
-    const res = await fetchWithTimeout('/api/bullpen/today', 'Bullpen report', 10000);
-    const reports = await res.json();
+    const research = await loadDashboardResearch();
+    const bullpenPayload = research.reports?.bullpen_today || null;
+    const reports = bullpenPayload?.reports || await fetchJsonWithTimeout('/api/bullpen/today', 'Bullpen report', 10000);
 
     $('bullpen-badge').textContent = reports.length
       ? `${reports.length} TEAM${reports.length !== 1 ? 'S' : ''}`
       : 'NO DATA';
 
     if (!reports.length) {
-      $('bullpen-grid').innerHTML = '<div class="empty compact">No bullpen data available yet. Collected daily at 9:15am ET.</div>';
+      $('bullpen-grid').innerHTML = `${snapshotLine(bullpenPayload, 'Bullpen snapshot')}<div class="empty compact">No bullpen data available yet. Collected daily at 9:15am ET.</div>`;
       return;
     }
 
@@ -2989,7 +3129,7 @@ async function loadBullpen() {
       </div>`;
     }).join('');
 
-    $('bullpen-grid').innerHTML = cards;
+    $('bullpen-grid').innerHTML = `${snapshotLine(bullpenPayload, 'Bullpen snapshot')}${cards}`;
   } catch(e) {
     $('bullpen-badge').textContent = 'SLOW';
     $('bullpen-grid').innerHTML = `<div class="empty">Bullpen intelligence is still calculating. Refresh in a minute for the full bullpen board.</div>`;
@@ -2999,6 +3139,10 @@ async function loadBullpen() {
 let loadAllInFlight = false;
 let secondaryLoadInFlight = false;
 const primaryLoaders = [
+  [async () => {
+    const [live, research] = await Promise.all([loadDashboardLive(), loadDashboardResearch().catch(() => null)]);
+    renderFreshness(live, research, null);
+  }, 'dashboard bundles'],
   [loadDecisionQueue, 'decision queue'],
   [loadOddsIntegrity, 'pregame integrity'],
   [loadOddsWarehouse, 'odds warehouse'],
@@ -3013,6 +3157,7 @@ const secondaryLoaders = [
   [loadDecisionDebug, 'decision debug'],
   [loadOddsDebug, 'odds freshness'],
   [loadTotalsBiasDebug, 'totals bias'],
+  [loadSlowEndpoints, 'slow endpoints'],
   [loadAccuracy, 'accuracy'],
   [loadBestPlaysWeek, 'best plays week'],
   [loadMarketAudit, 'market audit'],
@@ -3024,6 +3169,7 @@ const secondaryLoaders = [
 async function loadPrimaryBoard() {
   if (loadAllInFlight) return;
   loadAllInFlight = true;
+  dashboardLiveCache = null;
   decisionPipelineCache = null;
   try {
     await runPanelsSequential(primaryLoaders, 175);
@@ -3043,6 +3189,7 @@ async function loadSecondaryReports() {
 }
 
 async function loadAll() {
+  dashboardResearchCache = null;
   await loadPrimaryBoard();
   setTimeout(() => { loadSecondaryReports(); }, 2500);
 }

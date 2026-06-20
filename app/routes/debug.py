@@ -29,9 +29,11 @@ from app.services.ev_math import american_to_decimal, calc_edge, implied_prob_ra
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
 from app.services.decision_journal_service import build_daily_trade_summary, persist_tradable_decisions
 from app.services.odds_service import odds_freshness_metadata
+from app.services.report_cache import get_ttl_cached
+from app.services.report_snapshot_service import get_report_snapshot, refresh_dashboard_report_snapshots
 from app.services.sharp_move_journal_service import get_sharp_move_grade_report, persist_sharp_move_journal
 from app.services.totals_policy_service import totals_policy_backtest
-from app.routes.ranked import _build_decision_queue
+from app.routes.ranked import get_cached_decision_queue
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
 logger = logging.getLogger(__name__)
@@ -47,7 +49,7 @@ def tradable_signals_debug(
     active_only: bool = Query(True),
     db: Session = Depends(get_db),
 ):
-    rows = _build_decision_queue(db=db, limit=limit, active_only=active_only)
+    rows = get_cached_decision_queue(db=db, limit=limit, active_only=active_only)
     by_signal = Counter(row.get("tradable_signal") or "UNKNOWN" for row in rows)
     by_decision = Counter(row.get("decision_status") or "UNKNOWN" for row in rows)
     by_play_signal: dict[tuple[str, str], int] = Counter(
@@ -1176,7 +1178,17 @@ def build_totals_policy_report(db: Session, *, min_sample: int = 5) -> dict:
 
 @router.get("/totals-policy")
 def totals_policy(min_sample: int = Query(5, ge=1, le=100), db: Session = Depends(get_db)):
-    return build_totals_policy_report(db, min_sample=min_sample)
+    today_date = datetime.now(ET).date()
+    if min_sample == 5:
+        snapshot = get_report_snapshot(db, "totals_policy", report_date=today_date)
+        if snapshot is not None:
+            return snapshot
+    today = today_date.isoformat()
+    return get_ttl_cached(
+        ("totals_policy", today, min_sample),
+        ttl_seconds=300,
+        builder=lambda: build_totals_policy_report(db, min_sample=min_sample),
+    )
 
 
 def _stage_payload(filtered: list[dict]) -> dict:
@@ -1597,7 +1609,22 @@ def market_readiness(db: Session = Depends(get_db)):
 
 @router.get("/odds-warehouse")
 def odds_warehouse(db: Session = Depends(get_db)):
-    return build_odds_warehouse_report(db)
+    today_date = datetime.now(ET).date()
+    snapshot = get_report_snapshot(db, "odds_warehouse", report_date=today_date, max_age_seconds=300)
+    if snapshot is not None:
+        return snapshot
+    today = today_date.isoformat()
+    return get_ttl_cached(
+        ("odds_warehouse", today),
+        ttl_seconds=60,
+        builder=lambda: build_odds_warehouse_report(db),
+    )
+
+
+@router.post("/report-snapshots/refresh", dependencies=[Depends(verify_api_key)])
+def refresh_report_snapshots(db: Session = Depends(get_db)):
+    today = datetime.now(ET).date()
+    return refresh_dashboard_report_snapshots(db, report_date=today)
 
 
 def _edge_result_sample(edge: EdgeResult, game: Game | None = None) -> dict:

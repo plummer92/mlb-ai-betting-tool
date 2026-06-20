@@ -28,6 +28,11 @@ from app.services.pipeline_service import (
 )
 from app.services.prediction_service import deactivate_stale_active_predictions
 from app.services.ranked_alerts import send_ranked_bets_to_discord_job
+from app.services.report_snapshot_service import (
+    refresh_dashboard_report_snapshots,
+    refresh_decision_snapshots,
+    refresh_decision_snapshots_for_date,
+)
 from app.services.bullpen_calc import collect_reliever_workload
 from app.services.manager_service import track_manager_decision
 from app.services.review_service import resolve_completed_games
@@ -351,6 +356,8 @@ async def calculate_edges_job():
             diagnostic_label="scheduler-daily-open",
         )
         print(f"[scheduler] Edges calculated: {result}")
+        decision_result = refresh_decision_snapshots_for_date(report_date=datetime.now(ET).date())
+        print(f"[scheduler] Decision snapshots refreshed: {decision_result}")
     except (SQLAlchemyError, RuntimeError, ValueError):
         logger.exception("[scheduler] Edge calculation error")
     finally:
@@ -453,6 +460,8 @@ async def run_pregame_snapshot(game_id: int):
             movement=movement,
         )
         print(f"[scheduler] Edge recalculated for game {game_id}: {edge_result}")
+        decision_result = refresh_decision_snapshots_for_date(report_date=game.game_date if game else datetime.now(ET).date())
+        print(f"[scheduler] Pregame decision snapshots refreshed: {decision_result}")
 
         alert_result = create_and_send_alert_for_game(db, game_id)
         print(f"[scheduler] Pregame alert for game {game_id}: {alert_result}")
@@ -523,3 +532,18 @@ def ranked_bets_discord_job():
         print(f"[scheduler] Discord summary: {result}")
     except (RuntimeError, ValueError):
         logger.exception("[scheduler] Discord summary error")
+
+
+@scheduler.scheduled_job(CronTrigger(hour=11, minute=5, timezone="America/New_York"))
+def refresh_dashboard_reports_job():
+    db = SessionLocal()
+    try:
+        today = datetime.now(ET).date()
+        result = refresh_dashboard_report_snapshots(db, report_date=today)
+        print(f"[scheduler] Dashboard report snapshots: {result}")
+        decision_result = refresh_decision_snapshots(db, report_date=today)
+        print(f"[scheduler] Dashboard decision snapshots: {decision_result}")
+    except (SQLAlchemyError, RuntimeError, ValueError):
+        logger.exception("[scheduler] Dashboard report snapshot error")
+    finally:
+        db.close()

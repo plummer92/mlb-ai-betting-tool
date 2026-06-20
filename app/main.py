@@ -5,6 +5,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from app.middleware.limiter import limiter
+from app.middleware.timing import EndpointTimingMiddleware
 
 from app.config import APP_NAME, APP_VERSION
 
@@ -59,6 +60,7 @@ app = FastAPI(
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(EndpointTimingMiddleware, warn_ms=2000)
 
 
 app.include_router(alerts_router)

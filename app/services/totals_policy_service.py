@@ -173,6 +173,7 @@ def evaluate_totals_policy(
     prediction=None,
     odds: GameOdds | None = None,
     market_respect: dict | None = None,
+    sandbox: SandboxPredictionV4 | None = None,
 ) -> dict:
     play = ((edge.recommended_play if edge else None) or "").lower()
     if play not in TOTAL_PLAYS:
@@ -282,7 +283,8 @@ def evaluate_totals_policy(
         score -= 10
         reasons.append("recommended_overs_have_weak_history")
 
-    sandbox = _latest_sandbox(db, edge.game_id if edge else None)
+    if sandbox is None:
+        sandbox = _latest_sandbox(db, edge.game_id if edge else None)
     explosive_penalty, explosive_reasons = _explosive_environment(
         play=play,
         prediction=prediction,
@@ -474,6 +476,17 @@ def totals_policy_backtest(db: Session, *, min_sample: int = 5) -> dict:
         .order_by(GameOutcomeReview.game_date.asc(), GameOutcomeReview.id.asc())
         .all()
     )
+    game_ids = [edge.game_id for _, edge, _, _, _ in rows if edge and edge.game_id is not None]
+    sandbox_by_game: dict[int, SandboxPredictionV4] = {}
+    if game_ids:
+        sandbox_rows = (
+            db.query(SandboxPredictionV4)
+            .filter(SandboxPredictionV4.game_id.in_(game_ids))
+            .order_by(SandboxPredictionV4.game_id.asc(), SandboxPredictionV4.created_at.desc(), SandboxPredictionV4.id.desc())
+            .all()
+        )
+        for sandbox in sandbox_rows:
+            sandbox_by_game.setdefault(sandbox.game_id, sandbox)
 
     normalized: list[dict] = []
     by_policy_status: dict[str, list[dict]] = defaultdict(list)
@@ -510,7 +523,15 @@ def totals_policy_backtest(db: Session, *, min_sample: int = 5) -> dict:
                 market_respect["components"]["line_clv"] = round(pregame_total - book_total, 3)
             elif review.recommended_play == "under":
                 market_respect["components"]["line_clv"] = round(book_total - pregame_total, 3)
-        policy = evaluate_totals_policy(db, edge=edge, game=game, prediction=None, odds=odds, market_respect=market_respect)
+        policy = evaluate_totals_policy(
+            db,
+            edge=edge,
+            game=game,
+            prediction=None,
+            odds=odds,
+            market_respect=market_respect,
+            sandbox=sandbox_by_game.get(edge.game_id) if edge else None,
+        )
         row = {
             "game_id": review.game_id,
             "play": review.recommended_play,

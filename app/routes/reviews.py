@@ -1,3 +1,5 @@
+from datetime import date
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -6,6 +8,8 @@ from app.db import get_db
 from app.models.schema import Game, GameOutcomeReview
 from app.services.market_audit_service import get_movement_backtest_report
 from app.services.profitability_report_service import get_profitability_report
+from app.services.report_cache import get_ttl_cached
+from app.services.report_snapshot_service import get_report_snapshot
 from app.services.review_service import get_accuracy_segmented, resolve_completed_games
 
 router = APIRouter(prefix="/api/reviews", tags=["reviews"])
@@ -163,6 +167,15 @@ def profitability_report(
 @router.get("/movement-report")
 def movement_report(
     min_sample: int = Query(default=3, ge=1, le=50),
+    limit: int = Query(default=50, ge=50, le=2000),
     db: Session = Depends(get_db),
 ):
-    return get_movement_backtest_report(db, min_sample=min_sample)
+    if min_sample == 1 and limit == 50:
+        snapshot = get_report_snapshot(db, "movement_report", report_date=date.today())
+        if snapshot is not None:
+            return snapshot
+    return get_ttl_cached(
+        ("movement_report", min_sample, limit),
+        ttl_seconds=300,
+        builder=lambda: get_movement_backtest_report(db, min_sample=min_sample, limit=limit),
+    )
