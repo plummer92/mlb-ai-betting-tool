@@ -1,5 +1,5 @@
 from functools import lru_cache
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -78,6 +78,7 @@ def dashboard_research(db: Session = Depends(get_db)):
             "totals_policy",
             "paper_clv",
             "movement_report",
+            "profitability_report",
             "bullpen_today",
             "performance_summary",
         )
@@ -96,6 +97,93 @@ def dashboard_slow_endpoints(limit: int = 20):
         "status": "ok",
         "limit": limit,
         "events": get_slow_endpoint_events(limit=max(1, min(limit, 80))),
+    }
+
+
+def _snapshot_age_seconds(snapshot: dict | None) -> int | None:
+    generated_at = (snapshot or {}).get("generated_at")
+    if not generated_at:
+        return None
+    try:
+        value = datetime.fromisoformat(generated_at)
+    except ValueError:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - value).total_seconds()))
+
+
+def _health_status(checks: list[dict]) -> str:
+    if any(check["status"] == "BROKEN" for check in checks):
+        return "BROKEN"
+    if any(check["status"] == "WARNING" for check in checks):
+        return "WARNING"
+    return "OK"
+
+
+@router.get("/api/dashboard/health")
+def dashboard_health(db: Session = Depends(get_db)):
+    today = datetime.now(ET).date()
+    readiness = build_market_readiness_report(db)
+    quota = readiness.get("quota") or {}
+    integrity = readiness.get("integrity") or {}
+    total_games = readiness.get("total_games") or len(readiness.get("games") or [])
+    slow_events = get_slow_endpoint_events(limit=10)
+
+    decision_snapshot = (get_report_snapshot(db, "decision_queue", report_date=today, max_age_seconds=None) or {}).get("snapshot")
+    ranked_snapshot = (get_report_snapshot(db, "ranked_rows", report_date=today, max_age_seconds=None) or {}).get("snapshot")
+    research_names = ("odds_warehouse", "totals_policy", "paper_clv", "movement_report", "profitability_report", "bullpen_today")
+    research_snapshots = {
+        name: (get_report_snapshot(db, name, report_date=today, max_age_seconds=None) or {}).get("snapshot")
+        for name in research_names
+    }
+    decision_age = _snapshot_age_seconds(decision_snapshot)
+    research_ages = [_snapshot_age_seconds(snapshot) for snapshot in research_snapshots.values() if snapshot]
+    oldest_research_age = max(research_ages) if research_ages else None
+    missing_research = [name for name, snapshot in research_snapshots.items() if snapshot is None]
+
+    checks = []
+    provider_paused = bool(quota.get("provider_out_of_usage_credits"))
+    checks.append({
+        "name": "Odds Feed",
+        "status": "BROKEN" if provider_paused else ("WARNING" if quota.get("errors_this_month") else "OK"),
+        "detail": quota.get("latest_provider_message") or quota.get("quota_alert") or quota.get("provider_status") or "Provider OK",
+    })
+    clv_usable = integrity.get("clv_usable") or 0
+    checks.append({
+        "name": "Pregame CLV",
+        "status": "OK" if total_games and clv_usable else ("WARNING" if total_games else "BROKEN"),
+        "detail": f"{clv_usable}/{total_games} games CLV usable" if total_games else "No games loaded",
+    })
+    checks.append({
+        "name": "Decision Queue",
+        "status": "OK" if decision_age is not None and decision_age <= 3600 else ("WARNING" if decision_age is not None else "BROKEN"),
+        "detail": f"Snapshot age {decision_age // 60}m" if decision_age is not None else "No decision snapshot",
+    })
+    checks.append({
+        "name": "Research Snapshots",
+        "status": "OK" if not missing_research and oldest_research_age is not None and oldest_research_age <= 12 * 3600 else ("WARNING" if oldest_research_age is not None else "BROKEN"),
+        "detail": f"Oldest age {oldest_research_age // 60}m" if oldest_research_age is not None else f"Missing {len(missing_research)} reports",
+    })
+    checks.append({
+        "name": "Endpoint Speed",
+        "status": "WARNING" if slow_events else "OK",
+        "detail": f"{len(slow_events)} recent slow endpoints" if slow_events else "No recent slow endpoints",
+    })
+
+    return {
+        "status": _health_status(checks),
+        "date": today.isoformat(),
+        "checks": checks,
+        "summary": {
+            "total_games": total_games,
+            "clv_usable": clv_usable,
+            "decision_snapshot_age_seconds": decision_age,
+            "ranked_snapshot_age_seconds": _snapshot_age_seconds(ranked_snapshot),
+            "oldest_research_snapshot_age_seconds": oldest_research_age,
+            "missing_research_reports": missing_research,
+            "slow_endpoint_count": len(slow_events),
+        },
     }
 
 

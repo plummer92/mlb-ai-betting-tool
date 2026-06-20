@@ -161,6 +161,10 @@ def profitability_report(
     min_sample: int = Query(default=5, ge=1, le=50),
     db: Session = Depends(get_db),
 ):
+    if min_sample == 5:
+        snapshot = get_report_snapshot(db, "profitability_report", report_date=date.today())
+        if snapshot is not None:
+            return snapshot
     return get_profitability_report(db, min_sample=min_sample)
 
 

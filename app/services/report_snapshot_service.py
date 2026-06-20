@@ -132,6 +132,7 @@ def refresh_dashboard_report_snapshots(db: Session, *, report_date: date | None 
     from app.routes.debug import build_odds_warehouse_report, build_totals_policy_report
     from app.routes.bullpen import _build_bullpen_today
     from app.services.market_audit_service import get_clv_report, get_movement_backtest_report
+    from app.services.profitability_report_service import get_profitability_report
 
     target_date = report_date or date.today()
     builders: dict[str, Callable[[], dict]] = {
@@ -139,6 +140,7 @@ def refresh_dashboard_report_snapshots(db: Session, *, report_date: date | None 
         "totals_policy": lambda: build_totals_policy_report(db, min_sample=5),
         "paper_clv": lambda: get_clv_report(db, limit=25),
         "movement_report": lambda: get_movement_backtest_report(db, min_sample=1, limit=50),
+        "profitability_report": lambda: get_profitability_report(db, min_sample=5),
         "bullpen_today": lambda: {"status": "ok", "reports": _build_bullpen_today(db, target_date)},
         "performance_summary": lambda: build_performance_summary(db),
     }
