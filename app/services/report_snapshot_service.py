@@ -165,6 +165,7 @@ def refresh_dashboard_report_snapshots(db: Session, *, report_date: date | None 
 
 
 def refresh_decision_snapshots(db: Session, *, report_date: date | None = None) -> dict:
+    from app.routes.edges import build_today_edges_payload
     from app.routes.ranked import _build_decision_queue, _build_ranked_rows
 
     target_date = report_date or date.today()
@@ -178,6 +179,10 @@ def refresh_decision_snapshots(db: Session, *, report_date: date | None = None) 
             "status": "ok",
             "rows": _build_ranked_rows(db=db, limit=50, active_only=True),
             "active_only": True,
+        },
+        "today_edges": lambda: {
+            "status": "ok",
+            "rows": build_today_edges_payload(db),
         },
     }
 

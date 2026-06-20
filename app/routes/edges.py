@@ -8,6 +8,8 @@ from app.db import get_db
 from app.models.schema import Game
 from app.services.edge_service import get_trustworthy_active_edges
 from app.services.market_respect_service import market_respect_adjustment, market_respect_for_edge
+from app.services.report_cache import get_ttl_cached
+from app.services.report_snapshot_service import get_report_snapshot
 
 ET = ZoneInfo("America/New_York")
 
@@ -103,6 +105,23 @@ def get_top_edges_history(
 
 @router.get("/today")
 def get_today_edges(db: Session = Depends(get_db)):
+    today = datetime.now(ET).date()
+    snapshot = get_report_snapshot(db, "today_edges", report_date=today, max_age_seconds=3600)
+    if snapshot and isinstance(snapshot.get("rows"), list):
+        return snapshot["rows"]
+    return get_cached_today_edges(db)
+
+
+def get_cached_today_edges(db: Session) -> list[dict]:
+    today = datetime.now(ET).date()
+    return get_ttl_cached(
+        ("today_edges", today.isoformat()),
+        ttl_seconds=60,
+        builder=lambda: build_today_edges_payload(db),
+    )
+
+
+def build_today_edges_payload(db: Session) -> list[dict]:
     today = datetime.now(ET).date()
     trusted_rows = get_trustworthy_active_edges(db, game_date=today)
     latest_by_game: dict[int, dict] = {}

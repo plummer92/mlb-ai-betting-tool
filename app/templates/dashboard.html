@@ -2742,16 +2742,14 @@ async function loadDebrief() {
 
 async function loadIntel() {
   try {
-    const [gr, er, pr] = await Promise.all([
-      fetch('/api/games/today'),
-      fetch('/api/edges/today'),
-      fetch('/api/model/predictions/today'),
-    ]);
-    const games = await gr.json();
-    const edges = await er.json();
-    const preds = await pr.json();
+    const intel = await fetchJsonWithTimeout('/api/dashboard/intel', 'Active intel', 8000);
+    const games = intel.games || [];
+    const edges = intel.edges || [];
+    const preds = intel.predictions || [];
 
     currentIntel.games = games;
+    currentIntel.edges = {};
+    currentIntel.preds = {};
     edges.forEach(e => currentIntel.edges[e.game_id] = e);
     preds.forEach(p => currentIntel.preds[p.game_id] = p);
 
@@ -2760,7 +2758,7 @@ async function loadIntel() {
     $('intel-badge').textContent = `${games.length} GAME${games.length !== 1 ? 'S' : ''}`;
 
     if (!games.length) {
-      $('game-grid').innerHTML = '<div class="empty compact">No games scheduled today.</div>';
+      $('game-grid').innerHTML = `${snapshotLine({snapshot: intel.snapshots?.today_edges}, 'Edge snapshot')}<div class="empty compact">No games scheduled today.</div>`;
       return;
     }
 
@@ -2872,7 +2870,7 @@ async function loadIntel() {
       </div>`;
     }).join('');
 
-    $('game-grid').innerHTML = cards;
+    $('game-grid').innerHTML = `${snapshotLine({snapshot: intel.snapshots?.today_edges}, 'Edge snapshot')}${cards}`;
 
   } catch(e) {
     $('game-grid').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
