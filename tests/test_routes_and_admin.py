@@ -350,8 +350,40 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertTrue(
             qualifies_for_bet_policy(
                 play="under",
-                edge_pct=0.07,
-                ev=0.11,
+                edge_pct=0.17,
+                ev=0.24,
+                confidence="strong",
+            )
+        )
+        self.assertFalse(
+            qualifies_for_bet_policy(
+                play="under",
+                edge_pct=0.12,
+                ev=0.18,
+                confidence="strong",
+            )
+        )
+        self.assertFalse(
+            qualifies_for_bet_policy(
+                play="under",
+                edge_pct=0.24,
+                ev=0.35,
+                confidence="strong",
+            )
+        )
+        self.assertTrue(
+            qualifies_for_bet_policy(
+                play="over",
+                edge_pct=0.16,
+                ev=0.22,
+                confidence="strong",
+            )
+        )
+        self.assertFalse(
+            qualifies_for_bet_policy(
+                play="over",
+                edge_pct=0.08,
+                ev=0.12,
                 confidence="strong",
             )
         )

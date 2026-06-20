@@ -19,25 +19,24 @@ BETTING_PROFILES: dict[str, dict] = {
         "min_ev": 0.05,
         "allowed_confidences": {"medium", "strong"},
     },
-    # Overs also worked best in the moderate edge band; the highest-edge tails
-    # were historically some of the worst-performing spots.
+    # Totals profitability is concentrated in the 15-20% model edge bucket.
+    # Smaller totals edges and extreme tails have been negative in review data.
     "over": {
         "enabled": True,
-        "min_edge": 0.05,
-        "max_edge": 0.10,
-        "min_ev": 0.08,
-        "allowed_confidences": {"medium", "strong"},
-        "min_confidence_score": 72.0,
+        "min_edge": 0.15,
+        "max_edge": 0.20,
+        "min_ev": 0.12,
+        "allowed_confidences": {"strong"},
     },
-    # Unders are allowed only after the totals policy engine applies its
-    # disagreement, CLV, market-respect, and run-environment gates.
+    # Unders are allowed in the historically profitable 15-20% edge bucket,
+    # then the totals policy engine still applies CLV, market-respect, and
+    # run-environment gates.
     "under": {
         "enabled": True,
-        "min_edge": 0.05,
-        "max_edge": None,
-        "min_ev": 0.05,
-        "allowed_confidences": {"medium", "strong"},
-        "min_confidence_score": 72.0,
+        "min_edge": 0.15,
+        "max_edge": 0.20,
+        "min_ev": 0.12,
+        "allowed_confidences": {"strong"},
     },
 }
 
