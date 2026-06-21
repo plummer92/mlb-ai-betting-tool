@@ -107,7 +107,7 @@ def _build_ranked_rows(
             market_respect=market_respect,
         )
         freshness = odds_freshness_metadata(db, game=game, odds_row=odds)
-        odds_fresh = freshness["status"] in {"fresh", "quiet_market"}
+        odds_fresh = freshness["status"] in {"fresh", "quiet_market", "pregame_locked"}
         ranked.append(
             {
                 "game_id": game.game_id,

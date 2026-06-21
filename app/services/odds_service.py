@@ -501,8 +501,18 @@ def odds_freshness_metadata(
     near_start = _is_near_start(game, now_utc)
     same_as_open = _same_line(odds_row, open_odds)
     missing_market_close = odds_row.snapshot_type == SnapshotType.open and close_odds is None
+    start_at = _aware_utc_dt(game.start_time) if game and game.start_time else None
+    pregame_locked = (
+        odds_row.snapshot_type == SnapshotType.pregame
+        and start_at is not None
+        and fetched_at <= start_at
+        and now_utc >= start_at
+    )
 
-    if not stale_by_age:
+    if pregame_locked:
+        status = "pregame_locked"
+        reason = "pregame snapshot captured before first pitch"
+    elif not stale_by_age:
         status = "fresh"
         reason = "fresh"
     elif not near_start and same_as_open:
@@ -527,6 +537,7 @@ def odds_freshness_metadata(
         "minutes_to_start": _minutes_to_start(game, now_utc),
         "near_start": near_start,
         "same_as_open": same_as_open,
+        "pregame_locked": pregame_locked,
     }
 
 
@@ -538,7 +549,7 @@ def is_odds_snapshot_usable(
     now: datetime | None = None,
 ) -> bool:
     status = odds_freshness_metadata(db, game=game, odds_row=odds_row, now=now)["status"]
-    return status in {"fresh", "quiet_market"}
+    return status in {"fresh", "quiet_market", "pregame_locked"}
 
 
 def get_latest_odds_snapshot(

@@ -304,6 +304,40 @@ def _is_sane_ev(value: float | None) -> bool:
     return value is not None and SANE_EV_BOUNDS[0] <= float(value) <= SANE_EV_BOUNDS[1]
 
 
+def _aware_utc(value: datetime | str | None) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _pregame_snapshot_before_start(game: Game | None, odds: GameOdds | None) -> bool:
+    if game is None or odds is None or odds.snapshot_type != SnapshotType.pregame:
+        return False
+    fetched_at = _aware_utc(odds.fetched_at)
+    start_at = _aware_utc(game.start_time)
+    if fetched_at is None or start_at is None:
+        return False
+    return fetched_at <= start_at <= datetime.now(timezone.utc)
+
+
+def _edge_odds_snapshot_usable(
+    db: Session | None,
+    *,
+    game: Game | None,
+    odds: GameOdds,
+    run_stage: str,
+) -> bool:
+    if run_stage == "pregame" and _pregame_snapshot_before_start(game, odds):
+        return True
+    if db is not None and game is not None:
+        return is_odds_snapshot_usable(db, game=game, odds_row=odds)
+    return is_odds_snapshot_fresh(odds)
+
+
 def validate_active_edge_lineage(
     edge: EdgeResult,
     prediction: Prediction,
@@ -324,11 +358,7 @@ def validate_active_edge_lineage(
         return False, "odds_snapshot_mismatch"
     if odds.snapshot_type != expected_snapshot_type:
         return False, "odds_snapshot_type_mismatch"
-    if db is not None and game is not None:
-        odds_ok = is_odds_snapshot_usable(db, game=game, odds_row=odds)
-    else:
-        odds_ok = is_odds_snapshot_fresh(odds)
-    if not odds_ok:
+    if not _edge_odds_snapshot_usable(db, game=game, odds=odds, run_stage=edge.run_stage):
         return False, "stale_odds_snapshot"
     return True, None
 
@@ -439,7 +469,7 @@ def _pick_odds_snapshot_for_game(
             reason = "explicit_snapshot_game_mismatch" if source == "explicit" else "db_snapshot_game_mismatch"
         elif row.snapshot_type != snapshot_type:
             reason = "explicit_snapshot_type_mismatch" if source == "explicit" else "db_snapshot_type_mismatch"
-        elif not is_odds_snapshot_usable(db, game=game, odds_row=row):
+        elif not _edge_odds_snapshot_usable(db, game=game, odds=row, run_stage=run_stage):
             reason = "stale_explicit_odds_snapshot" if source == "explicit" else "stale_existing_odds_snapshot"
 
         payload = _odds_row_debug_payload(row, source=source)

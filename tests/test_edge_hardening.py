@@ -228,6 +228,46 @@ class EdgeHardeningTests(unittest.TestCase):
         self.assertTrue(is_odds_snapshot_usable(self.db, game=game, odds_row=stale_pregame))
         self.assertEqual(result["status"], "created")
 
+    def test_pregame_edge_remains_trusted_after_first_pitch(self) -> None:
+        today = date.today()
+        game = self._game(117, today)
+        game.status = "In Progress"
+        game.start_time = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        prediction = self._prediction(117, run_stage="pregame", home_win_pct=0.65, away_win_pct=0.35)
+        odds = self._odds(
+            117,
+            snapshot_type=SnapshotType.pregame,
+            fetched_at=datetime.now(timezone.utc) - timedelta(hours=3),
+        )
+        self.db.add(
+            EdgeResult(
+                game_id=game.game_id,
+                prediction_id=prediction.prediction_id,
+                odds_id=odds.id,
+                run_stage="pregame",
+                is_active=True,
+                calculated_at=datetime.now(timezone.utc) - timedelta(hours=3),
+                model_away_win_pct=0.35,
+                model_home_win_pct=0.65,
+                implied_away_pct=0.45,
+                implied_home_pct=0.55,
+                edge_away=-0.10,
+                edge_home=0.10,
+                ev_away=-0.10,
+                ev_home=0.15,
+                recommended_play="home_ml",
+                confidence_tier="strong",
+                edge_pct=0.10,
+                odds_snapshot_type="pregame",
+            )
+        )
+        self.db.commit()
+
+        trusted = get_trustworthy_active_edges(self.db, game_date=today)
+
+        self.assertEqual(len(trusted), 1)
+        self.assertEqual(trusted[0][0].game_id, game.game_id)
+
     def test_fallback_uses_fresh_db_snapshot_when_explicit_snapshot_is_stale(self) -> None:
         self._game(112, date.today())
         self._prediction(112)
