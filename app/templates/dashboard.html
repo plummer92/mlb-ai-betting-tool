@@ -1353,7 +1353,7 @@ function fatigueCounts(reports) {
 function fetchWithTimeout(url, label, ms = 12000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
-  return fetch(url, { signal: controller.signal })
+  return apiFetch(url, { signal: controller.signal })
     .catch(err => {
       if (err && err.name === 'AbortError') {
         throw new Error(`${label} is still calculating; try refresh in a minute.`);
@@ -1398,6 +1398,26 @@ async function loadDashboardLive(ms = 10000) {
   if (dashboardLiveCache) return dashboardLiveCache;
   dashboardLiveCache = await fetchJsonWithTimeout('/api/dashboard/live', 'Live dashboard', ms);
   return dashboardLiveCache;
+}
+
+const API_BASE = (() => {
+  try {
+    const stored = localStorage.getItem('mlbApiBase');
+    if (stored) return stored.replace(/\/$/, '');
+  } catch(e) {}
+  if (window.location.protocol === 'file:') return 'http://34.68.246.153:8000';
+  return '';
+})();
+
+function apiUrl(url) {
+  if (typeof url !== 'string') return url;
+  if (/^https?:\/\//i.test(url)) return url;
+  if (url.startsWith('/api/') || url === '/api') return `${API_BASE}${url}`;
+  return url;
+}
+
+function apiFetch(url, options = {}) {
+  return fetch(apiUrl(url), options);
 }
 
 async function loadDashboardResearch(ms = 10000) {
@@ -1769,7 +1789,7 @@ async function loadTotalsRegime() {
 
 async function loadDecisionDebug() {
   try {
-    const flagsRes = await fetch('/api/debug/flags');
+    const flagsRes = await apiFetch('/api/debug/flags');
     const flags = await flagsRes.json();
     const section = $('decision-debug-section');
     if (!flags.debug) {
@@ -1816,7 +1836,7 @@ async function loadDecisionDebug() {
 
 async function loadOddsDebug() {
   try {
-    const flagsRes = await fetch('/api/debug/flags');
+    const flagsRes = await apiFetch('/api/debug/flags');
     const flags = await flagsRes.json();
     const section = $('odds-debug-section');
     if (!flags.debug) {
@@ -2022,7 +2042,7 @@ async function loadOddsWarehouse() {
 
 async function loadTotalsBiasDebug() {
   try {
-    const flagsRes = await fetch('/api/debug/flags');
+    const flagsRes = await apiFetch('/api/debug/flags');
     const flags = await flagsRes.json();
     const section = $('totals-bias-debug-section');
     if (!flags.debug) {
@@ -2031,7 +2051,7 @@ async function loadTotalsBiasDebug() {
     }
     section.style.display = '';
 
-    const res = await fetch('/api/debug/totals-bias');
+    const res = await apiFetch('/api/debug/totals-bias');
     const data = await res.json();
     const hist = data.projected_total_minus_market_distribution?.histogram || [];
     const maxCount = Math.max(1, ...hist.map(row => row.count || 0));
@@ -2138,7 +2158,7 @@ async function loadTodayRead() {
 
 async function loadCommentary() {
   try {
-    const res = await fetch('/api/commentary/today');
+    const res = await apiFetch('/api/commentary/today');
     const data = await res.json();
     const items = data.items || [];
     const summaries = data.summaries || [];
@@ -2204,8 +2224,8 @@ async function loadCommentary() {
 async function loadAccuracy() {
   try {
     const [accuracyRes, summaryRes] = await Promise.all([
-      fetch('/api/reviews/accuracy'),
-      fetch('/api/reviews/summary'),
+      apiFetch('/api/reviews/accuracy'),
+      apiFetch('/api/reviews/summary'),
     ]);
     const data = await accuracyRes.json();
     const summary = await summaryRes.json();
@@ -2361,7 +2381,7 @@ async function loadTopBets() {
 
 async function loadBestPlaysWeek() {
   try {
-    const res = await fetch('/api/reviews/recent?limit=100');
+    const res = await apiFetch('/api/reviews/recent?limit=100');
     const all = await res.json();
     const end = toYMD(new Date());
     const start = addDays(end, -6);
@@ -2818,7 +2838,7 @@ async function loadSlowEndpoints() {
 
 async function loadDebrief() {
   try {
-    const res = await fetch('/api/reviews/recent?limit=100');
+    const res = await apiFetch('/api/reviews/recent?limit=100');
     const all = await res.json();
     const reviewDateOf = r => r.date || (r.created_at ? String(r.created_at).slice(0,10) : null);
     const latestDate = all.reduce((max, r) => {
@@ -3203,7 +3223,7 @@ function closeModal(e) {
 
 async function loadSignals() {
   try {
-    const res = await fetch('/api/sandbox/signals/today');
+    const res = await apiFetch('/api/sandbox/signals/today');
     const items = await res.json();
     $('signals-badge').textContent = items.length
       ? `${items.length} GAME${items.length !== 1 ? 'S' : ''}`
