@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>MLB AI WAR ROOM</title>
 <style>
-/* ── Reset ── */
+/* Reset */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
@@ -920,8 +920,8 @@ tr:hover td { background: rgba(6,182,212,0.025); }
   </div>
   <div class="header-meta">
     <span class="header-date" id="hdr-date"></span>
-    <div class="refresh-info">↻ NEXT <span class="cdown" id="cdown">60</span>s</div>
-    <button class="refresh-btn" onclick="loadAll()">⟳ REFRESH</button>
+    <div class="refresh-info">NEXT <span class="cdown" id="cdown">60</span>s</div>
+    <button class="refresh-btn" onclick="loadAll()">REFRESH</button>
   </div>
 </header>
 
@@ -1088,7 +1088,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <div class="section-head">
       <div class="section-label">Betting Record</div>
       <div class="section-rule"></div>
-      <div class="section-badge" id="record-badge">—</div>
+      <div class="section-badge" id="record-badge">---</div>
     </div>
     <div id="betting-record"></div>
   </div>
@@ -1111,7 +1111,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <div class="section-head">
       <div class="section-label">Top 10 Bets</div>
       <div class="section-rule"></div>
-      <div class="section-badge" id="top-bets-badge">—</div>
+      <div class="section-badge" id="top-bets-badge">---</div>
     </div>
     <div class="card" style="padding:0;">
       <div class="tbl-wrap" id="top-bets-table">
@@ -1166,7 +1166,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <div class="section-head">
       <div class="section-label" id="debrief-title">Debrief</div>
       <div class="section-rule"></div>
-      <div class="section-badge" id="debrief-badge">—</div>
+      <div class="section-badge" id="debrief-badge">---</div>
     </div>
     <div id="market-performance"></div>
     <div id="confidence-performance"></div>
@@ -1183,7 +1183,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <div class="section-head">
       <div class="section-label">AI Commentary</div>
       <div class="section-rule"></div>
-      <div class="section-badge" id="commentary-badge">—</div>
+      <div class="section-badge" id="commentary-badge">---</div>
     </div>
     <div class="commentary-summary-grid" id="commentary-summary-grid">
       <div class="loading">Loading analyst summary</div>
@@ -1198,7 +1198,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <div class="section-head">
       <div class="section-label">Today's Active Intel</div>
       <div class="section-rule"></div>
-      <div class="section-badge" id="intel-badge">—</div>
+      <div class="section-badge" id="intel-badge">---</div>
     </div>
     <div class="game-grid" id="game-grid">
       <div class="loading">Loading intel</div>
@@ -1210,7 +1210,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <div class="section-head">
       <div class="section-label">v0.5 Signal Intelligence</div>
       <div class="section-rule"></div>
-      <div class="section-badge" id="signals-badge">—</div>
+      <div class="section-badge" id="signals-badge">---</div>
     </div>
     <div id="signals-summary"></div>
     <div class="game-grid" id="signals-grid">
@@ -1223,7 +1223,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <div class="section-head">
       <div class="section-label">Bullpen Intelligence</div>
       <div class="section-rule"></div>
-      <div class="section-badge" id="bullpen-badge">—</div>
+      <div class="section-badge" id="bullpen-badge">---</div>
     </div>
     <div class="game-grid" id="bullpen-grid">
       <div class="loading">Loading bullpen data</div>
@@ -1244,9 +1244,9 @@ tr:hover td { background: rgba(6,182,212,0.025); }
 
 const $  = id => document.getElementById(id);
 const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-const fmt = (n, d=1) => n == null ? '—' : (+n).toFixed(d);
-const pct0_1 = (n, d=1) => n == null ? '—' : (+n * 100).toFixed(d) + '%';
-const pct100 = (n, d=1) => n == null ? '—' : (+n).toFixed(d) + '%';
+const fmt = (n, d=1) => n == null ? '---' : (+n).toFixed(d);
+const pct0_1 = (n, d=1) => n == null ? '---' : (+n * 100).toFixed(d) + '%';
+const pct100 = (n, d=1) => n == null ? '---' : (+n).toFixed(d) + '%';
 
 function todayStr() {
   const d = new Date();
@@ -1261,7 +1261,7 @@ function friendlyDate(yyyymmdd) {
   return new Date(+p[0], +p[1]-1, +p[2]).toLocaleDateString('en-US', {weekday:'short',month:'short',day:'numeric',year:'numeric'});
 }
 function gameTime(iso) {
-  if (!iso) return '—';
+  if (!iso) return '---';
   try {
     const d = new Date(iso);
     if (isNaN(d)) return iso;
@@ -1281,17 +1281,17 @@ function resolveTeam(side, away, home) {
   if (side === 'home_ml') return home || 'Home';
   if (side === 'over')    return 'Over';
   if (side === 'under')   return 'Under';
-  return side || '—';
+  return side || '---';
 }
 
 function movementHtml(dir) {
   if (!dir) return '';
   const map = {
-    toward_model:    ['mv-toward',  '↑ w/ model'],
-    away_from_model: ['mv-away',    '↓ vs model'],
-    sharp_away:      ['mv-sharp',   '⚡ sharp away'],
-    sharp_home:      ['mv-sharp',   '⚡ sharp home'],
-    neutral:         ['mv-neutral', '→ neutral'],
+    toward_model:    ['mv-toward',  'up with model'],
+    away_from_model: ['mv-away',    'down vs model'],
+    sharp_away:      ['mv-sharp',   'sharp away'],
+    sharp_home:      ['mv-sharp',   'sharp home'],
+    neutral:         ['mv-neutral', 'neutral'],
   };
   const [cls, lbl] = map[dir] || ['mv-neutral', dir];
   return `<span class="${cls}">${lbl}</span>`;
@@ -1332,7 +1332,7 @@ function currentStreak(items, valueFn, allowedValues) {
 }
 
 function fmtAmericanOdds(n) {
-  if (n == null) return '—';
+  if (n == null) return '---';
   return n > 0 ? `+${n}` : `${n}`;
 }
 
@@ -1443,7 +1443,7 @@ function snapshotLine(payload, label = 'Snapshot') {
   if (!snap) return '';
   const generated = snap.generated_at ? gameTime(snap.generated_at) : 'unknown';
   const age = ageLabel(snap.generated_at);
-  const runtime = snap.runtime_ms != null ? ` · built in ${snap.runtime_ms}ms` : '';
+  const runtime = snap.runtime_ms != null ? ` - built in ${snap.runtime_ms}ms` : '';
   return `<div class="panel-freshness">${esc(label)}: ${esc(generated)} (${esc(age)})${runtime}</div>`;
 }
 
@@ -1741,7 +1741,7 @@ async function loadTotalsRegime() {
         <div class="read-tile">
           <div class="read-label">Current Mix</div>
           <div class="read-main">${board.under_count || 0}U / ${board.over_count || 0}O</div>
-          <div class="read-sub">${cluster.warning ? esc(cluster.warning) : 'No cluster warning'} · ${(cluster.under_share != null ? (cluster.under_share * 100).toFixed(0) : '0')}% under</div>
+          <div class="read-sub">${cluster.warning ? esc(cluster.warning) : 'No cluster warning'} - ${(cluster.under_share != null ? (cluster.under_share * 100).toFixed(0) : '0')}% under</div>
         </div>
         <div class="read-tile">
           <div class="read-label">Watchlist ROI</div>
@@ -1756,7 +1756,7 @@ async function loadTotalsRegime() {
         <div class="read-tile">
           <div class="read-label">Drawdown</div>
           <div class="read-main">${filtered.drawdown ?? '---'}</div>
-          <div class="read-sub">Volatility ${filtered.volatility ?? '---'} · CLV ${filtered.avg_line_clv ?? '---'}</div>
+          <div class="read-sub">Volatility ${filtered.volatility ?? '---'} - CLV ${filtered.avg_line_clv ?? '---'}</div>
         </div>
       </div>
       <div class="card" style="padding:0;">
@@ -1946,7 +1946,7 @@ async function loadOddsIntegrity() {
               <td style="font-weight:600;white-space:nowrap">${esc(r.matchup || '---')}<div class="muted mono" style="font-size:10px">${gameTime(r.start_time)}</div></td>
               <td>${integrityChip(r.readiness, r.clv_usable)}</td>
               <td class="mono">${r.has_open_snapshot ? 'YES' : 'NO'}<div class="muted">${esc(openAt)}</div></td>
-              <td class="mono">${r.has_pregame_snapshot ? 'TRUSTED' : '---'}<div class="muted">${esc(preAt)}${postAt ? ` · post ${esc(postAt)}` : ''}</div></td>
+              <td class="mono">${r.has_pregame_snapshot ? 'TRUSTED' : '---'}<div class="muted">${esc(preAt)}${postAt ? ` - post ${esc(postAt)}` : ''}</div></td>
               <td class="mono ${movementClass}">${movementLabel}<div class="muted">${esc(moveAt)}</div></td>
               <td>${esc(r.integrity_reason || r.readiness_reason || '---')}</td>
             </tr>`;
@@ -2252,7 +2252,7 @@ async function loadAccuracy() {
     $('market-performance').innerHTML = `
       <div class="summary-bar" style="border-left-color: var(--purple); background: var(--surface3); margin-bottom: 12px;">
         <div style="font-family: monospace; font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; width: 100%; margin-bottom: 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px;">
-          Lifetime Market Performance — Model: ${data.current_model}
+          Lifetime Market Performance - Model: ${data.current_model}
         </div>
         ${mkStat('Moneyline', data.moneyline)}
         ${mkStat('Totals', data.totals)}
@@ -2301,8 +2301,8 @@ async function loadAccuracy() {
       ${renderConfRow('Run Line', data.run_line, 'var(--orange)')}
     `;
 
-    const winRate = summary.win_rate != null ? (summary.win_rate * 100).toFixed(1) + '%' : '—';
-    const roi = summary.roi_flat_110 != null ? (summary.roi_flat_110 * 100).toFixed(1) + '%' : '—';
+    const winRate = summary.win_rate != null ? (summary.win_rate * 100).toFixed(1) + '%' : '---';
+    const roi = summary.roi_flat_110 != null ? (summary.roi_flat_110 * 100).toFixed(1) + '%' : '---';
     $('record-badge').textContent = `${summary.wins || 0}W-${summary.losses || 0}L-${summary.pushes || 0}P`;
     $('betting-record').innerHTML = `
       <div class="summary-bar" style="border-left-color: var(--green); background: var(--surface3);">
@@ -2360,13 +2360,13 @@ async function loadTopBets() {
             <tr onclick="openDeepDive(${r.game_id})" style="cursor:pointer;">
               <td class="mono" style="font-weight:700;color:var(--cyan)">#${r.rank}</td>
               <td style="font-weight:600">${esc(r.matchup)}</td>
-              <td class="mono">${esc((r.play || '—').replace('_', ' ').toUpperCase())}</td>
+              <td class="mono">${esc((r.play || '---').replace('_', ' ').toUpperCase())}</td>
               <td class="mono">${adjustedEdgeHtml(r)}</td>
               <td class="mono ${(r.adjusted_ev ?? r.ev) >= 0 ? 'green' : 'red'}">${fmt(r.adjusted_ev ?? r.ev, 3)}</td>
               <td>${marketTrustMeter(r.market_respect_adjustment)}${marketRespectChip(r.market_respect)}</td>
               <td>${edgeChip(r.adjusted_confidence || r.confidence, r.adjusted_edge_pct ?? r.edge_pct)}</td>
               <td style="max-width:260px;font-size:11px;color:var(--muted);line-height:1.35">${esc(r.market_respect_adjustment?.explanation || '')}</td>
-              <td class="mono">${esc(r.sportsbook || '—')}</td>
+              <td class="mono">${esc(r.sportsbook || '---')}</td>
               <td class="mono">${gameTime(r.start_time)}</td>
             </tr>
           `).join('')}
@@ -2849,9 +2849,9 @@ async function loadDebrief() {
     }, null);
 
     $('debrief-title').textContent = latestDate
-      ? `Debrief — ${friendlyDate(latestDate)}`
+      ? `Debrief - ${friendlyDate(latestDate)}`
       : 'Debrief';
-    $('debrief-badge').textContent = latestDate ? friendlyDate(latestDate) : '—';
+    $('debrief-badge').textContent = latestDate ? friendlyDate(latestDate) : '---';
 
     const rows = latestDate ? all.filter(r => reviewDateOf(r) === latestDate) : [];
 
@@ -2868,8 +2868,8 @@ async function loadDebrief() {
     const graded    = wins + losses + pushes;
     const winRate   = (wins + losses) > 0 ? wins / (wins + losses) : null;
     const corrRate  = rows.length > 0 ? correct / rows.length : null;
-    const wrPct     = winRate  != null ? (winRate*100).toFixed(1)+'%' : '—';
-    const crPct     = corrRate != null ? (corrRate*100).toFixed(1)+'%' : '—';
+    const wrPct     = winRate  != null ? (winRate*100).toFixed(1)+'%' : '---';
+    const crPct     = corrRate != null ? (corrRate*100).toFixed(1)+'%' : '---';
     const wrCls     = colorClass(winRate  != null ? winRate*100  : null, 55, 48);
     const crCls     = colorClass(corrRate != null ? corrRate*100 : null, 55, 50);
     const orderedAll = [...all].sort((a, b) => {
@@ -2947,11 +2947,11 @@ async function loadDebrief() {
       const actualWinner = r.actual_winner || ((summary.match(/Winner:\s([^\.]+)\./) || [])[1]) || null;
       const actual = actualWinner === 'away' ? away
                    : actualWinner === 'home' ? home
-                   : (actualWinner || '—');
+                   : (actualWinner || '---');
       const modelCorrect = Boolean(r.model_correct ?? r.was_model_correct);
-      const ci = modelCorrect ? '<span class="ok">✓</span>' : '<span class="fail">✗</span>';
+      const ci = modelCorrect ? '<span class="ok">YES</span>' : '<span class="fail">NO</span>';
 
-      let proj = '—';
+      let proj = '---';
       if (r.model_total != null)                                    proj = fmt(r.model_total,1);
       else if (r.projected_away_score != null && r.projected_home_score != null)
         proj = fmt(r.projected_away_score + r.projected_home_score, 1);
@@ -2960,20 +2960,20 @@ async function loadDebrief() {
         : ((r.final_away_score != null && r.final_home_score != null)
             ? (r.final_away_score + r.final_home_score)
             : null);
-      const act = (actualTotal != null && actualTotal > 0) ? actualTotal : '—';
-      const totStr = proj === '—' ? '—' : `${proj} → ${act}`;
+      const act = (actualTotal != null && actualTotal > 0) ? actualTotal : '---';
+      const totStr = proj === '---' ? '---' : `${proj} -> ${act}`;
 
-      const epStr   = r.edge_pct != null ? (r.edge_pct*100).toFixed(1)+'%' : '—';
+      const epStr   = r.edge_pct != null ? (r.edge_pct*100).toFixed(1)+'%' : '---';
       const epCls   = r.edge_pct != null && r.edge_pct > 0 ? 'green' : 'muted';
       const noteRaw = summary.slice(0, 120);
       const note    = noteRaw ? `<div class="outcome-note" title="${esc(summary)}">${esc(noteRaw)}</div>` : '';
 
       const scoreDisplay = r.final_score
-        || ((r.final_away_score != null && r.final_home_score != null) ? `${r.final_away_score}-${r.final_home_score}` : '—');
-      const hasRealScore = scoreDisplay !== '—';
+        || ((r.final_away_score != null && r.final_home_score != null) ? `${r.final_away_score}-${r.final_home_score}` : '---');
+      const hasRealScore = scoreDisplay !== '---';
 
       return `<tr>
-        <td style="font-weight:600;white-space:nowrap">${esc(matchup||'—')}</td>
+        <td style="font-weight:600;white-space:nowrap">${esc(matchup||'---')}</td>
         <td class="mono" style="font-size:12px">${esc(winnerPick)}</td>
         <td class="mono" style="font-size:12px">${esc(actual)}</td>
         <td style="text-align:center">${ci}</td>
@@ -2990,7 +2990,7 @@ async function loadDebrief() {
       <table>
         <thead><tr>
           <th>Matchup</th><th>Winner Pick</th><th>Actual Winner</th>
-          <th style="text-align:center">✓/✗</th>
+          <th style="text-align:center">Correct?</th>
           <th>Total Pick</th><th>Proj-Act Total</th><th>Edge %</th>
           <th>Score</th><th>Bet</th><th>Note</th>
         </tr></thead>
@@ -3049,7 +3049,7 @@ async function loadIntel() {
         const hc = g.final_home_score > g.final_away_score ? 'purple' : 'muted';
         scoreHtml = `<div class="gc-score">
           <span class="${ac}">${g.final_away_score}</span>
-          <span class="sep">—</span>
+          <span class="sep">-</span>
           <span class="${hc}">${g.final_home_score}</span>
         </div>`;
       }
@@ -3151,11 +3151,11 @@ function openDeepDive(gameId) {
   const homeImplied = e?.implied_home_pct != null ? pct0_1(e.implied_home_pct) : (e?.home_ml != null ? fmtAmericanOdds(e.home_ml) : 'Odds unavailable');
   const awayXera = p?.away_starter_xera != null ? fmt(p.away_starter_xera, 2) : 'Not available yet';
   const homeXera = p?.home_starter_xera != null ? fmt(p.home_starter_xera, 2) : 'Not available yet';
-  const confidenceLabel = p?.confidence_score != null ? fmt(p.confidence_score, 2) : '—';
-  const bookLabel = e?.sportsbook ? `${e.sportsbook}${e.snapshot_type ? ` · ${e.snapshot_type}` : ''}` : 'No book snapshot linked';
+  const confidenceLabel = p?.confidence_score != null ? fmt(p.confidence_score, 2) : '---';
+  const bookLabel = e?.sportsbook ? `${e.sportsbook}${e.snapshot_type ? ` - ${e.snapshot_type}` : ''}` : 'No book snapshot linked';
 
   const content = `
-    <div class="modal-title">${esc(g.away_team)} @ ${esc(g.home_team)} — DEEP DIVE</div>
+    <div class="modal-title">${esc(g.away_team)} @ ${esc(g.home_team)} - DEEP DIVE</div>
     <div style="font-family:monospace;font-size:11px;color:var(--muted);margin-bottom:18px;text-transform:uppercase;letter-spacing:1px;">
       ${esc(bookLabel)}
     </div>
@@ -3170,15 +3170,15 @@ function openDeepDive(gameId) {
       <div class="dive-section">
         <div class="dive-label">Expected Value (EV)</div>
         <div class="dive-val">
-          <span class="${e?.ev_away > 0 ? 'green' : 'red'}">ML AWAY: ${e ? fmt(e.ev_away, 3) : '—'}</span><br>
-          <span class="${e?.ev_home > 0 ? 'green' : 'red'}">ML HOME: ${e ? fmt(e.ev_home, 3) : '—'}</span>
+          <span class="${e?.ev_away > 0 ? 'green' : 'red'}">ML AWAY: ${e ? fmt(e.ev_away, 3) : '---'}</span><br>
+          <span class="${e?.ev_home > 0 ? 'green' : 'red'}">ML HOME: ${e ? fmt(e.ev_home, 3) : '---'}</span>
         </div>
       </div>
       <div class="dive-section">
         <div class="dive-label">Totals EV</div>
         <div class="dive-val">
-          <span class="${e?.ev_over > 0 ? 'green' : 'red'}">OVER: ${e ? fmt(e.ev_over, 3) : '—'}</span><br>
-          <span class="${e?.ev_under > 0 ? 'green' : 'red'}">UNDER: ${e ? fmt(e.ev_under, 3) : '—'}</span>
+          <span class="${e?.ev_over > 0 ? 'green' : 'red'}">OVER: ${e ? fmt(e.ev_over, 3) : '---'}</span><br>
+          <span class="${e?.ev_under > 0 ? 'green' : 'red'}">UNDER: ${e ? fmt(e.ev_under, 3) : '---'}</span>
         </div>
       </div>
       <div class="dive-section">
@@ -3203,7 +3203,7 @@ function openDeepDive(gameId) {
       <div class="dive-section">
         <div class="dive-label">Totals Market</div>
         <div class="dive-val">
-          <span class="yellow">TOTAL: ${e?.book_total != null ? fmt(e.book_total, 1) : '—'}</span><br>
+          <span class="yellow">TOTAL: ${e?.book_total != null ? fmt(e.book_total, 1) : '---'}</span><br>
           <span class="muted">O ${fmtAmericanOdds(e?.over_odds)} / U ${fmtAmericanOdds(e?.under_odds)}</span>
         </div>
       </div>
@@ -3285,8 +3285,8 @@ async function loadSignals() {
         ? `<div style="display:flex;flex-wrap:wrap;gap:5px;margin:8px 0 4px;">${badges.join('')}</div>`
         : `<div style="color:var(--muted);font-size:11px;font-family:monospace;margin:8px 0 4px;">No active signals</div>`;
 
-      const v4proj = p.full_game_projected_total != null ? fmt(p.full_game_projected_total, 1) : '—';
-      const v3proj = p.v3_projected_total != null ? fmt(p.v3_projected_total, 1) : '—';
+      const v4proj = p.full_game_projected_total != null ? fmt(p.full_game_projected_total, 1) : '---';
+      const v3proj = p.v3_projected_total != null ? fmt(p.v3_projected_total, 1) : '---';
 
       return `<div class="game-card">
         <div class="gc-header">
@@ -3295,7 +3295,7 @@ async function loadSignals() {
             <span class="at">@</span>
             <span class="hw">${esc(p.home_team || '?')}</span>
           </div>
-          <div class="gc-status-time">${p.start_time ? gameTime(p.start_time) : '—'}</div>
+          <div class="gc-status-time">${p.start_time ? gameTime(p.start_time) : '---'}</div>
         </div>
         ${badgesHtml}
         ${stackHtml}
@@ -3340,11 +3340,11 @@ async function loadBullpen() {
 
     const cards = reports.map(r => {
       const sig = fatigueConfig[r.fatigue_signal] || fatigueConfig.rested;
-      const strength = r.bullpen_strength != null ? (r.bullpen_strength * 100).toFixed(0) : '—';
+      const strength = r.bullpen_strength != null ? (r.bullpen_strength * 100).toFixed(0) : '---';
 
       const fatiguedHtml = (r.fatigued_arms || []).slice(0, 3).map(a =>
         `<div style="font-size:11px;font-family:monospace;color:var(--red);">
-          ${esc(a.name)} <span class="muted">${a.days_rest === 0 ? 'B2B' : a.days_rest + 'd rest'} · ${a.pitches_last_3}p</span>
+          ${esc(a.name)} <span class="muted">${a.days_rest === 0 ? 'B2B' : a.days_rest + 'd rest'} - ${a.pitches_last_3}p</span>
         </div>`
       ).join('');
 
@@ -3354,7 +3354,7 @@ async function loadBullpen() {
         </div>`
       ).join('');
 
-      const b2bPct = r.b2b_usage_rate != null ? (r.b2b_usage_rate * 100).toFixed(0) + '%' : '—';
+      const b2bPct = r.b2b_usage_rate != null ? (r.b2b_usage_rate * 100).toFixed(0) + '%' : '---';
 
       return `<div class="game-card">
         <div class="gc-header">
@@ -3386,7 +3386,7 @@ async function loadBullpen() {
           ${freshHtml}
         </div>` : ''}
         <div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border);font-size:10px;font-family:monospace;color:var(--muted);">
-          MGR: ${esc(r.manager_name || '—')}
+          MGR: ${esc(r.manager_name || '---')}
         </div>
       </div>`;
     }).join('');
