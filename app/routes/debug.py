@@ -1180,7 +1180,7 @@ def build_totals_policy_report(db: Session, *, min_sample: int = 5) -> dict:
 def totals_policy(min_sample: int = Query(5, ge=1, le=100), db: Session = Depends(get_db)):
     today_date = datetime.now(ET).date()
     if min_sample == 5:
-        snapshot = get_report_snapshot(db, "totals_policy", report_date=today_date)
+        snapshot = get_report_snapshot(db, "totals_policy", report_date=today_date, max_age_seconds=30 * 60)
         if snapshot is not None:
             return snapshot
     today = today_date.isoformat()

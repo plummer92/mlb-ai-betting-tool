@@ -1233,7 +1233,7 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertIn("/api/debug/market-readiness", paths)
         self.assertIn("/api/debug/odds-warehouse", paths)
 
-    def test_dashboard_research_expires_stale_odds_warehouse_only(self) -> None:
+    def test_dashboard_research_expires_stale_live_reports(self) -> None:
         report_date = date.today()
         old_time = datetime.now(timezone.utc) - timedelta(hours=5)
         self.db.add_all([
@@ -1253,14 +1253,25 @@ class RouteAndAdminTests(unittest.TestCase):
                 runtime_ms=10,
                 payload_json='{"status":"ok","summary":{"total_rows":1}}',
             ),
+            ReportSnapshot(
+                report_name="bullpen_today",
+                report_date=report_date,
+                generated_at=old_time,
+                status="ok",
+                runtime_ms=10,
+                payload_json='{"status":"ok","reports":[]}',
+            ),
         ])
         self.db.commit()
 
         result = dashboard_research(db=self.db)
 
         self.assertIsNone(result["reports"]["odds_warehouse"])
-        self.assertIsNotNone(result["reports"]["totals_policy"])
+        self.assertIsNone(result["reports"]["totals_policy"])
+        self.assertIsNone(result["reports"]["bullpen_today"])
         self.assertIn("odds_warehouse", result["missing"])
+        self.assertIn("totals_policy", result["missing"])
+        self.assertIn("bullpen_today", result["missing"])
 
     def test_totals_bias_report_flags_supported_under_edge(self) -> None:
         self._totals_review_game(104, model_total=7.0, book_total=9.0, final_total=6, play="under", bet_result="win", pregame_total=8.5)

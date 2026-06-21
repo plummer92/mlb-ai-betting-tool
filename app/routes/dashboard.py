@@ -19,6 +19,7 @@ from app.services.report_snapshot_service import get_report_snapshot
 router = APIRouter(tags=["dashboard"])
 ET = ZoneInfo("America/New_York")
 LIVE_RESEARCH_MAX_AGE_SECONDS = 30 * 60
+LIVE_RESEARCH_REPORTS = {"odds_warehouse", "totals_policy", "bullpen_today"}
 
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
 
@@ -74,7 +75,7 @@ def dashboard_research(db: Session = Depends(get_db)):
     today = date.today()
 
     def snapshot_for(name: str) -> dict | None:
-        if name == "odds_warehouse":
+        if name in LIVE_RESEARCH_REPORTS:
             return get_report_snapshot(
                 db,
                 name,

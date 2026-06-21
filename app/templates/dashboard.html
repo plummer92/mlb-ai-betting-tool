@@ -3275,17 +3275,17 @@ async function loadSignals() {
     const cards = items.map(p => {
       const badges = [];
       if (p.wind_factor != null) {
-        if (p.wind_factor < -0.3)      badges.push(`<span class="chip sig-red">🌬️ Wind IN</span>`);
-        else if (p.wind_factor > 0.3)  badges.push(`<span class="chip sig-green">💨 Wind OUT</span>`);
+        if (p.wind_factor < -0.3)      badges.push(`<span class="chip sig-red">Wind IN</span>`);
+        else if (p.wind_factor > 0.3)  badges.push(`<span class="chip sig-green">Wind OUT</span>`);
       }
       if (p.travel_stress_away != null && p.travel_stress_away > 0.25) {
-        badges.push(`<span class="chip sig-orange">✈️ Travel ${Math.round(p.travel_stress_away * 100)}%</span>`);
+        badges.push(`<span class="chip sig-orange">Travel ${Math.round(p.travel_stress_away * 100)}%</span>`);
       }
-      if (p.is_series_opener)  badges.push(`<span class="chip sig-blue">🏟️ Game 1</span>`);
-      if (p.is_series_finale)  badges.push(`<span class="chip sig-yellow">🔚 Finale</span>`);
+      if (p.is_series_opener)  badges.push(`<span class="chip sig-blue">Game 1</span>`);
+      if (p.is_series_finale)  badges.push(`<span class="chip sig-yellow">Finale</span>`);
       if (p.public_bias_edge != null) {
-        if (p.public_bias_edge >= 0.06)       badges.push(`<span class="chip sig-green">🐶 Weekend Dog</span>`);
-        else if (p.public_bias_edge <= -0.04) badges.push(`<span class="chip sig-red">📉 Weekday Fade</span>`);
+        if (p.public_bias_edge >= 0.06)       badges.push(`<span class="chip sig-green">Weekend Dog</span>`);
+        else if (p.public_bias_edge <= -0.04) badges.push(`<span class="chip sig-red">Weekday Fade</span>`);
       }
 
       const stackHtml = badges.length >= 3
@@ -3343,10 +3343,10 @@ async function loadBullpen() {
     }
 
     const fatigueConfig = {
-      exhausted: { cls: 'sig-red',    emoji: '🔴', label: 'EXHAUSTED' },
-      tired:     { cls: 'sig-orange', emoji: '🟡', label: 'TIRED' },
-      rested:    { cls: 'sig-blue',   emoji: '🟢', label: 'RESTED' },
-      fresh:     { cls: 'sig-green',  emoji: '🟢', label: 'FRESH' },
+      exhausted: { cls: 'sig-red',    label: 'EXHAUSTED' },
+      tired:     { cls: 'sig-orange', label: 'TIRED' },
+      rested:    { cls: 'sig-blue',   label: 'RESTED' },
+      fresh:     { cls: 'sig-green',  label: 'FRESH' },
     };
 
     const cards = reports.map(r => {
@@ -3370,7 +3370,7 @@ async function loadBullpen() {
       return `<div class="game-card">
         <div class="gc-header">
           <div style="font-size:14px;font-weight:700;">${esc(r.team_name)}</div>
-          <span class="chip ${sig.cls}">${sig.emoji} ${sig.label}</span>
+          <span class="chip ${sig.cls}">${sig.label}</span>
         </div>
         <div style="display:flex;gap:16px;margin:8px 0;font-family:monospace;font-size:12px;">
           <div>
