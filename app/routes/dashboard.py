@@ -18,6 +18,7 @@ from app.services.report_snapshot_service import get_report_snapshot
 
 router = APIRouter(tags=["dashboard"])
 ET = ZoneInfo("America/New_York")
+LIVE_RESEARCH_MAX_AGE_SECONDS = 30 * 60
 
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
 
@@ -71,8 +72,19 @@ def dashboard_live(db: Session = Depends(get_db)):
 @router.get("/api/dashboard/research")
 def dashboard_research(db: Session = Depends(get_db)):
     today = date.today()
+
+    def snapshot_for(name: str) -> dict | None:
+        if name == "odds_warehouse":
+            return get_report_snapshot(
+                db,
+                name,
+                report_date=today,
+                max_age_seconds=LIVE_RESEARCH_MAX_AGE_SECONDS,
+            )
+        return get_report_snapshot(db, name, report_date=today)
+
     reports = {
-        name: get_report_snapshot(db, name, report_date=today)
+        name: snapshot_for(name)
         for name in (
             "odds_warehouse",
             "totals_policy",

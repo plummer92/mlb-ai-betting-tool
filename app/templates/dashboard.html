@@ -1925,7 +1925,7 @@ async function loadOddsIntegrity() {
         <div class="read-tile">
           <div class="read-label">Missing / Stale</div>
           <div class="read-main ${(integrity.missing_pregame || integrity.movement_stale || integrity.movement_missing) ? 'yellow' : 'green'}">${(integrity.missing_pregame || 0) + (integrity.movement_stale || 0) + (integrity.movement_missing || 0)}</div>
-          <div class="read-sub">${integrity.missing_pregame || 0} missing Â· ${integrity.movement_stale || 0} stale Â· ${integrity.movement_missing || 0} no movement</div>
+          <div class="read-sub">${integrity.missing_pregame || 0} missing - ${integrity.movement_stale || 0} stale - ${integrity.movement_missing || 0} no movement</div>
         </div>
       </div>`;
 
@@ -1980,18 +1980,18 @@ async function loadOddsWarehouse() {
         <div class="read-tile">
           <div class="read-label">Odds API Used</div>
           <div class="read-main ${quota.month_usage_pct >= 0.8 ? 'red' : quota.month_usage_pct >= 0.55 ? 'yellow' : 'green'}">${quota.month_used ?? 0}/${quota.monthly_quota ?? 500}</div>
-          <div class="read-sub">${pct}% this month Â· ${quota.today_used ?? 0} today</div>
+          <div class="read-sub">${pct}% this month - ${quota.today_used ?? 0} today</div>
         </div>
         <div class="read-tile">
           <div class="read-label">Remaining</div>
           <div class="read-main">${quota.month_remaining ?? '---'}</div>
-          <div class="read-sub">Projected ${quota.projected_month_used ?? '---'} / ${quota.monthly_quota ?? 500} · ${esc(quota.quota_alert || 'OK')}</div>
-          <div class="read-sub">Open ${(quota.by_snapshot_type || {}).open || 0} Â· Pregame ${(quota.by_snapshot_type || {}).pregame || 0}</div>
+          <div class="read-sub">Projected ${quota.projected_month_used ?? '---'} / ${quota.monthly_quota ?? 500} - ${esc(quota.quota_alert || 'OK')}</div>
+          <div class="read-sub">Open ${(quota.by_snapshot_type || {}).open || 0} - Pregame ${(quota.by_snapshot_type || {}).pregame || 0}</div>
         </div>
         <div class="read-tile">
           <div class="read-label">Snapshots</div>
           <div class="read-main">${summary.pregame_snapshots || 0}/${summary.games || 0}</div>
-          <div class="read-sub">${summary.open_snapshots || 0} open Â· ${summary.clv_ready || 0} CLV ready</div>
+          <div class="read-sub">${summary.open_snapshots || 0} open - ${summary.clv_ready || 0} CLV ready</div>
         </div>
         <div class="read-tile">
           <div class="read-label">Errors</div>
@@ -2941,9 +2941,9 @@ async function loadDebrief() {
       const modelCalledRaw = r.model_called || r.predicted_winner || ((summary.match(/Model called:\s([^(\.]+)(?:\s|\.)/) || [])[1] || '').trim();
       const winnerPick = modelCalledRaw === 'away' ? away
                        : modelCalledRaw === 'home' ? home
-                       : (['over', 'under'].includes(String(modelCalledRaw).toLowerCase()) ? 'â€”' : (modelCalledRaw || 'â€”'));
+                       : (['over', 'under'].includes(String(modelCalledRaw).toLowerCase()) ? '---' : (modelCalledRaw || '---'));
       const pickRaw = String(r.predicted_side || r.recommended_play || '').toLowerCase();
-      const totalPick = ['over', 'under'].includes(pickRaw) ? resolveTeam(pickRaw, away, home) : 'â€”';
+      const totalPick = ['over', 'under'].includes(pickRaw) ? resolveTeam(pickRaw, away, home) : '---';
       const actualWinner = r.actual_winner || ((summary.match(/Winner:\s([^\.]+)\./) || [])[1]) || null;
       const actual = actualWinner === 'away' ? away
                    : actualWinner === 'home' ? home
