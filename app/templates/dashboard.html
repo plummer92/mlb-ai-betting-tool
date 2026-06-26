@@ -216,7 +216,7 @@ body::after {
 
 .freshness-strip {
   display: grid;
-  grid-template-columns: repeat(4, minmax(160px, 1fr));
+  grid-template-columns: repeat(7, minmax(120px, 1fr));
   gap: 8px;
   margin-bottom: 18px;
 }
@@ -227,6 +227,9 @@ body::after {
   padding: 9px 12px;
   font-family: monospace;
 }
+.freshness-pill.good { border-color: rgba(16,185,129,0.35); background: rgba(16,185,129,0.05); }
+.freshness-pill.warn { border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.05); }
+.freshness-pill.bad { border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.05); }
 .freshness-name {
   color: var(--muted);
   font-size: 9px;
@@ -239,12 +242,18 @@ body::after {
   font-weight: 700;
   margin-top: 3px;
 }
+.freshness-meta {
+  color: var(--muted);
+  font-size: 9px;
+  margin-top: 2px;
+}
 .panel-freshness {
   color: var(--muted);
   font-family: monospace;
   font-size: 10px;
   margin: -5px 0 10px;
 }
+@media (max-width: 1200px) { .freshness-strip { grid-template-columns: repeat(3, 1fr); } }
 @media (max-width: 900px) { .freshness-strip { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 560px) { .freshness-strip { grid-template-columns: 1fr; } }
 
@@ -946,7 +955,10 @@ tr:hover td { background: rgba(6,182,212,0.025); }
   <div class="freshness-strip" id="dashboard-freshness">
     <div class="freshness-pill"><div class="freshness-name">Live Board</div><div class="freshness-age">Loading</div></div>
     <div class="freshness-pill"><div class="freshness-name">Decision Queue</div><div class="freshness-age">Loading</div></div>
-    <div class="freshness-pill"><div class="freshness-name">Research Reports</div><div class="freshness-age">Loading</div></div>
+    <div class="freshness-pill"><div class="freshness-name">Ranked Bets</div><div class="freshness-age">Loading</div></div>
+    <div class="freshness-pill"><div class="freshness-name">Odds Warehouse</div><div class="freshness-age">Loading</div></div>
+    <div class="freshness-pill"><div class="freshness-name">Totals Policy</div><div class="freshness-age">Loading</div></div>
+    <div class="freshness-pill"><div class="freshness-name">Bullpen</div><div class="freshness-age">Loading</div></div>
     <div class="freshness-pill"><div class="freshness-name">Slow Endpoint Watch</div><div class="freshness-age">Loading</div></div>
   </div>
 
@@ -1449,6 +1461,35 @@ function ageLabel(iso) {
   return `${hours}h old`;
 }
 
+function snapshotMeta(snapshot) {
+  if (!snapshot?.generated_at) return 'not available';
+  const runtime = snapshot.runtime_ms != null ? `built ${snapshot.runtime_ms}ms` : 'built';
+  return `${runtime} at ${gameTime(snapshot.generated_at)}`;
+}
+
+function freshnessClass(iso, warnMinutes = 30, badMinutes = 60) {
+  if (!iso) return 'bad';
+  const d = new Date(iso);
+  if (isNaN(d)) return 'bad';
+  const minutes = Math.max(0, (Date.now() - d.getTime()) / 60000);
+  if (minutes > badMinutes) return 'bad';
+  if (minutes > warnMinutes) return 'warn';
+  return 'good';
+}
+
+function freshnessPill(label, snapshot, options = {}) {
+  const warn = options.warnMinutes ?? 30;
+  const bad = options.badMinutes ?? 60;
+  const generatedAt = snapshot?.generated_at;
+  const cls = options.forceClass || freshnessClass(generatedAt, warn, bad);
+  return `
+    <div class="freshness-pill ${cls}">
+      <div class="freshness-name">${esc(label)}</div>
+      <div class="freshness-age">${esc(ageLabel(generatedAt))}</div>
+      <div class="freshness-meta">${esc(snapshotMeta(snapshot))}</div>
+    </div>`;
+}
+
 function snapshotLine(payload, label = 'Snapshot') {
   const snap = payload?.snapshot;
   if (!snap) return '';
@@ -1459,19 +1500,29 @@ function snapshotLine(payload, label = 'Snapshot') {
 }
 
 function renderFreshness(live, research, slowCount = null) {
-  const liveTime = new Date().toISOString();
   const decisionSnap = live?.snapshots?.decision_queue;
+  const rankedSnap = live?.snapshots?.ranked_rows;
   const reports = research?.reports || {};
-  const reportTimes = Object.values(reports)
-    .map(r => r?.snapshot?.generated_at)
-    .filter(Boolean)
-    .sort();
-  const researchGenerated = reportTimes.length ? reportTimes[0] : null;
+  const oddsSnap = reports.odds_warehouse?.snapshot;
+  const totalsSnap = reports.totals_policy?.snapshot;
+  const bullpenSnap = reports.bullpen_today?.snapshot;
+  const liveSnap = {
+    generated_at: new Date().toISOString(),
+    runtime_ms: live?.market_readiness?.runtime_ms,
+  };
+  const slowCls = slowCount == null ? '' : slowCount > 0 ? 'warn' : 'good';
   $('dashboard-freshness').innerHTML = `
-    <div class="freshness-pill"><div class="freshness-name">Live Board</div><div class="freshness-age">${esc(gameTime(liveTime))}</div></div>
-    <div class="freshness-pill"><div class="freshness-name">Decision Queue</div><div class="freshness-age">${esc(ageLabel(decisionSnap?.generated_at))}</div></div>
-    <div class="freshness-pill"><div class="freshness-name">Research Reports</div><div class="freshness-age">${esc(ageLabel(researchGenerated))}</div></div>
-    <div class="freshness-pill"><div class="freshness-name">Slow Endpoint Watch</div><div class="freshness-age">${slowCount == null ? 'checking' : `${slowCount} recent`}</div></div>
+    ${freshnessPill('Live Board', liveSnap, { warnMinutes: 5, badMinutes: 15 })}
+    ${freshnessPill('Decision Queue', decisionSnap, { warnMinutes: 30, badMinutes: 60 })}
+    ${freshnessPill('Ranked Bets', rankedSnap, { warnMinutes: 30, badMinutes: 60 })}
+    ${freshnessPill('Odds Warehouse', oddsSnap, { warnMinutes: 30, badMinutes: 60 })}
+    ${freshnessPill('Totals Policy', totalsSnap, { warnMinutes: 30, badMinutes: 60 })}
+    ${freshnessPill('Bullpen', bullpenSnap, { warnMinutes: 30, badMinutes: 60 })}
+    <div class="freshness-pill ${slowCls}">
+      <div class="freshness-name">Slow Endpoint Watch</div>
+      <div class="freshness-age">${slowCount == null ? 'checking' : `${slowCount} recent`}</div>
+      <div class="freshness-meta">${slowCount ? 'review timing logs' : 'no slow calls recorded'}</div>
+    </div>
   `;
 }
 
@@ -1604,8 +1655,8 @@ async function loadHealthScore() {
           <div class="s-stat-lbl">Decision Age</div>
         </div>
         <div class="s-stat">
-          <div class="s-stat-val">${summary.oldest_research_snapshot_age_seconds != null ? Math.round(summary.oldest_research_snapshot_age_seconds / 60) + 'm' : '---'}</div>
-          <div class="s-stat-lbl">Oldest Report</div>
+          <div class="s-stat-val">${summary.live_research_snapshot_age_seconds != null ? Math.round(summary.live_research_snapshot_age_seconds / 60) + 'm' : '---'}</div>
+          <div class="s-stat-lbl">Live Research Age</div>
         </div>
         <div class="s-stat">
           <div class="s-stat-val ${summary.slow_endpoint_count ? 'yellow' : 'green'}">${summary.slow_endpoint_count ?? 0}</div>
@@ -1678,6 +1729,64 @@ async function loadDecisionQueue() {
   }
 }
 
+function policyBlockerReason(row) {
+  const text = [
+    row.tradable_reason,
+    row.decision_reason,
+    row.policy_reason,
+    ...(row.policy_reasons || []),
+  ].filter(Boolean).join(' ').toLowerCase();
+
+  if (!row.policy_qualified && row.decision_status === 'WAIT FOR ODDS') return 'waiting for trusted odds';
+  if (text.includes('positive clv') || text.includes('no positive clv')) return 'no positive CLV';
+  if (text.includes('market respect') || text.includes('market agreement') || text.includes('market confirmation')) return 'needs market confirmation';
+  if (text.includes('cluster') || text.includes('broad under bias')) return 'totals cluster / under bias';
+  if (text.includes('wind out') || text.includes('explosive')) return 'run environment risk';
+  if (text.includes('near_market') || text.includes('too close')) return 'model too close to market';
+  if (text.includes('stale') || text.includes('freshness') || text.includes('missing')) return 'odds missing or stale';
+  if (row.decision_status === 'BLOCKED') return 'blocked by policy';
+  if (row.decision_status === 'WATCH') return 'research watch only';
+  return row.decision_status || row.policy_status || 'outside policy';
+}
+
+function blockerRowsHtml(rows) {
+  const counts = rows.reduce((acc, row) => {
+    const reason = policyBlockerReason(row);
+    acc[reason] = (acc[reason] || 0) + 1;
+    return acc;
+  }, {});
+  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  if (!entries.length) return '<div class="empty compact">No blocker reasons yet because the decision queue is empty.</div>';
+  return `
+    <table style="margin-top:12px;">
+      <thead><tr><th>Top Blocker</th><th>Rows</th><th>What It Means</th></tr></thead>
+      <tbody>
+        ${entries.map(([reason, count]) => `
+          <tr>
+            <td style="font-weight:700">${esc(reason)}</td>
+            <td class="mono">${count}</td>
+            <td style="color:var(--muted);font-size:11px;">${esc(blockerExplanation(reason))}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>`;
+}
+
+function blockerExplanation(reason) {
+  const map = {
+    'waiting for trusted odds': 'Pregame or open odds are not trusted enough yet, so the play cannot be scored as actionable.',
+    'no positive CLV': 'The market has not moved in our favor compared with the stored open or pregame number.',
+    'needs market confirmation': 'The model likes it, but the market-respect layer has not confirmed the edge.',
+    'totals cluster / under bias': 'Too many unders or similar totals signals are stacking, so the policy is guarding against model bias.',
+    'run environment risk': 'Weather or scoring environment makes an under/total more fragile.',
+    'model too close to market': 'The projected number is not far enough from the book to justify a bet.',
+    'odds missing or stale': 'The odds warehouse cannot prove this number is current and point-in-time safe.',
+    'blocked by policy': 'The tightened forward policy rejected the row.',
+    'research watch only': 'Worth monitoring, but not a bet recommendation.',
+  };
+  return map[reason] || 'This row does not satisfy the tightened forward-betting policy.';
+}
+
 async function loadQualifiedPolicyToday() {
   try {
     const live = await loadDashboardLive();
@@ -1686,13 +1795,15 @@ async function loadQualifiedPolicyToday() {
     const fire = qualified.filter(r => r.decision_status === 'FIRE').length;
     const blocked = rows.filter(r => !r.policy_qualified);
     const blockerCounts = blocked.reduce((acc, row) => {
-      const reason = row.tradable_reason || row.policy_status || row.decision_status || 'unknown';
+      const reason = policyBlockerReason(row);
       acc[reason] = (acc[reason] || 0) + 1;
       return acc;
     }, {});
     const topBlocker = Object.entries(blockerCounts).sort((a, b) => b[1] - a[1])[0];
+    const decisionSnap = live.snapshots?.decision_queue;
     $('qualified-policy-badge').textContent = qualified.length ? `${qualified.length} QUALIFIED` : '0 QUALIFIED';
     $('qualified-policy-summary').innerHTML = `
+      ${snapshotLine({snapshot: decisionSnap}, 'Policy input')}
       <div class="summary-bar" style="border-left-color: ${qualified.length ? 'var(--green)' : 'var(--yellow)'}; background: var(--surface3);">
         <div class="s-stat"><div class="s-stat-val">${rows.length}</div><div class="s-stat-lbl">Queue Rows</div></div>
         <div class="s-stat"><div class="s-stat-val ${qualified.length ? 'green' : 'muted'}">${qualified.length}</div><div class="s-stat-lbl">Policy Qualified</div></div>
@@ -1700,7 +1811,8 @@ async function loadQualifiedPolicyToday() {
         <div class="s-stat"><div class="s-stat-val">${rows.filter(r => r.decision_status === 'WATCH').length}</div><div class="s-stat-lbl">Research Watch</div></div>
         <div class="s-stat"><div class="s-stat-val">${rows.filter(r => r.decision_status === 'BLOCKED').length}</div><div class="s-stat-lbl">Blocked</div></div>
         <div class="s-stat"><div class="s-stat-val">${topBlocker ? topBlocker[1] : 0}</div><div class="s-stat-lbl">${topBlocker ? esc(topBlocker[0]).slice(0, 24) : 'No Blocker'}</div></div>
-      </div>`;
+      </div>
+      ${qualified.length ? '' : blockerRowsHtml(blocked)}`;
 
     const displayRows = qualified.length ? qualified : rows.slice(0, 10);
     $('qualified-policy-table').innerHTML = `
@@ -1720,7 +1832,7 @@ async function loadQualifiedPolicyToday() {
           `).join('') || '<tr><td colspan="7"><div class="empty compact">No decision rows are available yet.</div></td></tr>'}
         </tbody>
       </table>
-      ${qualified.length ? '' : '<div class="empty compact">No plays currently pass the tightened profitable policy. Showing the top queue rows so the blockers are visible.</div>'}`;
+      ${qualified.length ? '' : '<div class="empty compact">No plays currently pass the tightened profitable policy. Showing the top queue rows below, with blocker groups above.</div>'}`;
   } catch(e) {
     $('qualified-policy-badge').textContent = 'ERROR';
     $('qualified-policy-summary').innerHTML = '';
