@@ -1577,6 +1577,16 @@ class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):
         edge_mock.assert_not_called()
         alert_mock.assert_not_called()
 
+    def test_live_dashboard_report_refresh_job_refreshes_live_reports(self) -> None:
+        with patch("app.scheduler.SessionLocal", return_value=self.db), \
+             patch("app.scheduler.refresh_live_dashboard_report_snapshots", return_value={"status": "ok"}) as refresh_mock:
+            from app.scheduler import refresh_live_dashboard_reports_job
+
+            refresh_live_dashboard_reports_job()
+
+        refresh_mock.assert_called_once()
+        self.assertEqual(refresh_mock.call_args.kwargs["report_date"], date.today())
+
     def _backtest_result(self, accuracy: float) -> BacktestResult:
         result = BacktestResult(
             seasons="2022,2023,2024",

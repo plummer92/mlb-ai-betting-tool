@@ -32,6 +32,7 @@ from app.services.report_snapshot_service import (
     refresh_dashboard_report_snapshots,
     refresh_decision_snapshots,
     refresh_decision_snapshots_for_date,
+    refresh_live_dashboard_report_snapshots,
 )
 from app.services.bullpen_calc import collect_reliever_workload
 from app.services.manager_service import track_manager_decision
@@ -545,5 +546,18 @@ def refresh_dashboard_reports_job():
         print(f"[scheduler] Dashboard decision snapshots: {decision_result}")
     except (SQLAlchemyError, RuntimeError, ValueError):
         logger.exception("[scheduler] Dashboard report snapshot error")
+    finally:
+        db.close()
+
+
+@scheduler.scheduled_job(CronTrigger(hour="11-23", minute="*/30", timezone="America/New_York"))
+def refresh_live_dashboard_reports_job():
+    db = SessionLocal()
+    try:
+        today = datetime.now(ET).date()
+        result = refresh_live_dashboard_report_snapshots(db, report_date=today)
+        print(f"[scheduler] Live dashboard report snapshots: {result}")
+    except (SQLAlchemyError, RuntimeError, ValueError):
+        logger.exception("[scheduler] Live dashboard report snapshot error")
     finally:
         db.close()

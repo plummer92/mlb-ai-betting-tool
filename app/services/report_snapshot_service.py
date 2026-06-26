@@ -128,14 +128,13 @@ def build_performance_summary(db: Session) -> dict:
     }
 
 
-def refresh_dashboard_report_snapshots(db: Session, *, report_date: date | None = None) -> dict:
+def _dashboard_report_builders(db: Session, target_date: date) -> dict[str, Callable[[], dict]]:
     from app.routes.debug import build_odds_warehouse_report, build_totals_policy_report
     from app.routes.bullpen import _build_bullpen_today
     from app.services.market_audit_service import get_clv_report, get_movement_backtest_report
     from app.services.profitability_report_service import get_profitability_report
 
-    target_date = report_date or date.today()
-    builders: dict[str, Callable[[], dict]] = {
+    return {
         "odds_warehouse": lambda: build_odds_warehouse_report(db),
         "totals_policy": lambda: build_totals_policy_report(db, min_sample=5),
         "paper_clv": lambda: get_clv_report(db, limit=25),
@@ -145,12 +144,19 @@ def refresh_dashboard_report_snapshots(db: Session, *, report_date: date | None 
         "performance_summary": lambda: build_performance_summary(db),
     }
 
+
+def _refresh_dashboard_builders(
+    db: Session,
+    builders: dict[str, Callable[[], dict]],
+    *,
+    report_date: date,
+) -> dict:
     results = []
     failures = []
     for name, builder in builders.items():
         try:
             results.append(
-                build_and_store_report_snapshot(db, name, builder, report_date=target_date)
+                build_and_store_report_snapshot(db, name, builder, report_date=report_date)
             )
         except Exception as exc:
             db.rollback()
@@ -158,12 +164,31 @@ def refresh_dashboard_report_snapshots(db: Session, *, report_date: date | None 
             failures.append({"report_name": name, "error": str(exc)})
     return {
         "status": "ok" if not failures else "partial",
-        "date": target_date.isoformat(),
+        "date": report_date.isoformat(),
         "created": len(results),
         "failed": len(failures),
         "reports": results,
         "failures": failures,
     }
+
+
+def refresh_dashboard_report_snapshots(db: Session, *, report_date: date | None = None) -> dict:
+    target_date = report_date or date.today()
+    return _refresh_dashboard_builders(
+        db,
+        _dashboard_report_builders(db, target_date),
+        report_date=target_date,
+    )
+
+
+def refresh_live_dashboard_report_snapshots(db: Session, *, report_date: date | None = None) -> dict:
+    target_date = report_date or date.today()
+    builders = _dashboard_report_builders(db, target_date)
+    live_builders = {
+        name: builders[name]
+        for name in ("odds_warehouse", "totals_policy", "bullpen_today")
+    }
+    return _refresh_dashboard_builders(db, live_builders, report_date=target_date)
 
 
 def refresh_decision_snapshots(db: Session, *, report_date: date | None = None) -> dict:
