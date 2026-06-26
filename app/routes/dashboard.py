@@ -146,11 +146,24 @@ def dashboard_health(db: Session = Depends(get_db)):
     decision_snapshot = (get_report_snapshot(db, "decision_queue", report_date=today, max_age_seconds=None) or {}).get("snapshot")
     ranked_snapshot = (get_report_snapshot(db, "ranked_rows", report_date=today, max_age_seconds=None) or {}).get("snapshot")
     research_names = ("odds_warehouse", "totals_policy", "paper_clv", "movement_report", "profitability_report", "bullpen_today")
-    research_snapshots = {
+    live_research_names = tuple(sorted(LIVE_RESEARCH_REPORTS))
+    historical_research_names = tuple(name for name in research_names if name not in LIVE_RESEARCH_REPORTS)
+    live_research_snapshots = {
+        name: (get_report_snapshot(db, name, report_date=today, max_age_seconds=LIVE_RESEARCH_MAX_AGE_SECONDS) or {}).get("snapshot")
+        for name in live_research_names
+    }
+    historical_research_snapshots = {
         name: (get_report_snapshot(db, name, report_date=today, max_age_seconds=None) or {}).get("snapshot")
-        for name in research_names
+        for name in historical_research_names
+    }
+    research_snapshots = {
+        **live_research_snapshots,
+        **historical_research_snapshots,
     }
     decision_age = _snapshot_age_seconds(decision_snapshot)
+    live_research_ages = [_snapshot_age_seconds(snapshot) for snapshot in live_research_snapshots.values() if snapshot]
+    live_research_age = max(live_research_ages) if live_research_ages else None
+    missing_live_research = [name for name, snapshot in live_research_snapshots.items() if snapshot is None]
     research_ages = [_snapshot_age_seconds(snapshot) for snapshot in research_snapshots.values() if snapshot]
     oldest_research_age = max(research_ages) if research_ages else None
     missing_research = [name for name, snapshot in research_snapshots.items() if snapshot is None]
@@ -175,8 +188,12 @@ def dashboard_health(db: Session = Depends(get_db)):
     })
     checks.append({
         "name": "Research Snapshots",
-        "status": "OK" if not missing_research and oldest_research_age is not None and oldest_research_age <= 12 * 3600 else ("WARNING" if oldest_research_age is not None else "BROKEN"),
-        "detail": f"Oldest age {oldest_research_age // 60}m" if oldest_research_age is not None else f"Missing {len(missing_research)} reports",
+        "status": "OK" if not missing_live_research and live_research_age is not None else ("WARNING" if live_research_age is not None else "BROKEN"),
+        "detail": (
+            f"Live age {live_research_age // 60}m; historical oldest {oldest_research_age // 60}m"
+            if live_research_age is not None and oldest_research_age is not None
+            else f"Missing {len(missing_live_research)} live reports"
+        ),
     })
     checks.append({
         "name": "Endpoint Speed",
@@ -193,8 +210,10 @@ def dashboard_health(db: Session = Depends(get_db)):
             "clv_usable": clv_usable,
             "decision_snapshot_age_seconds": decision_age,
             "ranked_snapshot_age_seconds": _snapshot_age_seconds(ranked_snapshot),
+            "live_research_snapshot_age_seconds": live_research_age,
             "oldest_research_snapshot_age_seconds": oldest_research_age,
             "missing_research_reports": missing_research,
+            "missing_live_research_reports": missing_live_research,
             "slow_endpoint_count": len(slow_events),
         },
     }
