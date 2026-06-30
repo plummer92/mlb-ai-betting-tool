@@ -54,9 +54,13 @@ def admin_dashboard():
     return HTMLResponse(content=_load_template("admin.html"))
 
 
+def _dashboard_today() -> date:
+    return datetime.now(ET).date()
+
+
 @router.get("/api/dashboard/live")
 def dashboard_live(db: Session = Depends(get_db)):
-    today = date.today()
+    today = _dashboard_today()
     return {
         "status": "ok",
         "date": today.isoformat(),
@@ -72,7 +76,7 @@ def dashboard_live(db: Session = Depends(get_db)):
 
 @router.get("/api/dashboard/research")
 def dashboard_research(db: Session = Depends(get_db)):
-    today = date.today()
+    today = _dashboard_today()
 
     def snapshot_for(name: str) -> dict | None:
         if name in LIVE_RESEARCH_REPORTS:
@@ -136,7 +140,7 @@ def _health_status(checks: list[dict]) -> str:
 
 @router.get("/api/dashboard/health")
 def dashboard_health(db: Session = Depends(get_db)):
-    today = datetime.now(ET).date()
+    today = _dashboard_today()
     readiness = build_market_readiness_report(db)
     quota = readiness.get("quota") or {}
     integrity = readiness.get("integrity") or {}

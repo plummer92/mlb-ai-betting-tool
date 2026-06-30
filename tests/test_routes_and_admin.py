@@ -11,7 +11,7 @@ from app.db import Base
 from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, OddsApiRequestLog, Prediction, ReportSnapshot, SharpMoveJournal, SnapshotType, TradableDecisionSnapshot
 from app.routes.commentary import commentary_today
 from app.routes.admin import admin_backfill_prediction_dashboard_metrics, admin_freshness
-from app.routes.dashboard import dashboard_research
+from app.routes.dashboard import dashboard_live, dashboard_research
 from app.routes.debug import (
     _raw_edge_acceptance,
     build_decision_pipeline_diagnostics,
@@ -1272,6 +1272,47 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertIn("odds_warehouse", result["missing"])
         self.assertIn("totals_policy", result["missing"])
         self.assertIn("bullpen_today", result["missing"])
+
+    def test_dashboard_bundles_use_et_report_date(self) -> None:
+        report_date = date(2026, 6, 29)
+        generated_at = datetime.now(timezone.utc)
+        self.db.add_all([
+            ReportSnapshot(
+                report_name="decision_queue",
+                report_date=report_date,
+                generated_at=generated_at,
+                status="ok",
+                runtime_ms=11,
+                payload_json='{"status":"ok","rows":[]}',
+            ),
+            ReportSnapshot(
+                report_name="ranked_rows",
+                report_date=report_date,
+                generated_at=generated_at,
+                status="ok",
+                runtime_ms=12,
+                payload_json='{"status":"ok","rows":[]}',
+            ),
+            ReportSnapshot(
+                report_name="odds_warehouse",
+                report_date=report_date,
+                generated_at=generated_at,
+                status="ok",
+                runtime_ms=13,
+                payload_json='{"status":"ok","summary":{"clv_ready":1}}',
+            ),
+        ])
+        self.db.commit()
+
+        with patch("app.routes.dashboard._dashboard_today", return_value=report_date):
+            live = dashboard_live(db=self.db)
+            research = dashboard_research(db=self.db)
+
+        self.assertEqual(live["date"], "2026-06-29")
+        self.assertEqual(research["date"], "2026-06-29")
+        self.assertIsNotNone(live["snapshots"]["decision_queue"])
+        self.assertIsNotNone(live["snapshots"]["ranked_rows"])
+        self.assertIsNotNone(research["reports"]["odds_warehouse"])
 
     def test_totals_bias_report_flags_supported_under_edge(self) -> None:
         self._totals_review_game(104, model_total=7.0, book_total=9.0, final_total=6, play="under", bet_result="win", pregame_total=8.5)
