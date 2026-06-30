@@ -426,38 +426,46 @@ def build_odds_quota_report(db: Session) -> dict:
     ]
     by_snapshot = Counter(row.snapshot_type or "unknown" for row in ok_rows)
     used = len(ok_rows)
-    remaining = max(ODDS_API_MONTHLY_QUOTA - used, 0)
+    provider_exhausted = bool(provider_error_codes.get("OUT_OF_USAGE_CREDITS"))
+    effective_monthly_quota = (
+        min(ODDS_API_MONTHLY_QUOTA, used)
+        if provider_exhausted and used > 0
+        else ODDS_API_MONTHLY_QUOTA
+    )
+    remaining = 0 if provider_exhausted else max(effective_monthly_quota - used, 0)
     days_elapsed = max(today.day, 1)
     days_in_month = calendar.monthrange(today.year, today.month)[1]
     daily_average = used / days_elapsed
     projected_month_used = round(daily_average * days_in_month, 1)
-    projected_over_cap = ODDS_API_MONTHLY_QUOTA > 0 and projected_month_used > ODDS_API_MONTHLY_QUOTA
-    projected_warning = ODDS_API_MONTHLY_QUOTA > 0 and projected_month_used >= ODDS_API_MONTHLY_QUOTA * 0.9
+    projected_over_cap = effective_monthly_quota > 0 and projected_month_used > effective_monthly_quota
+    projected_warning = effective_monthly_quota > 0 and projected_month_used >= effective_monthly_quota * 0.9
     return {
         "month": month_start.strftime("%Y-%m"),
         "provider": "the_odds_api",
-        "monthly_quota": ODDS_API_MONTHLY_QUOTA,
+        "configured_monthly_quota": ODDS_API_MONTHLY_QUOTA,
+        "monthly_quota": effective_monthly_quota,
+        "quota_basis": "provider_exhausted" if provider_exhausted else "configured",
         "month_used": used,
         "month_remaining": remaining,
-        "month_usage_pct": round(used / ODDS_API_MONTHLY_QUOTA, 4) if ODDS_API_MONTHLY_QUOTA else None,
+        "month_usage_pct": 1.0 if provider_exhausted else round(used / effective_monthly_quota, 4) if effective_monthly_quota else None,
         "today_used": len(today_rows),
         "daily_average": round(daily_average, 2),
         "projected_month_used": projected_month_used,
-        "projected_remaining": round(ODDS_API_MONTHLY_QUOTA - projected_month_used, 1),
+        "projected_remaining": 0 if provider_exhausted else round(effective_monthly_quota - projected_month_used, 1),
         "projected_over_cap": projected_over_cap,
         "projected_warning": projected_warning,
         "quota_alert": (
-            "OUT_OF_USAGE_CREDITS" if provider_error_codes.get("OUT_OF_USAGE_CREDITS") else
+            "OUT_OF_USAGE_CREDITS" if provider_exhausted else
             "OVER_CAP_PROJECTION" if projected_over_cap else
             "NEAR_CAP_PROJECTION" if projected_warning else
             "OK"
         ),
         "provider_status": (
-            "OUT_OF_USAGE_CREDITS" if provider_error_codes.get("OUT_OF_USAGE_CREDITS") else
+            "OUT_OF_USAGE_CREDITS" if provider_exhausted else
             "ERROR" if error_rows else
             "OK"
         ),
-        "provider_out_of_usage_credits": bool(provider_error_codes.get("OUT_OF_USAGE_CREDITS")),
+        "provider_out_of_usage_credits": provider_exhausted,
         "latest_provider_error_code": latest_provider_error_code,
         "latest_provider_message": latest_provider_message,
         "provider_error_code_counts": dict(provider_error_codes),

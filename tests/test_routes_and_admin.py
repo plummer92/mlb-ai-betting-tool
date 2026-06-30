@@ -18,6 +18,7 @@ from app.routes.debug import (
     build_edge_db_state,
     build_edge_persistence_report,
     build_market_readiness_report,
+    build_odds_quota_report,
     build_odds_warehouse_report,
     build_odds_freshness_report,
     build_raw_edge_board,
@@ -942,6 +943,46 @@ class RouteAndAdminTests(unittest.TestCase):
         home_ml = next(row for row in report["plays"] if row["play"] == "home_ml")
         self.assertEqual(home_ml["open_price"], -130)
         self.assertEqual(home_ml["pregame_price"], -135)
+
+    def test_odds_quota_uses_provider_exhaustion_as_effective_cap(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [
+            OddsApiRequestLog(
+                provider="the_odds_api",
+                endpoint="odds",
+                snapshot_type="open",
+                bookmakers="draftkings",
+                status="ok",
+                http_status=200,
+                requested_at=now,
+            )
+            for _ in range(3)
+        ]
+        rows.append(
+            OddsApiRequestLog(
+                provider="the_odds_api",
+                endpoint="odds",
+                snapshot_type="pregame",
+                bookmakers="draftkings",
+                status="error",
+                http_status=401,
+                requested_at=now,
+                error="provider_error_code=OUT_OF_USAGE_CREDITS provider_message=Usage quota has been reached.",
+            )
+        )
+        self.db.add_all(rows)
+        self.db.commit()
+
+        with patch("app.routes.debug.ODDS_API_MONTHLY_QUOTA", 500):
+            report = build_odds_quota_report(self.db)
+
+        self.assertEqual(report["configured_monthly_quota"], 500)
+        self.assertEqual(report["monthly_quota"], 3)
+        self.assertEqual(report["month_used"], 3)
+        self.assertEqual(report["month_remaining"], 0)
+        self.assertEqual(report["month_usage_pct"], 1.0)
+        self.assertEqual(report["quota_basis"], "provider_exhausted")
+        self.assertEqual(report["quota_alert"], "OUT_OF_USAGE_CREDITS")
 
     def test_odds_warehouse_derives_play_movement_from_displayed_snapshots(self) -> None:
         game = self._game(130)

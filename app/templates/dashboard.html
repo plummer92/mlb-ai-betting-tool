@@ -2090,6 +2090,9 @@ async function loadOddsWarehouse() {
     const summary = data.summary || {};
     const rows = data.plays || data.games || [];
     const pct = quota.month_usage_pct != null ? (quota.month_usage_pct * 100).toFixed(1) : '0.0';
+    const configuredQuotaNote = quota.configured_monthly_quota && quota.configured_monthly_quota !== quota.monthly_quota
+      ? `Configured ${quota.configured_monthly_quota}; provider stopped at observed cap`
+      : `${pct}% this month - ${quota.today_used ?? 0} today`;
     $('odds-warehouse-badge').textContent = quota.provider_out_of_usage_credits ? 'QUOTA HIT' : `${summary.clv_ready || 0} CLV READY`;
     $('odds-warehouse-summary').innerHTML = `
       ${snapshotLine(data, 'Odds warehouse snapshot')}
@@ -2103,7 +2106,7 @@ async function loadOddsWarehouse() {
         <div class="read-tile">
           <div class="read-label">Odds API Used</div>
           <div class="read-main ${quota.month_usage_pct >= 0.8 ? 'red' : quota.month_usage_pct >= 0.55 ? 'yellow' : 'green'}">${quota.month_used ?? 0}/${quota.monthly_quota ?? 500}</div>
-          <div class="read-sub">${pct}% this month - ${quota.today_used ?? 0} today</div>
+          <div class="read-sub">${esc(configuredQuotaNote)}</div>
         </div>
         <div class="read-tile">
           <div class="read-label">Remaining</div>
