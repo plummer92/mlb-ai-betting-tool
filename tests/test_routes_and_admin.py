@@ -583,7 +583,7 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertIn('"policy_qualified": true', snapshots[0].snapshot_json)
 
     def test_shadow_policy_v2_tracks_neutral_strong_no_clv_rows(self) -> None:
-        game = self._game(199)
+        game = self._game(199, game_date=date(2026, 7, 7))
         prediction = self._prediction(game.game_id)
         fake_row = _decision_row_from_ranked(
             self._decision_base_row(
@@ -641,6 +641,9 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(shadow["candidate_snapshots"], 1)
         self.assertEqual(shadow["graded_candidates"], 1)
         self.assertEqual(shadow["graded"]["wins"], 1)
+        self.assertEqual(report["shadow_policy_v3"]["candidate_snapshots"], 1)
+        self.assertEqual(report["shadow_policy_v3"]["graded_candidates"], 1)
+        self.assertEqual(report["shadow_policy_v3"]["by_edge_bucket"][0]["edge_bucket"], "12-18%")
         self.assertEqual(report["forward_policy_ledger"]["would_have_bet"], 0)
 
     def test_daily_trade_summary_reports_no_trade_board(self) -> None:
@@ -1722,13 +1725,16 @@ class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):
 
     def test_live_dashboard_report_refresh_job_refreshes_live_reports(self) -> None:
         with patch("app.scheduler.SessionLocal", return_value=self.db), \
-             patch("app.scheduler.refresh_live_dashboard_report_snapshots", return_value={"status": "ok"}) as refresh_mock:
+             patch("app.scheduler.refresh_live_dashboard_report_snapshots", return_value={"status": "ok"}) as refresh_mock, \
+             patch("app.scheduler.refresh_decision_snapshots", return_value={"status": "ok"}) as decision_mock:
             from app.scheduler import refresh_live_dashboard_reports_job
 
             refresh_live_dashboard_reports_job()
 
         refresh_mock.assert_called_once()
         self.assertEqual(refresh_mock.call_args.kwargs["report_date"], date.today())
+        decision_mock.assert_called_once()
+        self.assertEqual(decision_mock.call_args.kwargs["report_date"], date.today())
 
     def _backtest_result(self, accuracy: float) -> BacktestResult:
         result = BacktestResult(

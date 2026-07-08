@@ -557,6 +557,8 @@ def refresh_live_dashboard_reports_job():
         today = datetime.now(ET).date()
         result = refresh_live_dashboard_report_snapshots(db, report_date=today)
         print(f"[scheduler] Live dashboard report snapshots: {result}")
+        decision_result = refresh_decision_snapshots(db, report_date=today)
+        print(f"[scheduler] Live decision snapshots: {decision_result}")
     except (SQLAlchemyError, RuntimeError, ValueError):
         logger.exception("[scheduler] Live dashboard report snapshot error")
     finally:

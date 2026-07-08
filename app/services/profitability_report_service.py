@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from datetime import date
 
 from sqlalchemy.orm import Session
 
 from app.models.schema import EdgeResult, GameOdds, GameOutcomeReview, TradableDecisionSnapshot
 from app.services.betting_policy import BETTING_PROFILES, qualifies_for_bet_policy
 from app.services.ev_math import american_to_decimal
+
+
+SHADOW_POLICY_V3_START_DATE = date(2026, 7, 7)
 
 
 def _edge_bucket(edge_pct: float | None) -> str:
@@ -21,6 +25,34 @@ def _edge_bucket(edge_pct: float | None) -> str:
     if edge < 0.20:
         return "15-20%"
     return "20%+"
+
+
+def _shadow_edge_bucket(edge_pct: float | None) -> str:
+    edge = float(edge_pct or 0)
+    if edge < 0.08:
+        return "<8%"
+    if edge < 0.12:
+        return "8-12%"
+    if edge < 0.18:
+        return "12-18%"
+    if edge < 0.25:
+        return "18-25%"
+    return "25%+"
+
+
+def _market_score_bucket(score: float | int | None) -> str:
+    if score is None:
+        return "unknown"
+    value = float(score)
+    if value < 40:
+        return "rejected"
+    if value < 47:
+        return "low-neutral"
+    if value <= 53:
+        return "center-neutral"
+    if value <= 60:
+        return "high-neutral"
+    return "agreed"
 
 
 def _american_odds(review: GameOutcomeReview, odds: GameOdds | None) -> int | None:
@@ -175,6 +207,12 @@ def is_shadow_policy_v2_candidate(snapshot: TradableDecisionSnapshot, payload: d
         and not snapshot.trade_allowed
         and snapshot.decision_status in {"WATCH", "BLOCKED"}
     )
+
+
+def is_shadow_policy_v3_candidate(snapshot: TradableDecisionSnapshot, payload: dict | None = None) -> bool:
+    if snapshot.game_date is None or snapshot.game_date < SHADOW_POLICY_V3_START_DATE:
+        return False
+    return (snapshot.play or "").lower() == "under" and is_shadow_policy_v2_candidate(snapshot, payload)
 
 
 def _sorted_segment_list(grouped: dict, *, key_names: tuple[str, ...], min_sample: int) -> list[dict]:
@@ -359,6 +397,101 @@ def _shadow_policy_v2_ledger(db: Session) -> dict:
     }
 
 
+def _shadow_policy_v3_ledger(db: Session) -> dict:
+    review_by_edge = {
+        review.edge_result_id: review
+        for review in db.query(GameOutcomeReview)
+        .filter(GameOutcomeReview.edge_result_id.isnot(None))
+        .all()
+    }
+    snapshots = (
+        db.query(TradableDecisionSnapshot)
+        .filter(TradableDecisionSnapshot.game_date >= SHADOW_POLICY_V3_START_DATE)
+        .order_by(TradableDecisionSnapshot.game_date.asc(), TradableDecisionSnapshot.id.asc())
+        .all()
+    )
+    rows = []
+    for snapshot in snapshots:
+        payload = _snapshot_payload(snapshot)
+        if not is_shadow_policy_v3_candidate(snapshot, payload):
+            continue
+        review = review_by_edge.get(snapshot.edge_result_id)
+        result = review.bet_result if review else None
+        adjustment = payload.get("market_respect_adjustment") or {}
+        if not isinstance(adjustment, dict):
+            adjustment = {}
+        edge_pct = float(snapshot.adjusted_edge_pct) if snapshot.adjusted_edge_pct is not None else None
+        ev = float(adjustment.get("adjusted_ev")) if adjustment.get("adjusted_ev") is not None else None
+        score = snapshot.market_respect_score
+        rows.append({
+            "game_date": snapshot.game_date,
+            "month": snapshot.game_date.strftime("%Y-%m") if snapshot.game_date else "unknown",
+            "matchup": snapshot.matchup,
+            "play": (snapshot.play or "").lower(),
+            "decision_status": snapshot.decision_status,
+            "tradable_signal": snapshot.tradable_signal,
+            "tradable_reason": snapshot.tradable_reason,
+            "market_respect_score": score,
+            "market_score_bucket": _market_score_bucket(score),
+            "market_respect_tag": snapshot.market_respect_tag,
+            "edge_bucket": _shadow_edge_bucket(edge_pct),
+            "bet_result": result,
+            "profit_units": _profit_units(review, None) if review else 0.0,
+            "profit_dollars_flat_100": _profit_dollars_flat_100(review, None) if review else 0.0,
+            "edge_pct": edge_pct,
+            "ev": ev,
+        })
+
+    graded_rows = [row for row in rows if row["bet_result"] in {"win", "loss", "push"}]
+    by_month: dict[str, list[dict]] = defaultdict(list)
+    by_edge_bucket: dict[str, list[dict]] = defaultdict(list)
+    by_score_bucket: dict[str, list[dict]] = defaultdict(list)
+    by_status: dict[str, list[dict]] = defaultdict(list)
+    by_edge_month: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for row in graded_rows:
+        by_month[row["month"]].append(row)
+        by_edge_bucket[row["edge_bucket"]].append(row)
+        by_score_bucket[row["market_score_bucket"]].append(row)
+        by_status[row["decision_status"]].append(row)
+        by_edge_month[(row["edge_bucket"], row["month"])].append(row)
+
+    recent = rows[-25:]
+    return {
+        "name": "Shadow Policy V3",
+        "description": (
+            "Forward/current-policy shadow: UNDER only, strong model, neutral market, no positive CLV, "
+            f"tracked from {SHADOW_POLICY_V3_START_DATE.isoformat()}. Shadow-only; never enables real trades."
+        ),
+        "start_date": SHADOW_POLICY_V3_START_DATE.isoformat(),
+        "candidate_snapshots": len(rows),
+        "graded_candidates": len(graded_rows),
+        "graded": _segment_stats(graded_rows),
+        "by_month": _timeline_segment_list(by_month, key_names=("month",)),
+        "by_edge_bucket": _sorted_segment_list(by_edge_bucket, key_names=("edge_bucket",), min_sample=1),
+        "by_market_score_bucket": _sorted_segment_list(by_score_bucket, key_names=("market_score_bucket",), min_sample=1),
+        "by_decision_status": _sorted_segment_list(by_status, key_names=("decision_status",), min_sample=1),
+        "by_edge_bucket_month": _timeline_segment_list(by_edge_month, key_names=("edge_bucket", "month")),
+        "recent": [
+            {
+                "game_date": row["game_date"].isoformat() if row["game_date"] else None,
+                "matchup": row["matchup"],
+                "play": row["play"],
+                "decision_status": row["decision_status"],
+                "tradable_signal": row["tradable_signal"],
+                "tradable_reason": row["tradable_reason"],
+                "market_respect_score": row["market_respect_score"],
+                "market_score_bucket": row["market_score_bucket"],
+                "market_respect_tag": row["market_respect_tag"],
+                "edge_bucket": row["edge_bucket"],
+                "result": row["bet_result"],
+                "edge_pct": row["edge_pct"],
+                "ev": row["ev"],
+            }
+            for row in recent
+        ],
+    }
+
+
 def get_profitability_report(db: Session, *, min_sample: int = 5) -> dict:
     pairs = (
         db.query(GameOutcomeReview, EdgeResult, GameOdds)
@@ -452,5 +585,6 @@ def get_profitability_report(db: Session, *, min_sample: int = 5) -> dict:
         "by_play_month": _timeline_segment_list(by_play_month, key_names=("play", "month"), min_sample=min_sample),
         "forward_policy_ledger": _forward_policy_ledger(db),
         "shadow_policy_v2": _shadow_policy_v2_ledger(db),
+        "shadow_policy_v3": _shadow_policy_v3_ledger(db),
         "insights": insights,
     }
