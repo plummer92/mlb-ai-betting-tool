@@ -98,6 +98,85 @@ def _segment_stats(rows: list[dict]) -> dict:
     }
 
 
+def _snapshot_payload(snapshot: TradableDecisionSnapshot) -> dict:
+    try:
+        payload = json.loads(snapshot.snapshot_json or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _text_blob(*values: object) -> str:
+    parts: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, list):
+            parts.extend(str(item) for item in value if item is not None)
+        else:
+            parts.append(str(value))
+    return " ".join(parts).lower()
+
+
+def _snapshot_market_tags(snapshot: TradableDecisionSnapshot, payload: dict) -> list[str]:
+    tags = payload.get("market_respect_tags") or payload.get("market_respect_tag") or []
+    if isinstance(tags, str):
+        tags = [tags]
+    market_respect = payload.get("market_respect") or {}
+    if isinstance(market_respect, dict):
+        tags.extend(market_respect.get("tags") or [])
+    adjustment = payload.get("market_respect_adjustment") or {}
+    if isinstance(adjustment, dict):
+        tags.extend(adjustment.get("tags") or [])
+    if snapshot.market_respect_tag:
+        tags.append(snapshot.market_respect_tag)
+    return [str(tag).upper() for tag in tags if tag]
+
+
+def is_shadow_policy_v2_candidate(snapshot: TradableDecisionSnapshot, payload: dict | None = None) -> bool:
+    payload = payload if payload is not None else _snapshot_payload(snapshot)
+    adjustment = payload.get("market_respect_adjustment") or {}
+    if not isinstance(adjustment, dict):
+        adjustment = {}
+    tags = _snapshot_market_tags(snapshot, payload)
+    text = _text_blob(
+        snapshot.tradable_reason,
+        snapshot.decision_reason,
+        snapshot.policy_status,
+        payload.get("tradable_reason"),
+        payload.get("decision_reason"),
+        payload.get("policy_reason"),
+        payload.get("policy_reasons"),
+        tags,
+    )
+    confidence = str(
+        adjustment.get("adjusted_confidence")
+        or adjustment.get("raw_confidence")
+        or payload.get("confidence")
+        or ""
+    ).lower()
+    edge = float(snapshot.adjusted_edge_pct or payload.get("adjusted_edge_pct") or payload.get("raw_edge_pct") or 0)
+    score = snapshot.market_respect_score
+    if score is None:
+        score = payload.get("market_trust_score") or adjustment.get("score")
+    score_value = float(score) if score is not None else None
+    neutral_market = (
+        "MARKET NEUTRAL" in tags
+        or "market neutral" in text
+        or (score_value is not None and 40 <= score_value <= 60 and "MARKET REJECTED" not in tags and "MARKET AGREED" not in tags)
+    )
+    strong_model = "strong model" in text or confidence == "strong"
+    no_positive_clv = "no positive clv" in text or "without_clv" in text
+    return bool(
+        strong_model
+        and neutral_market
+        and no_positive_clv
+        and edge >= 0.08
+        and not snapshot.trade_allowed
+        and snapshot.decision_status in {"WATCH", "BLOCKED"}
+    )
+
+
 def _sorted_segment_list(grouped: dict, *, key_names: tuple[str, ...], min_sample: int) -> list[dict]:
     items = []
     for key, rows in grouped.items():
@@ -203,6 +282,83 @@ def _forward_policy_ledger(db: Session) -> dict:
     }
 
 
+def _shadow_policy_v2_ledger(db: Session) -> dict:
+    review_by_edge = {
+        review.edge_result_id: review
+        for review in db.query(GameOutcomeReview)
+        .filter(GameOutcomeReview.edge_result_id.isnot(None))
+        .all()
+    }
+    snapshots = (
+        db.query(TradableDecisionSnapshot)
+        .order_by(TradableDecisionSnapshot.game_date.asc(), TradableDecisionSnapshot.id.asc())
+        .all()
+    )
+    rows = []
+    for snapshot in snapshots:
+        payload = _snapshot_payload(snapshot)
+        if not is_shadow_policy_v2_candidate(snapshot, payload):
+            continue
+        review = review_by_edge.get(snapshot.edge_result_id)
+        result = review.bet_result if review else None
+        adjustment = payload.get("market_respect_adjustment") or {}
+        if not isinstance(adjustment, dict):
+            adjustment = {}
+        rows.append({
+            "game_date": snapshot.game_date,
+            "month": snapshot.game_date.strftime("%Y-%m") if snapshot.game_date else "unknown",
+            "matchup": snapshot.matchup,
+            "play": (snapshot.play or "").lower(),
+            "decision_status": snapshot.decision_status,
+            "tradable_signal": snapshot.tradable_signal,
+            "tradable_reason": snapshot.tradable_reason,
+            "market_respect_score": snapshot.market_respect_score,
+            "market_respect_tag": snapshot.market_respect_tag,
+            "bet_result": result,
+            "profit_units": _profit_units(review, None) if review else 0.0,
+            "profit_dollars_flat_100": _profit_dollars_flat_100(review, None) if review else 0.0,
+            "edge_pct": float(snapshot.adjusted_edge_pct) if snapshot.adjusted_edge_pct is not None else None,
+            "ev": float(adjustment.get("adjusted_ev")) if adjustment.get("adjusted_ev") is not None else None,
+        })
+
+    graded_rows = [row for row in rows if row["bet_result"] in {"win", "loss", "push"}]
+    by_month: dict[str, list[dict]] = defaultdict(list)
+    by_play_month: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    by_play: dict[str, list[dict]] = defaultdict(list)
+    for row in graded_rows:
+        by_month[row["month"]].append(row)
+        by_play_month[(row["play"], row["month"])].append(row)
+        by_play[row["play"]].append(row)
+
+    recent = rows[-25:]
+    return {
+        "name": "Shadow Policy V2",
+        "description": "Strong model + neutral market + no positive CLV. Shadow-only; never enables real trades.",
+        "candidate_snapshots": len(rows),
+        "graded_candidates": len(graded_rows),
+        "graded": _segment_stats(graded_rows),
+        "by_month": _timeline_segment_list(by_month, key_names=("month",)),
+        "by_play_month": _timeline_segment_list(by_play_month, key_names=("play", "month")),
+        "by_play": _sorted_segment_list(by_play, key_names=("play",), min_sample=1),
+        "recent": [
+            {
+                "game_date": row["game_date"].isoformat() if row["game_date"] else None,
+                "matchup": row["matchup"],
+                "play": row["play"],
+                "decision_status": row["decision_status"],
+                "tradable_signal": row["tradable_signal"],
+                "tradable_reason": row["tradable_reason"],
+                "market_respect_score": row["market_respect_score"],
+                "market_respect_tag": row["market_respect_tag"],
+                "result": row["bet_result"],
+                "edge_pct": row["edge_pct"],
+                "ev": row["ev"],
+            }
+            for row in recent
+        ],
+    }
+
+
 def get_profitability_report(db: Session, *, min_sample: int = 5) -> dict:
     pairs = (
         db.query(GameOutcomeReview, EdgeResult, GameOdds)
@@ -295,5 +451,6 @@ def get_profitability_report(db: Session, *, min_sample: int = 5) -> dict:
         "by_month": _timeline_segment_list(by_month, key_names=("month",), min_sample=min_sample),
         "by_play_month": _timeline_segment_list(by_play_month, key_names=("play", "month"), min_sample=min_sample),
         "forward_policy_ledger": _forward_policy_ledger(db),
+        "shadow_policy_v2": _shadow_policy_v2_ledger(db),
         "insights": insights,
     }

@@ -582,6 +582,67 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertIn("Away @ Home", snapshots[0].snapshot_json)
         self.assertIn('"policy_qualified": true', snapshots[0].snapshot_json)
 
+    def test_shadow_policy_v2_tracks_neutral_strong_no_clv_rows(self) -> None:
+        game = self._game(199)
+        prediction = self._prediction(game.game_id)
+        fake_row = _decision_row_from_ranked(
+            self._decision_base_row(
+                game_id=game.game_id,
+                edge_result_id=77,
+                prediction_id=prediction.prediction_id,
+                game_date=game.game_date.isoformat(),
+                matchup="Away @ Home",
+                play="under",
+                adjusted_edge_pct=0.12,
+                market_respect_score=50,
+                market_respect_tags=["MARKET NEUTRAL"],
+                market_trust_bucket="mixed_market",
+                market_respect={"score": 50, "tags": ["MARKET NEUTRAL"], "components": {}},
+                market_respect_adjustment={
+                    "score": 50,
+                    "bucket": "mixed_market",
+                    "score_bucket": "mixed_market",
+                    "tags": ["MARKET NEUTRAL"],
+                    "raw_edge_pct": 0.12,
+                    "raw_ev": 0.18,
+                    "adjusted_ev": 0.18,
+                    "adjusted_confidence": "strong",
+                    "explanation": "market neutral",
+                },
+            )
+        )
+
+        with patch("app.services.decision_journal_service._build_decision_queue", return_value=[fake_row]):
+            persist_tradable_decisions(db=self.db, active_only=False)
+
+        self.db.add(
+            GameOutcomeReview(
+                game_id=game.game_id,
+                prediction_id=prediction.prediction_id,
+                edge_result_id=77,
+                game_date=game.game_date,
+                actual_outcome_summary="summary",
+                recommended_play="under",
+                confidence_tier="strong",
+                edge_pct=0.12,
+                ev=0.18,
+                final_away_score=2,
+                final_home_score=3,
+                winning_side="home",
+                bet_result="win",
+                was_model_correct=True,
+            )
+        )
+        self.db.commit()
+
+        report = profitability_report(db=self.db, min_sample=1)
+        shadow = report["shadow_policy_v2"]
+
+        self.assertEqual(shadow["candidate_snapshots"], 1)
+        self.assertEqual(shadow["graded_candidates"], 1)
+        self.assertEqual(shadow["graded"]["wins"], 1)
+        self.assertEqual(report["forward_policy_ledger"]["would_have_bet"], 0)
+
     def test_daily_trade_summary_reports_no_trade_board(self) -> None:
         fake_row = _decision_row_from_ranked(
             self._decision_base_row(

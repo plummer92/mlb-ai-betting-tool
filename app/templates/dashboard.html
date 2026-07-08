@@ -941,6 +941,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <a class="quick-tab" href="#decision-queue-section">Action</a>
     <a class="quick-tab" href="#health-section">Health</a>
     <a class="quick-tab" href="#qualified-policy-section">Qualified</a>
+    <a class="quick-tab" href="#shadow-policy-section">Shadow V2</a>
     <a class="quick-tab" href="#today-read-section">Today</a>
     <a class="quick-tab" href="#odds-integrity-section">Odds Trust</a>
     <a class="quick-tab" href="#market-audit-section">Markets</a>
@@ -1029,6 +1030,20 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <div class="card" style="padding:0;margin-top:12px">
       <div class="tbl-wrap" id="qualified-policy-table">
         <div class="loading">Loading policy-qualified plays</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="shadow-policy-section">
+    <div class="section-head">
+      <div class="section-label">Shadow Policy V2</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="shadow-policy-badge">LOADING</div>
+    </div>
+    <div id="shadow-policy-summary"></div>
+    <div class="card" style="padding:0;margin-top:12px">
+      <div class="tbl-wrap" id="shadow-policy-table">
+        <div class="loading">Loading shadow candidates</div>
       </div>
     </div>
   </div>
@@ -1787,6 +1802,37 @@ function blockerExplanation(reason) {
   return map[reason] || 'This row does not satisfy the tightened forward-betting policy.';
 }
 
+function isShadowPolicyV2Row(row) {
+  const adjustment = row.market_respect_adjustment || {};
+  const tags = [
+    ...(row.market_respect_tags || []),
+    row.market_respect_tag,
+    ...((row.market_respect || {}).tags || []),
+    ...(adjustment.tags || []),
+  ].filter(Boolean).map(tag => String(tag).toUpperCase());
+  const text = [
+    row.tradable_reason,
+    row.decision_reason,
+    row.policy_reason,
+    ...(row.policy_reasons || []),
+    ...tags,
+  ].filter(Boolean).join(' ').toLowerCase();
+  const confidence = String(adjustment.adjusted_confidence || adjustment.raw_confidence || row.confidence || '').toLowerCase();
+  const score = row.market_trust_score ?? adjustment.score;
+  const edge = Number(row.adjusted_edge_pct ?? row.raw_edge_pct ?? 0);
+  const neutralMarket = tags.includes('MARKET NEUTRAL')
+    || text.includes('market neutral')
+    || (score != null && Number(score) >= 40 && Number(score) <= 60 && !tags.includes('MARKET REJECTED') && !tags.includes('MARKET AGREED'));
+  const strongModel = text.includes('strong model') || confidence === 'strong';
+  const noPositiveClv = text.includes('no positive clv') || text.includes('without_clv');
+  return strongModel
+    && neutralMarket
+    && noPositiveClv
+    && edge >= 0.08
+    && !row.trade_allowed
+    && ['WATCH', 'BLOCKED'].includes(row.decision_status);
+}
+
 async function loadQualifiedPolicyToday() {
   try {
     const live = await loadDashboardLive();
@@ -1837,6 +1883,74 @@ async function loadQualifiedPolicyToday() {
     $('qualified-policy-badge').textContent = 'ERROR';
     $('qualified-policy-summary').innerHTML = '';
     $('qualified-policy-table').innerHTML = `<div class="empty compact">Qualified policy panel unavailable: ${esc(e.message)}</div>`;
+  }
+}
+
+async function loadShadowPolicyV2() {
+  try {
+    const [live, research] = await Promise.all([
+      loadDashboardLive(),
+      loadDashboardResearch().catch(() => null),
+    ]);
+    const currentRows = (live.decision_queue || []).filter(isShadowPolicyV2Row);
+    let profitability = research?.reports?.profitability_report;
+    if (!profitability?.shadow_policy_v2) {
+      profitability = await fetchJsonWithTimeout('/api/reviews/profitability-report?min_sample=1', 'Profitability report', 10000);
+    }
+    const shadow = profitability.shadow_policy_v2 || {};
+    const graded = shadow.graded || {};
+    const winRate = graded.win_rate != null ? (graded.win_rate * 100).toFixed(1) + '%' : '---';
+    const roi = graded.roi_per_bet != null ? fmt(graded.roi_per_bet, 3) : '---';
+    $('shadow-policy-badge').textContent = `${currentRows.length} TODAY / ${graded.total ?? 0} GRADED`;
+    $('shadow-policy-summary').innerHTML = `
+      ${snapshotLine(profitability, 'Shadow ledger snapshot')}
+      <div class="summary-bar" style="border-left-color: var(--purple); background: var(--surface3);">
+        <div class="s-stat"><div class="s-stat-val">${currentRows.length}</div><div class="s-stat-lbl">Today Candidates</div></div>
+        <div class="s-stat"><div class="s-stat-val">${shadow.candidate_snapshots ?? 0}</div><div class="s-stat-lbl">All Shadow Rows</div></div>
+        <div class="s-stat"><div class="s-stat-val">${graded.total ?? 0}</div><div class="s-stat-lbl">Graded</div></div>
+        <div class="s-stat"><div class="s-stat-val">${graded.wins ?? 0}-${graded.losses ?? 0}-${graded.pushes ?? 0}</div><div class="s-stat-lbl">Record</div></div>
+        <div class="s-stat"><div class="s-stat-val ${graded.win_rate >= 0.53 ? 'green' : graded.win_rate >= 0.48 ? 'yellow' : 'red'}">${winRate}</div><div class="s-stat-lbl">Win Rate</div></div>
+        <div class="s-stat"><div class="s-stat-val ${graded.roi_per_bet > 0 ? 'green' : graded.roi_per_bet < 0 ? 'red' : 'muted'}">${roi}</div><div class="s-stat-lbl">ROI / Bet</div></div>
+      </div>
+      <div class="audit-note">${esc(shadow.description || 'Shadow-only candidates are tracked for research and never enable real trades.')}</div>`;
+
+    const currentHtml = currentRows.map(r => `
+      <tr>
+        <td style="font-weight:600;white-space:nowrap">${esc(r.game || r.matchup || '---')}</td>
+        <td class="mono">${esc((r.play || '---').replace('_', ' ').toUpperCase())}</td>
+        <td class="mono ${r.adjusted_edge_pct > 0 ? 'green' : 'red'}">${r.adjusted_edge_pct != null ? (r.adjusted_edge_pct * 100).toFixed(1) + '%' : '---'}</td>
+        <td>${marketRespectChip(r.market_respect)}</td>
+        <td>${decisionStatusChip(r.decision_status)}</td>
+        <td style="min-width:280px;font-size:11px;color:var(--muted);line-height:1.45">${esc(r.tradable_reason || r.decision_reason || '')}</td>
+      </tr>
+    `).join('');
+    const recentHtml = (shadow.recent || []).slice().reverse().slice(0, 12).map(r => `
+      <tr>
+        <td class="mono">${esc(r.game_date || '---')}</td>
+        <td style="font-weight:600;white-space:nowrap">${esc(r.matchup || '---')}</td>
+        <td class="mono">${esc((r.play || '---').replace('_', ' ').toUpperCase())}</td>
+        <td class="mono">${r.edge_pct != null ? (r.edge_pct * 100).toFixed(1) + '%' : '---'}</td>
+        <td class="mono">${r.market_respect_score ?? '---'} ${esc(r.market_respect_tag || '')}</td>
+        <td>${r.result ? `<span class="chip ${r.result === 'win' ? 'c-strong' : r.result === 'loss' ? 'c-loss' : 'c-medium'}">${esc(String(r.result).toUpperCase())}</span>` : '<span class="chip c-none">PENDING</span>'}</td>
+      </tr>
+    `).join('');
+    $('shadow-policy-table').innerHTML = `
+      <table>
+        <thead><tr><th colspan="6">Today Shadow Candidates</th></tr><tr><th>Game</th><th>Play</th><th>Edge</th><th>Market</th><th>Status</th><th>Why</th></tr></thead>
+        <tbody>${currentHtml || '<tr><td colspan="6"><div class="empty compact">No current Shadow V2 candidates on the live queue.</div></td></tr>'}</tbody>
+      </table>
+      <table style="margin-top:14px;">
+        <thead><tr><th colspan="6">Recent Shadow Ledger</th></tr><tr><th>Date</th><th>Game</th><th>Play</th><th>Edge</th><th>Market</th><th>Result</th></tr></thead>
+        <tbody>${recentHtml || '<tr><td colspan="6"><div class="empty compact">No Shadow V2 ledger rows yet.</div></td></tr>'}</tbody>
+      </table>
+      <table style="margin-top:14px;">
+        <thead><tr><th colspan="7">Shadow V2 By Market</th></tr><tr><th>Segment</th><th>Bets</th><th>Record</th><th>Win Rate</th><th>ROI / Bet</th><th>Avg Edge</th><th>Avg EV</th></tr></thead>
+        <tbody>${segmentRows(shadow.by_play, ['play']) || '<tr><td colspan="7"><div class="empty compact">No graded shadow-market segments yet.</div></td></tr>'}</tbody>
+      </table>`;
+  } catch(e) {
+    $('shadow-policy-badge').textContent = 'ERROR';
+    $('shadow-policy-summary').innerHTML = '';
+    $('shadow-policy-table').innerHTML = `<div class="empty compact">Shadow Policy V2 unavailable: ${esc(e.message)}</div>`;
   }
 }
 
@@ -3534,6 +3648,7 @@ const primaryLoaders = [
   [loadHealthScore, 'health score'],
   [loadDecisionQueue, 'decision queue'],
   [loadQualifiedPolicyToday, 'qualified policy'],
+  [loadShadowPolicyV2, 'shadow policy v2'],
   [loadOddsIntegrity, 'pregame integrity'],
   [loadOddsWarehouse, 'odds warehouse'],
   [loadTodayRead, 'today read'],
