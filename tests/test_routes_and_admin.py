@@ -11,7 +11,7 @@ from app.db import Base
 from app.models.schema import BacktestResult, BetAlert, EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, OddsApiRequestLog, Prediction, ReportSnapshot, SharpMoveJournal, SnapshotType, TradableDecisionSnapshot
 from app.routes.commentary import commentary_today
 from app.routes.admin import admin_backfill_prediction_dashboard_metrics, admin_freshness
-from app.routes.dashboard import dashboard_live, dashboard_research
+from app.routes.dashboard import dashboard_health, dashboard_live, dashboard_research
 from app.routes.debug import (
     _raw_edge_acceptance,
     build_decision_pipeline_diagnostics,
@@ -526,12 +526,12 @@ class RouteAndAdminTests(unittest.TestCase):
     def test_decision_queue_watches_neutral_strong_model(self) -> None:
         row = _decision_row_from_ranked(
             self._decision_base_row(
-                market_respect_score=50,
+                market_respect_score=44,
                 market_respect_tags=["MARKET NEUTRAL"],
                 market_trust_bucket="mixed_market",
-                market_respect={"score": 50, "tags": ["MARKET NEUTRAL"], "components": {}},
+                market_respect={"score": 44, "tags": ["MARKET NEUTRAL"], "components": {}},
                 market_respect_adjustment={
-                    "score": 50,
+                    "score": 44,
                     "bucket": "mixed_market",
                     "score_bucket": "mixed_market",
                     "tags": ["MARKET NEUTRAL"],
@@ -594,12 +594,12 @@ class RouteAndAdminTests(unittest.TestCase):
                 matchup="Away @ Home",
                 play="under",
                 adjusted_edge_pct=0.12,
-                market_respect_score=50,
+                market_respect_score=44,
                 market_respect_tags=["MARKET NEUTRAL"],
                 market_trust_bucket="mixed_market",
-                market_respect={"score": 50, "tags": ["MARKET NEUTRAL"], "components": {}},
+                market_respect={"score": 44, "tags": ["MARKET NEUTRAL"], "components": {}},
                 market_respect_adjustment={
-                    "score": 50,
+                    "score": 44,
                     "bucket": "mixed_market",
                     "score_bucket": "mixed_market",
                     "tags": ["MARKET NEUTRAL"],
@@ -644,7 +644,69 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(report["shadow_policy_v3"]["candidate_snapshots"], 1)
         self.assertEqual(report["shadow_policy_v3"]["graded_candidates"], 1)
         self.assertEqual(report["shadow_policy_v3"]["by_edge_bucket"][0]["edge_bucket"], "12-18%")
+        self.assertEqual(report["shadow_policy_v4"]["candidate_snapshots"], 1)
+        self.assertEqual(report["shadow_policy_v4"]["graded_candidates"], 1)
+        self.assertEqual(report["shadow_policy_v4"]["min_edge"], 0.12)
         self.assertEqual(report["forward_policy_ledger"]["would_have_bet"], 0)
+
+    def test_shadow_policy_v4_excludes_weak_under_bucket(self) -> None:
+        game = self._game(201, game_date=date(2026, 7, 7))
+        prediction = self._prediction(game.game_id)
+        fake_row = _decision_row_from_ranked(
+            self._decision_base_row(
+                game_id=game.game_id,
+                edge_result_id=79,
+                prediction_id=prediction.prediction_id,
+                game_date=game.game_date.isoformat(),
+                matchup="Away @ Home",
+                play="under",
+                adjusted_edge_pct=0.119,
+                market_respect_score=44,
+                market_respect_tags=["MARKET NEUTRAL"],
+                market_trust_bucket="mixed_market",
+                market_respect={"score": 44, "tags": ["MARKET NEUTRAL"], "components": {}},
+                market_respect_adjustment={
+                    "score": 44,
+                    "bucket": "mixed_market",
+                    "score_bucket": "mixed_market",
+                    "tags": ["MARKET NEUTRAL"],
+                    "raw_edge_pct": 0.119,
+                    "raw_ev": 0.15,
+                    "adjusted_ev": 0.15,
+                    "adjusted_confidence": "strong",
+                    "explanation": "market neutral",
+                },
+            )
+        )
+
+        with patch("app.services.decision_journal_service._build_decision_queue", return_value=[fake_row]):
+            persist_tradable_decisions(db=self.db, active_only=False)
+
+        self.db.add(
+            GameOutcomeReview(
+                game_id=game.game_id,
+                prediction_id=prediction.prediction_id,
+                edge_result_id=79,
+                game_date=game.game_date,
+                actual_outcome_summary="summary",
+                recommended_play="under",
+                confidence_tier="strong",
+                edge_pct=0.119,
+                ev=0.15,
+                final_away_score=6,
+                final_home_score=5,
+                winning_side="away",
+                bet_result="loss",
+                was_model_correct=False,
+            )
+        )
+        self.db.commit()
+
+        report = profitability_report(db=self.db, min_sample=1)
+
+        self.assertEqual(report["shadow_policy_v3"]["candidate_snapshots"], 1)
+        self.assertEqual(report["shadow_policy_v3"]["by_edge_bucket"][0]["edge_bucket"], "8-12%")
+        self.assertEqual(report["shadow_policy_v4"]["candidate_snapshots"], 0)
 
     def test_daily_trade_summary_reports_no_trade_board(self) -> None:
         fake_row = _decision_row_from_ranked(
@@ -1418,6 +1480,32 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertIsNotNone(live["snapshots"]["decision_queue"])
         self.assertIsNotNone(live["snapshots"]["ranked_rows"])
         self.assertIsNotNone(research["reports"]["odds_warehouse"])
+
+    def test_dashboard_health_reports_pre_run_before_morning_pipeline_due(self) -> None:
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = datetime(2026, 7, 11, 9, 15, tzinfo=tz)
+                return value if tz else value.replace(tzinfo=None)
+
+        readiness = {
+            "total_games": 15,
+            "games": [{} for _ in range(15)],
+            "quota": {"provider_status": "OK"},
+            "integrity": {"clv_usable": 0},
+        }
+        with patch("app.routes.dashboard.datetime", FixedDateTime), \
+             patch("app.routes.dashboard._dashboard_today", return_value=date(2026, 7, 11)), \
+             patch("app.routes.dashboard.build_market_readiness_report", return_value=readiness), \
+             patch("app.routes.dashboard.get_slow_endpoint_events", return_value=[]):
+            health = dashboard_health(db=self.db)
+
+        statuses = {check["name"]: check["status"] for check in health["checks"]}
+        self.assertEqual(health["status"], "PRE-RUN")
+        self.assertEqual(statuses["Pregame CLV"], "PRE-RUN")
+        self.assertEqual(statuses["Decision Queue"], "PRE-RUN")
+        self.assertEqual(statuses["Research Snapshots"], "PRE-RUN")
+        self.assertEqual(health["summary"]["daily_pipeline_due_time"], "10:45 AM ET")
 
     def test_totals_bias_report_flags_supported_under_edge(self) -> None:
         self._totals_review_game(104, model_total=7.0, book_total=9.0, final_total=6, play="under", bet_result="win", pregame_total=8.5)

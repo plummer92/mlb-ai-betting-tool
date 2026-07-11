@@ -1,5 +1,5 @@
 from functools import lru_cache
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -20,6 +20,8 @@ router = APIRouter(tags=["dashboard"])
 ET = ZoneInfo("America/New_York")
 LIVE_RESEARCH_MAX_AGE_SECONDS = 30 * 60
 LIVE_RESEARCH_REPORTS = {"odds_warehouse", "totals_policy", "bullpen_today"}
+DAILY_PIPELINE_DUE_TIME = time(10, 45)
+RESEARCH_SNAPSHOT_DUE_TIME = time(11, 10)
 
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates"
 
@@ -135,12 +137,31 @@ def _health_status(checks: list[dict]) -> str:
         return "BROKEN"
     if any(check["status"] == "WARNING" for check in checks):
         return "WARNING"
+    if any(check["status"] == "PRE-RUN" for check in checks):
+        return "PRE-RUN"
     return "OK"
+
+
+def _before_time(now: datetime, due_time: time) -> bool:
+    return now.timetz().replace(tzinfo=None) < due_time
+
+
+def _due_label(due_time: time) -> str:
+    hour = due_time.hour
+    minute = due_time.minute
+    suffix = "AM" if hour < 12 else "PM"
+    display_hour = hour if 1 <= hour <= 12 else abs(hour - 12)
+    if display_hour == 0:
+        display_hour = 12
+    return f"{display_hour}:{minute:02d} {suffix} ET"
 
 
 @router.get("/api/dashboard/health")
 def dashboard_health(db: Session = Depends(get_db)):
     today = _dashboard_today()
+    now_et = datetime.now(ET)
+    before_pipeline_due = _before_time(now_et, DAILY_PIPELINE_DUE_TIME)
+    before_research_due = _before_time(now_et, RESEARCH_SNAPSHOT_DUE_TIME)
     readiness = build_market_readiness_report(db)
     quota = readiness.get("quota") or {}
     integrity = readiness.get("integrity") or {}
@@ -180,24 +201,39 @@ def dashboard_health(db: Session = Depends(get_db)):
         "detail": quota.get("latest_provider_message") or quota.get("quota_alert") or quota.get("provider_status") or "Provider OK",
     })
     clv_usable = integrity.get("clv_usable") or 0
+    clv_status = "OK" if total_games and clv_usable else ("WARNING" if total_games else "BROKEN")
+    clv_detail = f"{clv_usable}/{total_games} games CLV usable" if total_games else "No games loaded"
+    if total_games and not clv_usable and before_pipeline_due:
+        clv_status = "PRE-RUN"
+        clv_detail = f"Pregame CLV not due until {_due_label(DAILY_PIPELINE_DUE_TIME)}"
     checks.append({
         "name": "Pregame CLV",
-        "status": "OK" if total_games and clv_usable else ("WARNING" if total_games else "BROKEN"),
-        "detail": f"{clv_usable}/{total_games} games CLV usable" if total_games else "No games loaded",
+        "status": clv_status,
+        "detail": clv_detail,
     })
+    decision_status = "OK" if decision_age is not None and decision_age <= 3600 else ("WARNING" if decision_age is not None else "BROKEN")
+    decision_detail = f"Snapshot age {decision_age // 60}m" if decision_age is not None else "No decision snapshot"
+    if decision_age is None and before_pipeline_due:
+        decision_status = "PRE-RUN"
+        decision_detail = f"Decision snapshot not due until {_due_label(DAILY_PIPELINE_DUE_TIME)}"
     checks.append({
         "name": "Decision Queue",
-        "status": "OK" if decision_age is not None and decision_age <= 3600 else ("WARNING" if decision_age is not None else "BROKEN"),
-        "detail": f"Snapshot age {decision_age // 60}m" if decision_age is not None else "No decision snapshot",
+        "status": decision_status,
+        "detail": decision_detail,
     })
+    research_status = "OK" if not missing_live_research and live_research_age is not None else ("WARNING" if live_research_age is not None else "BROKEN")
+    research_detail = (
+        f"Live age {live_research_age // 60}m; historical oldest {oldest_research_age // 60}m"
+        if live_research_age is not None and oldest_research_age is not None
+        else f"Missing {len(missing_live_research)} live reports"
+    )
+    if missing_live_research and live_research_age is None and before_research_due:
+        research_status = "PRE-RUN"
+        research_detail = f"Live research snapshots not due until {_due_label(RESEARCH_SNAPSHOT_DUE_TIME)}"
     checks.append({
         "name": "Research Snapshots",
-        "status": "OK" if not missing_live_research and live_research_age is not None else ("WARNING" if live_research_age is not None else "BROKEN"),
-        "detail": (
-            f"Live age {live_research_age // 60}m; historical oldest {oldest_research_age // 60}m"
-            if live_research_age is not None and oldest_research_age is not None
-            else f"Missing {len(missing_live_research)} live reports"
-        ),
+        "status": research_status,
+        "detail": research_detail,
     })
     checks.append({
         "name": "Endpoint Speed",
@@ -212,6 +248,9 @@ def dashboard_health(db: Session = Depends(get_db)):
         "summary": {
             "total_games": total_games,
             "clv_usable": clv_usable,
+            "pre_run": before_pipeline_due,
+            "daily_pipeline_due_time": _due_label(DAILY_PIPELINE_DUE_TIME),
+            "research_snapshot_due_time": _due_label(RESEARCH_SNAPSHOT_DUE_TIME),
             "decision_snapshot_age_seconds": decision_age,
             "ranked_snapshot_age_seconds": _snapshot_age_seconds(ranked_snapshot),
             "live_research_snapshot_age_seconds": live_research_age,

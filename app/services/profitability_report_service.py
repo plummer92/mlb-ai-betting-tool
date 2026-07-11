@@ -12,6 +12,7 @@ from app.services.ev_math import american_to_decimal
 
 
 SHADOW_POLICY_V3_START_DATE = date(2026, 7, 7)
+SHADOW_POLICY_V4_MIN_EDGE = 0.12
 
 
 def _edge_bucket(edge_pct: float | None) -> str:
@@ -215,6 +216,22 @@ def is_shadow_policy_v3_candidate(snapshot: TradableDecisionSnapshot, payload: d
     return (snapshot.play or "").lower() == "under" and is_shadow_policy_v2_candidate(snapshot, payload)
 
 
+def is_shadow_policy_v4_candidate(snapshot: TradableDecisionSnapshot, payload: dict | None = None) -> bool:
+    payload = payload if payload is not None else _snapshot_payload(snapshot)
+    edge = float(snapshot.adjusted_edge_pct or payload.get("adjusted_edge_pct") or payload.get("raw_edge_pct") or 0)
+    score = snapshot.market_respect_score
+    if score is None:
+        adjustment = payload.get("market_respect_adjustment") or {}
+        if not isinstance(adjustment, dict):
+            adjustment = {}
+        score = payload.get("market_trust_score") or adjustment.get("score")
+    return (
+        is_shadow_policy_v3_candidate(snapshot, payload)
+        and edge >= SHADOW_POLICY_V4_MIN_EDGE
+        and _market_score_bucket(score) == "low-neutral"
+    )
+
+
 def _sorted_segment_list(grouped: dict, *, key_names: tuple[str, ...], min_sample: int) -> list[dict]:
     items = []
     for key, rows in grouped.items():
@@ -398,6 +415,31 @@ def _shadow_policy_v2_ledger(db: Session) -> dict:
 
 
 def _shadow_policy_v3_ledger(db: Session) -> dict:
+    return _shadow_policy_under_ledger(
+        db,
+        name="Shadow Policy V3",
+        description=(
+            "Forward/current-policy shadow: UNDER only, strong model, neutral market, no positive CLV, "
+            f"tracked from {SHADOW_POLICY_V3_START_DATE.isoformat()}. Shadow-only; never enables real trades."
+        ),
+        candidate_fn=is_shadow_policy_v3_candidate,
+    )
+
+
+def _shadow_policy_v4_ledger(db: Session) -> dict:
+    return _shadow_policy_under_ledger(
+        db,
+        name="Shadow Policy V4",
+        description=(
+            "Tighter forward shadow: UNDER only, strong model, low-neutral market score, no positive CLV, "
+            f"edge >= {SHADOW_POLICY_V4_MIN_EDGE:.0%}, tracked from {SHADOW_POLICY_V3_START_DATE.isoformat()}. "
+            "Shadow-only; never enables real trades."
+        ),
+        candidate_fn=is_shadow_policy_v4_candidate,
+    )
+
+
+def _shadow_policy_under_ledger(db: Session, *, name: str, description: str, candidate_fn) -> dict:
     review_by_edge = {
         review.edge_result_id: review
         for review in db.query(GameOutcomeReview)
@@ -413,7 +455,7 @@ def _shadow_policy_v3_ledger(db: Session) -> dict:
     rows = []
     for snapshot in snapshots:
         payload = _snapshot_payload(snapshot)
-        if not is_shadow_policy_v3_candidate(snapshot, payload):
+        if not candidate_fn(snapshot, payload):
             continue
         review = review_by_edge.get(snapshot.edge_result_id)
         result = review.bet_result if review else None
@@ -457,12 +499,10 @@ def _shadow_policy_v3_ledger(db: Session) -> dict:
 
     recent = rows[-25:]
     return {
-        "name": "Shadow Policy V3",
-        "description": (
-            "Forward/current-policy shadow: UNDER only, strong model, neutral market, no positive CLV, "
-            f"tracked from {SHADOW_POLICY_V3_START_DATE.isoformat()}. Shadow-only; never enables real trades."
-        ),
+        "name": name,
+        "description": description,
         "start_date": SHADOW_POLICY_V3_START_DATE.isoformat(),
+        "min_edge": SHADOW_POLICY_V4_MIN_EDGE if name.endswith("V4") else None,
         "candidate_snapshots": len(rows),
         "graded_candidates": len(graded_rows),
         "graded": _segment_stats(graded_rows),
@@ -586,5 +626,6 @@ def get_profitability_report(db: Session, *, min_sample: int = 5) -> dict:
         "forward_policy_ledger": _forward_policy_ledger(db),
         "shadow_policy_v2": _shadow_policy_v2_ledger(db),
         "shadow_policy_v3": _shadow_policy_v3_ledger(db),
+        "shadow_policy_v4": _shadow_policy_v4_ledger(db),
         "insights": insights,
     }

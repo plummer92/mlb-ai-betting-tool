@@ -941,7 +941,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <a class="quick-tab" href="#decision-queue-section">Action</a>
     <a class="quick-tab" href="#health-section">Health</a>
     <a class="quick-tab" href="#qualified-policy-section">Qualified</a>
-    <a class="quick-tab" href="#shadow-policy-section">Shadow V3</a>
+    <a class="quick-tab" href="#shadow-policy-section">Shadow V4</a>
     <a class="quick-tab" href="#today-read-section">Today</a>
     <a class="quick-tab" href="#odds-integrity-section">Odds Trust</a>
     <a class="quick-tab" href="#market-audit-section">Markets</a>
@@ -1036,7 +1036,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
 
   <div class="section" id="shadow-policy-section">
     <div class="section-head">
-      <div class="section-label">Shadow Policy V2 / V3</div>
+      <div class="section-label">Shadow Policy V2 / V3 / V4</div>
       <div class="section-rule"></div>
       <div class="section-badge" id="shadow-policy-badge">LOADING</div>
     </div>
@@ -1640,7 +1640,7 @@ function totalsPolicyMeter(policy) {
 }
 
 function healthStatusChip(status) {
-  const map = { OK: 'c-strong', WARNING: 'c-medium', BROKEN: 'c-loss' };
+  const map = { OK: 'c-strong', WARNING: 'c-medium', 'PRE-RUN': 'c-medium', BROKEN: 'c-loss' };
   return `<span class="chip ${map[status] || 'c-none'}">${esc(status || 'UNKNOWN')}</span>`;
 }
 
@@ -1650,9 +1650,9 @@ async function loadHealthScore() {
     const checks = data.checks || [];
     const summary = data.summary || {};
     $('health-badge').textContent = data.status || 'UNKNOWN';
-    const cls = data.status === 'OK' ? 'green' : data.status === 'WARNING' ? 'yellow' : 'red';
+    const cls = data.status === 'OK' ? 'green' : (data.status === 'WARNING' || data.status === 'PRE-RUN') ? 'yellow' : 'red';
     $('health-panel').innerHTML = `
-      <div class="summary-bar" style="border-left-color: ${data.status === 'OK' ? 'var(--green)' : data.status === 'WARNING' ? 'var(--yellow)' : 'var(--red)'}; background: var(--surface3);">
+      <div class="summary-bar" style="border-left-color: ${data.status === 'OK' ? 'var(--green)' : (data.status === 'WARNING' || data.status === 'PRE-RUN') ? 'var(--yellow)' : 'var(--red)'}; background: var(--surface3);">
         <div class="s-stat">
           <div class="s-stat-val ${cls}">${esc(data.status || 'UNKNOWN')}</div>
           <div class="s-stat-lbl">System Health</div>
@@ -1837,6 +1837,14 @@ function isShadowPolicyV3Row(row) {
   return isShadowPolicyV2Row(row) && String(row.play || '').toLowerCase() === 'under';
 }
 
+function isShadowPolicyV4Row(row) {
+  const edge = Number(row.adjusted_edge_pct ?? row.raw_edge_pct ?? 0);
+  const adjustment = row.market_respect_adjustment || {};
+  const score = row.market_trust_score ?? adjustment.score;
+  const lowNeutral = score != null && Number(score) >= 40 && Number(score) < 47;
+  return isShadowPolicyV3Row(row) && edge >= 0.12 && lowNeutral;
+}
+
 async function loadQualifiedPolicyToday() {
   try {
     const live = await loadDashboardLive();
@@ -1898,21 +1906,34 @@ async function loadShadowPolicyV2() {
     ]);
     const currentRows = (live.decision_queue || []).filter(isShadowPolicyV2Row);
     const currentV3Rows = (live.decision_queue || []).filter(isShadowPolicyV3Row);
+    const currentV4Rows = (live.decision_queue || []).filter(isShadowPolicyV4Row);
     let profitability = research?.reports?.profitability_report;
-    if (!profitability?.shadow_policy_v2 || !profitability?.shadow_policy_v3) {
+    if (!profitability?.shadow_policy_v2 || !profitability?.shadow_policy_v3 || !profitability?.shadow_policy_v4) {
       profitability = await fetchJsonWithTimeout('/api/reviews/profitability-report?min_sample=1', 'Profitability report', 10000);
     }
     const shadow = profitability.shadow_policy_v2 || {};
     const shadowV3 = profitability.shadow_policy_v3 || {};
+    const shadowV4 = profitability.shadow_policy_v4 || {};
     const graded = shadow.graded || {};
     const gradedV3 = shadowV3.graded || {};
+    const gradedV4 = shadowV4.graded || {};
     const winRate = graded.win_rate != null ? (graded.win_rate * 100).toFixed(1) + '%' : '---';
     const roi = graded.roi_per_bet != null ? fmt(graded.roi_per_bet, 3) : '---';
     const winRateV3 = gradedV3.win_rate != null ? (gradedV3.win_rate * 100).toFixed(1) + '%' : '---';
     const roiV3 = gradedV3.roi_per_bet != null ? fmt(gradedV3.roi_per_bet, 3) : '---';
-    $('shadow-policy-badge').textContent = `${currentV3Rows.length} V3 TODAY / ${gradedV3.total ?? 0} V3 GRADED`;
+    const winRateV4 = gradedV4.win_rate != null ? (gradedV4.win_rate * 100).toFixed(1) + '%' : '---';
+    const roiV4 = gradedV4.roi_per_bet != null ? fmt(gradedV4.roi_per_bet, 3) : '---';
+    $('shadow-policy-badge').textContent = `${currentV4Rows.length} V4 TODAY / ${gradedV4.total ?? 0} V4 GRADED`;
     $('shadow-policy-summary').innerHTML = `
       ${snapshotLine(profitability, 'Shadow ledger snapshot')}
+      <div class="summary-bar" style="border-left-color: var(--green); background: var(--surface3);">
+        <div class="s-stat"><div class="s-stat-val">${currentV4Rows.length}</div><div class="s-stat-lbl">V4 Today</div></div>
+        <div class="s-stat"><div class="s-stat-val">${shadowV4.candidate_snapshots ?? 0}</div><div class="s-stat-lbl">V4 Rows Since ${esc(shadowV4.start_date || 'Start')}</div></div>
+        <div class="s-stat"><div class="s-stat-val">${gradedV4.total ?? 0}</div><div class="s-stat-lbl">V4 Graded</div></div>
+        <div class="s-stat"><div class="s-stat-val">${gradedV4.wins ?? 0}-${gradedV4.losses ?? 0}-${gradedV4.pushes ?? 0}</div><div class="s-stat-lbl">V4 Record</div></div>
+        <div class="s-stat"><div class="s-stat-val ${gradedV4.win_rate >= 0.53 ? 'green' : gradedV4.win_rate >= 0.48 ? 'yellow' : 'red'}">${winRateV4}</div><div class="s-stat-lbl">V4 Win Rate</div></div>
+        <div class="s-stat"><div class="s-stat-val ${gradedV4.roi_per_bet > 0 ? 'green' : gradedV4.roi_per_bet < 0 ? 'red' : 'muted'}">${roiV4}</div><div class="s-stat-lbl">V4 ROI / Bet</div></div>
+      </div>
       <div class="summary-bar" style="border-left-color: var(--cyan); background: var(--surface3);">
         <div class="s-stat"><div class="s-stat-val">${currentV3Rows.length}</div><div class="s-stat-lbl">V3 Today</div></div>
         <div class="s-stat"><div class="s-stat-val">${shadowV3.candidate_snapshots ?? 0}</div><div class="s-stat-lbl">V3 Rows Since ${esc(shadowV3.start_date || 'Start')}</div></div>
@@ -1929,9 +1950,9 @@ async function loadShadowPolicyV2() {
         <div class="s-stat"><div class="s-stat-val ${graded.win_rate >= 0.53 ? 'green' : graded.win_rate >= 0.48 ? 'yellow' : 'red'}">${winRate}</div><div class="s-stat-lbl">Win Rate</div></div>
         <div class="s-stat"><div class="s-stat-val ${graded.roi_per_bet > 0 ? 'green' : graded.roi_per_bet < 0 ? 'red' : 'muted'}">${roi}</div><div class="s-stat-lbl">ROI / Bet</div></div>
       </div>
-      <div class="audit-note">${esc(shadowV3.description || shadow.description || 'Shadow-only candidates are tracked for research and never enable real trades.')}</div>`;
+      <div class="audit-note">${esc(shadowV4.description || shadowV3.description || shadow.description || 'Shadow-only candidates are tracked for research and never enable real trades.')}</div>`;
 
-    const currentHtml = currentV3Rows.map(r => `
+    const currentHtml = currentV4Rows.map(r => `
       <tr>
         <td style="font-weight:600;white-space:nowrap">${esc(r.game || r.matchup || '---')}</td>
         <td class="mono">${esc((r.play || '---').replace('_', ' ').toUpperCase())}</td>
@@ -1939,6 +1960,17 @@ async function loadShadowPolicyV2() {
         <td>${marketRespectChip(r.market_respect)}</td>
         <td>${decisionStatusChip(r.decision_status)}</td>
         <td style="min-width:280px;font-size:11px;color:var(--muted);line-height:1.45">${esc(r.tradable_reason || r.decision_reason || '')}</td>
+      </tr>
+    `).join('');
+    const recentV4Html = (shadowV4.recent || []).slice().reverse().slice(0, 12).map(r => `
+      <tr>
+        <td class="mono">${esc(r.game_date || '---')}</td>
+        <td style="font-weight:600;white-space:nowrap">${esc(r.matchup || '---')}</td>
+        <td class="mono">${esc((r.play || '---').replace('_', ' ').toUpperCase())}</td>
+        <td class="mono">${r.edge_pct != null ? (r.edge_pct * 100).toFixed(1) + '%' : '---'}</td>
+        <td class="mono">${esc(r.edge_bucket || '---')}</td>
+        <td class="mono">${r.market_respect_score ?? '---'} ${esc(r.market_score_bucket || r.market_respect_tag || '')}</td>
+        <td>${r.result ? `<span class="chip ${r.result === 'win' ? 'c-strong' : r.result === 'loss' ? 'c-loss' : 'c-medium'}">${esc(String(r.result).toUpperCase())}</span>` : '<span class="chip c-none">PENDING</span>'}</td>
       </tr>
     `).join('');
     const recentV3Html = (shadowV3.recent || []).slice().reverse().slice(0, 12).map(r => `
@@ -1964,8 +1996,20 @@ async function loadShadowPolicyV2() {
     `).join('');
     $('shadow-policy-table').innerHTML = `
       <table>
-        <thead><tr><th colspan="6">Today Shadow V3 Candidates</th></tr><tr><th>Game</th><th>Play</th><th>Edge</th><th>Market</th><th>Status</th><th>Why</th></tr></thead>
-        <tbody>${currentHtml || '<tr><td colspan="6"><div class="empty compact">No current Shadow V3 candidates on the live queue.</div></td></tr>'}</tbody>
+        <thead><tr><th colspan="6">Today Shadow V4 Candidates</th></tr><tr><th>Game</th><th>Play</th><th>Edge</th><th>Market</th><th>Status</th><th>Why</th></tr></thead>
+        <tbody>${currentHtml || '<tr><td colspan="6"><div class="empty compact">No current Shadow V4 candidates on the live queue.</div></td></tr>'}</tbody>
+      </table>
+      <table style="margin-top:14px;">
+        <thead><tr><th colspan="7">Recent Shadow V4 Ledger</th></tr><tr><th>Date</th><th>Game</th><th>Play</th><th>Edge</th><th>Bucket</th><th>Market</th><th>Result</th></tr></thead>
+        <tbody>${recentV4Html || '<tr><td colspan="7"><div class="empty compact">No Shadow V4 ledger rows yet.</div></td></tr>'}</tbody>
+      </table>
+      <table style="margin-top:14px;">
+        <thead><tr><th colspan="7">Shadow V4 By Edge Bucket</th></tr><tr><th>Segment</th><th>Bets</th><th>Record</th><th>Win Rate</th><th>ROI / Bet</th><th>Avg Edge</th><th>Avg EV</th></tr></thead>
+        <tbody>${segmentRows(shadowV4.by_edge_bucket, ['edge_bucket']) || '<tr><td colspan="7"><div class="empty compact">No graded V4 edge buckets yet.</div></td></tr>'}</tbody>
+      </table>
+      <table style="margin-top:14px;">
+        <thead><tr><th colspan="7">Shadow V4 By Market Score</th></tr><tr><th>Segment</th><th>Bets</th><th>Record</th><th>Win Rate</th><th>ROI / Bet</th><th>Avg Edge</th><th>Avg EV</th></tr></thead>
+        <tbody>${segmentRows(shadowV4.by_market_score_bucket, ['market_score_bucket']) || '<tr><td colspan="7"><div class="empty compact">No graded V4 market score buckets yet.</div></td></tr>'}</tbody>
       </table>
       <table style="margin-top:14px;">
         <thead><tr><th colspan="7">Recent Shadow V3 Ledger</th></tr><tr><th>Date</th><th>Game</th><th>Play</th><th>Edge</th><th>Bucket</th><th>Market</th><th>Result</th></tr></thead>
