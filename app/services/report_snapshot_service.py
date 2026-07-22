@@ -140,6 +140,7 @@ def _dashboard_report_builders(db: Session, target_date: date) -> dict[str, Call
         "paper_clv": lambda: get_clv_report(db, limit=25),
         "movement_report": lambda: get_movement_backtest_report(db, min_sample=1, limit=50),
         "profitability_report": lambda: get_profitability_report(db, min_sample=5),
+        "profitability_report_min1": lambda: get_profitability_report(db, min_sample=1),
         "bullpen_today": lambda: {"status": "ok", "reports": _build_bullpen_today(db, target_date)},
         "performance_summary": lambda: build_performance_summary(db),
     }

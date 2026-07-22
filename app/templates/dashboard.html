@@ -1907,7 +1907,7 @@ async function loadShadowPolicyV2() {
     const currentRows = (live.decision_queue || []).filter(isShadowPolicyV2Row);
     const currentV3Rows = (live.decision_queue || []).filter(isShadowPolicyV3Row);
     const currentV4Rows = (live.decision_queue || []).filter(isShadowPolicyV4Row);
-    let profitability = research?.reports?.profitability_report;
+    let profitability = research?.reports?.profitability_report_min1 || research?.reports?.profitability_report;
     if (!profitability?.shadow_policy_v2 || !profitability?.shadow_policy_v3 || !profitability?.shadow_policy_v4) {
       profitability = await fetchJsonWithTimeout('/api/reviews/profitability-report?min_sample=1', 'Profitability report', 10000);
     }

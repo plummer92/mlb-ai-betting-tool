@@ -98,6 +98,7 @@ def dashboard_research(db: Session = Depends(get_db)):
             "paper_clv",
             "movement_report",
             "profitability_report",
+            "profitability_report_min1",
             "bullpen_today",
             "performance_summary",
         )
@@ -165,12 +166,21 @@ def dashboard_health(db: Session = Depends(get_db)):
     readiness = build_market_readiness_report(db)
     quota = readiness.get("quota") or {}
     integrity = readiness.get("integrity") or {}
+    waiting_for_pregame_window = int(readiness.get("waiting_for_pregame_window") or 0)
     total_games = readiness.get("total_games") or len(readiness.get("games") or [])
     slow_events = get_slow_endpoint_events(limit=10)
 
     decision_snapshot = (get_report_snapshot(db, "decision_queue", report_date=today, max_age_seconds=None) or {}).get("snapshot")
     ranked_snapshot = (get_report_snapshot(db, "ranked_rows", report_date=today, max_age_seconds=None) or {}).get("snapshot")
-    research_names = ("odds_warehouse", "totals_policy", "paper_clv", "movement_report", "profitability_report", "bullpen_today")
+    research_names = (
+        "odds_warehouse",
+        "totals_policy",
+        "paper_clv",
+        "movement_report",
+        "profitability_report",
+        "profitability_report_min1",
+        "bullpen_today",
+    )
     live_research_names = tuple(sorted(LIVE_RESEARCH_REPORTS))
     historical_research_names = tuple(name for name in research_names if name not in LIVE_RESEARCH_REPORTS)
     live_research_snapshots = {
@@ -206,6 +216,12 @@ def dashboard_health(db: Session = Depends(get_db)):
     if total_games and not clv_usable and before_pipeline_due:
         clv_status = "PRE-RUN"
         clv_detail = f"Pregame CLV not due until {_due_label(DAILY_PIPELINE_DUE_TIME)}"
+    elif total_games and not clv_usable and waiting_for_pregame_window == total_games:
+        clv_status = "PRE-RUN"
+        clv_detail = f"Pregame CLV windows not due yet; {waiting_for_pregame_window}/{total_games} games waiting"
+    elif total_games and waiting_for_pregame_window and not clv_usable:
+        clv_status = "WARNING"
+        clv_detail = f"0/{total_games} games CLV usable; {waiting_for_pregame_window} still waiting for pregame windows"
     checks.append({
         "name": "Pregame CLV",
         "status": clv_status,
@@ -248,6 +264,7 @@ def dashboard_health(db: Session = Depends(get_db)):
         "summary": {
             "total_games": total_games,
             "clv_usable": clv_usable,
+            "waiting_for_pregame_window": waiting_for_pregame_window,
             "pre_run": before_pipeline_due,
             "daily_pipeline_due_time": _due_label(DAILY_PIPELINE_DUE_TIME),
             "research_snapshot_due_time": _due_label(RESEARCH_SNAPSHOT_DUE_TIME),

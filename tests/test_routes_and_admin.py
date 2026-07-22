@@ -334,6 +334,25 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertTrue(any(row["month"] == game.game_date.strftime("%Y-%m") for row in report["by_month"]))
         self.assertIn("forward_policy_ledger", report)
 
+    def test_profitability_report_min_sample_one_uses_cached_snapshot(self) -> None:
+        self.db.add(
+            ReportSnapshot(
+                report_name="profitability_report_min1",
+                report_date=date.today(),
+                generated_at=datetime.now(timezone.utc),
+                status="ok",
+                runtime_ms=9,
+                payload_json='{"status":"ok","cached":true,"summary":{"total":123}}',
+            )
+        )
+        self.db.commit()
+
+        report = profitability_report(db=self.db, min_sample=1)
+
+        self.assertTrue(report["cached"])
+        self.assertEqual(report["summary"]["total"], 123)
+        self.assertEqual(report["snapshot"]["report_name"], "profitability_report_min1")
+
     def test_betting_policy_tightens_high_edge_tails(self) -> None:
         self.assertTrue(
             qualifies_for_bet_policy(
@@ -1506,6 +1525,55 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(statuses["Decision Queue"], "PRE-RUN")
         self.assertEqual(statuses["Research Snapshots"], "PRE-RUN")
         self.assertEqual(health["summary"]["daily_pipeline_due_time"], "10:45 AM ET")
+
+    def test_dashboard_health_reports_pre_run_when_all_games_wait_for_pregame_windows(self) -> None:
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = datetime(2026, 7, 22, 11, 30, tzinfo=tz)
+                return value if tz else value.replace(tzinfo=None)
+
+        readiness = {
+            "total_games": 15,
+            "games": [{} for _ in range(15)],
+            "waiting_for_pregame_window": 15,
+            "quota": {"provider_status": "OK"},
+            "integrity": {"clv_usable": 0},
+        }
+        generated_at = datetime(2026, 7, 22, 15, 25, tzinfo=timezone.utc)
+        for report_name in (
+            "decision_queue",
+            "ranked_rows",
+            "odds_warehouse",
+            "totals_policy",
+            "paper_clv",
+            "movement_report",
+            "profitability_report",
+            "profitability_report_min1",
+            "bullpen_today",
+        ):
+            self.db.add(
+                ReportSnapshot(
+                    report_name=report_name,
+                    report_date=date(2026, 7, 22),
+                    generated_at=generated_at,
+                    status="ok",
+                    runtime_ms=10,
+                    payload_json='{"status":"ok"}',
+                )
+            )
+        self.db.commit()
+        with patch("app.routes.dashboard.datetime", FixedDateTime), \
+             patch("app.routes.dashboard._dashboard_today", return_value=date(2026, 7, 22)), \
+             patch("app.routes.dashboard.build_market_readiness_report", return_value=readiness), \
+             patch("app.routes.dashboard.get_slow_endpoint_events", return_value=[]):
+            health = dashboard_health(db=self.db)
+
+        clv_check = next(check for check in health["checks"] if check["name"] == "Pregame CLV")
+        self.assertEqual(health["status"], "PRE-RUN")
+        self.assertEqual(clv_check["status"], "PRE-RUN")
+        self.assertIn("15/15 games waiting", clv_check["detail"])
+        self.assertEqual(health["summary"]["waiting_for_pregame_window"], 15)
 
     def test_totals_bias_report_flags_supported_under_edge(self) -> None:
         self._totals_review_game(104, model_total=7.0, book_total=9.0, final_total=6, play="under", bet_result="win", pregame_total=8.5)
