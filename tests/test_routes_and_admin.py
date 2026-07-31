@@ -666,6 +666,7 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(report["shadow_policy_v4"]["candidate_snapshots"], 1)
         self.assertEqual(report["shadow_policy_v4"]["graded_candidates"], 1)
         self.assertEqual(report["shadow_policy_v4"]["min_edge"], 0.12)
+        self.assertEqual(report["shadow_policy_v5"]["candidate_snapshots"], 0)
         self.assertEqual(report["forward_policy_ledger"]["would_have_bet"], 0)
 
     def test_shadow_policy_v4_excludes_weak_under_bucket(self) -> None:
@@ -726,6 +727,75 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertEqual(report["shadow_policy_v3"]["candidate_snapshots"], 1)
         self.assertEqual(report["shadow_policy_v3"]["by_edge_bucket"][0]["edge_bucket"], "8-12%")
         self.assertEqual(report["shadow_policy_v4"]["candidate_snapshots"], 0)
+        self.assertEqual(report["shadow_policy_v5"]["candidate_snapshots"], 0)
+
+    def test_shadow_policy_v5_tracks_mid_edge_under_bucket_only(self) -> None:
+        cases = [
+            (301, 0.179, "loss"),
+            (302, 0.18, "win"),
+            (303, 0.249, "win"),
+            (304, 0.25, "loss"),
+        ]
+        for game_id, edge_pct, result in cases:
+            game = self._game(game_id, game_date=date(2026, 7, 8))
+            prediction = self._prediction(game.game_id)
+            fake_row = _decision_row_from_ranked(
+                self._decision_base_row(
+                    game_id=game.game_id,
+                    edge_result_id=game_id,
+                    prediction_id=prediction.prediction_id,
+                    game_date=game.game_date.isoformat(),
+                    matchup=f"Away {game_id} @ Home {game_id}",
+                    play="under",
+                    adjusted_edge_pct=edge_pct,
+                    market_respect_score=44,
+                    market_respect_tags=["MARKET NEUTRAL"],
+                    market_trust_bucket="mixed_market",
+                    market_respect={"score": 44, "tags": ["MARKET NEUTRAL"], "components": {}},
+                    market_respect_adjustment={
+                        "score": 44,
+                        "bucket": "mixed_market",
+                        "score_bucket": "mixed_market",
+                        "tags": ["MARKET NEUTRAL"],
+                        "raw_edge_pct": edge_pct,
+                        "raw_ev": 0.25,
+                        "adjusted_ev": 0.25,
+                        "adjusted_confidence": "strong",
+                        "explanation": "market neutral",
+                    },
+                )
+            )
+            with patch("app.services.decision_journal_service._build_decision_queue", return_value=[fake_row]):
+                persist_tradable_decisions(db=self.db, active_only=False)
+            self.db.add(
+                GameOutcomeReview(
+                    game_id=game.game_id,
+                    prediction_id=prediction.prediction_id,
+                    edge_result_id=game_id,
+                    game_date=game.game_date,
+                    actual_outcome_summary="summary",
+                    recommended_play="under",
+                    confidence_tier="strong",
+                    edge_pct=edge_pct,
+                    ev=0.25,
+                    final_away_score=2,
+                    final_home_score=3,
+                    winning_side="home",
+                    bet_result=result,
+                    was_model_correct=result == "win",
+                )
+            )
+        self.db.commit()
+
+        report = profitability_report(db=self.db, min_sample=1)
+
+        self.assertEqual(report["shadow_policy_v4"]["candidate_snapshots"], 4)
+        self.assertEqual(report["shadow_policy_v5"]["candidate_snapshots"], 2)
+        self.assertEqual(report["shadow_policy_v5"]["graded_candidates"], 2)
+        self.assertEqual(report["shadow_policy_v5"]["graded"]["wins"], 2)
+        self.assertEqual(report["shadow_policy_v5"]["min_edge"], 0.18)
+        self.assertEqual(report["shadow_policy_v5"]["max_edge"], 0.25)
+        self.assertEqual(report["shadow_policy_v5"]["by_edge_bucket"][0]["edge_bucket"], "18-25%")
 
     def test_daily_trade_summary_reports_no_trade_board(self) -> None:
         fake_row = _decision_row_from_ranked(
@@ -1540,7 +1610,7 @@ class RouteAndAdminTests(unittest.TestCase):
             "quota": {"provider_status": "OK"},
             "integrity": {"clv_usable": 0},
         }
-        generated_at = datetime(2026, 7, 22, 15, 25, tzinfo=timezone.utc)
+        generated_at = datetime.now(timezone.utc)
         for report_name in (
             "decision_queue",
             "ranked_rows",
