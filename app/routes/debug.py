@@ -19,6 +19,7 @@ from app.middleware.limiter import limiter
 from app.models.schema import EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, OddsApiRequestLog, Prediction, SnapshotType
 from app.scheduler import scheduler
 from app.services.betting_policy import get_betting_profile, qualifies_for_bet_policy
+from app.services.betmgm_public_odds_service import probe_betmgm_public_odds
 from app.services.edge_service import (
     TOTAL_STD_DEV,
     calculate_all_edges_today,
@@ -113,6 +114,25 @@ def sharp_move_grade_debug(
     db: Session = Depends(get_db),
 ):
     return get_sharp_move_grade_report(db=db, min_sample=min_sample)
+
+
+@router.get("/betmgm-public-odds-probe")
+async def betmgm_public_odds_probe_debug(
+    render: bool = Query(False),
+    sample_limit: int = Query(10, ge=1, le=50),
+):
+    payload = await probe_betmgm_public_odds(render=render)
+    events = payload.get("events") or []
+    payload["sample_limit"] = sample_limit
+    payload["events"] = events[:sample_limit]
+    payload["total_events_before_limit"] = len(events)
+    payload["write_mode"] = "disabled"
+    payload["use_for_betting"] = False
+    payload["guardrail"] = (
+        "Public BetMGM scout only: no login, no bet slip, no database writes, "
+        "and no betting decisions until this feed proves stable."
+    )
+    return payload
 
 
 @router.get("/jobs", dependencies=[Depends(verify_api_key)])

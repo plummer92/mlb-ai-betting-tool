@@ -29,6 +29,7 @@ from app.routes.ranked import _build_ranked_rows, _decision_row_from_ranked
 from app.routes.reviews import get_review_summary, profitability_report
 from app.scheduler import _recent_pregame_board_rows, schedule_pregame_jobs_for_today
 from app.services.betting_policy import qualifies_for_bet_policy
+from app.services.betmgm_public_odds_service import decimal_to_american, parse_betmgm_public_page_text
 from app.services.decision_journal_service import build_daily_trade_summary, persist_tradable_decisions
 from app.services.edge_service import clear_edge_persistence_failures
 from app.services.sharp_move_journal_service import build_sharp_move_rows, get_sharp_move_grade_report, persist_sharp_move_journal
@@ -2022,6 +2023,68 @@ class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0].id, old_id)
         self.assertEqual(rows[1].accuracy, 0.57)
+
+    def test_betmgm_public_decimal_to_american(self) -> None:
+        self.assertEqual(decimal_to_american(1.80), -125)
+        self.assertEqual(decimal_to_american(2.05), 105)
+        self.assertEqual(decimal_to_american(1.91), -110)
+        self.assertIsNone(decimal_to_american(1.0))
+
+    def test_betmgm_public_page_text_parser_extracts_visible_game_lines(self) -> None:
+        sample = """
+        MLB betting
+        Game lines
+        Starting in 26 min
+        Spread
+        Total
+        Money
+        Pirates P. Skenes Reds H. Greene
+        -1.5 2.35
+        +1.5 1.60
+        O 8 1.95
+        U 8 1.87
+        1.80
+        2.05
+        All Wagers
+        Today - 11:05 PM
+        Spread
+        Total
+        Money
+        Phillies A. Painter Orioles B. Young
+        -1.5 2.54
+        +1.5 1.53
+        O 9 2.00
+        U 9 1.83
+        1.91
+        1.91
+        All Wagers
+        """
+
+        payload = parse_betmgm_public_page_text(sample)
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["events_count"], 2)
+        first = payload["events"][0]
+        self.assertEqual(first["away_team_hint"], "Pittsburgh Pirates")
+        self.assertEqual(first["home_team_hint"], "Cincinnati Reds")
+        self.assertEqual(first["away_ml"], -125)
+        self.assertEqual(first["home_ml"], 105)
+        self.assertEqual(first["total_line"], 8.0)
+        self.assertEqual(first["over_odds"], -105)
+        self.assertEqual(first["under_odds"], -115)
+        self.assertTrue(first["complete_h2h"])
+        self.assertTrue(first["complete_total"])
+
+    def test_betmgm_public_parser_ignores_explainer_copy(self) -> None:
+        sample = """
+        If you placed a bet on Tigers and Reds props, this paragraph has team names.
+        There is no market grid or All Wagers marker here.
+        """
+
+        payload = parse_betmgm_public_page_text(sample)
+
+        self.assertEqual(payload["status"], "no_public_odds_found")
+        self.assertEqual(payload["events_count"], 0)
 
 
 if __name__ == "__main__":
