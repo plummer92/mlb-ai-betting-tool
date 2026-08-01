@@ -118,10 +118,16 @@ def sharp_move_grade_debug(
 
 @router.get("/betmgm-public-odds-probe")
 async def betmgm_public_odds_probe_debug(
+    use_cds: bool = Query(True),
     render: bool = Query(False),
+    fixture_limit: int = Query(15, ge=1, le=30),
     sample_limit: int = Query(10, ge=1, le=50),
 ):
-    payload = await probe_betmgm_public_odds(render=render)
+    payload = await probe_betmgm_public_odds(
+        use_cds=use_cds,
+        render=render,
+        fixture_limit=fixture_limit,
+    )
     events = payload.get("events") or []
     payload["sample_limit"] = sample_limit
     payload["events"] = events[:sample_limit]

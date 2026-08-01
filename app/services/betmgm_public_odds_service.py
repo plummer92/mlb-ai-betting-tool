@@ -3,11 +3,16 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote, urlsplit
 
 import httpx
 
 BETMGM_PUBLIC_MLB_URL = "https://www.betmgm.com/en/sports/baseball-23/betting/usa-9/mlb-75"
 BETMGM_PUBLIC_SPORTSBOOK = "betmgm_public"
+BETMGM_BASEBALL_SPORT_ID = 23
+BETMGM_MLB_COMPETITION_ID = 75
+BETMGM_PUBLIC_ACCESS_ID_FALLBACK = "ZTg4YWEwMTgtZTlhYy00MWRkLWIzYWYtZjMzODI5ZDE0Mjc5"
+BETMGM_CDS_API_URL_FALLBACK = "https://cf-us3-cds-api.itsfogo.com"
 
 _PUBLIC_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -113,9 +118,24 @@ def parse_betmgm_public_page_text(text: str, *, source_url: str = BETMGM_PUBLIC_
     }
 
 
-async def probe_betmgm_public_odds(*, render: bool = False, timeout_seconds: float = 18.0) -> dict[str, Any]:
+async def probe_betmgm_public_odds(
+    *,
+    render: bool = False,
+    use_cds: bool = True,
+    fixture_limit: int = 15,
+    timeout_seconds: float = 18.0,
+) -> dict[str, Any]:
+    if use_cds:
+        cds_payload = await _probe_public_cds_odds(
+            fixture_limit=fixture_limit,
+            timeout_seconds=timeout_seconds,
+        )
+        if cds_payload.get("events_count", 0) > 0 or cds_payload.get("status") not in {"cds_error", "cds_no_fixtures"}:
+            return cds_payload
+
     static_result = await _fetch_static_page_text(timeout_seconds=timeout_seconds)
     static_payload = parse_betmgm_public_page_text(static_result.get("text") or "")
+    static_payload["source_mode"] = "static_page"
     static_payload["static_fetch"] = {
         key: value for key, value in static_result.items() if key != "text"
     }
@@ -129,6 +149,7 @@ async def probe_betmgm_public_odds(*, render: bool = False, timeout_seconds: flo
 
     rendered_result = await _fetch_rendered_page_text(timeout_seconds=timeout_seconds)
     rendered_payload = parse_betmgm_public_page_text(rendered_result.get("text") or "")
+    rendered_payload["source_mode"] = "rendered_page"
     rendered_payload["static_fetch"] = {
         key: value for key, value in static_result.items() if key != "text"
     }
@@ -140,6 +161,347 @@ async def probe_betmgm_public_odds(*, render: bool = False, timeout_seconds: flo
         if rendered_result.get("error"):
             rendered_payload["warnings"].append(str(rendered_result["error"]))
     return rendered_payload
+
+
+async def _probe_public_cds_odds(*, fixture_limit: int, timeout_seconds: float) -> dict[str, Any]:
+    warnings: list[str] = []
+    async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True) as client:
+        config = await _fetch_public_cds_config(client)
+        if config.get("status") != "ok":
+            warnings.append(str(config.get("error") or "Unable to load public BetMGM client config."))
+        access_id = config.get("public_access_id") or BETMGM_PUBLIC_ACCESS_ID_FALLBACK
+        cds_api_url = (config.get("cds_api_url") or BETMGM_CDS_API_URL_FALLBACK).rstrip("/")
+        fixtures_result = await _fetch_public_mlb_fixture_list(
+            client,
+            cds_api_url=cds_api_url,
+            access_id=access_id,
+        )
+        if fixtures_result.get("status") != "ok":
+            return _cds_payload(
+                status="cds_error",
+                events=[],
+                config=config,
+                fixtures_result=fixtures_result,
+                warnings=warnings + [str(fixtures_result.get("error") or "Unable to load public MLB fixtures.")],
+            )
+
+        fixtures = [
+            fixture for fixture in fixtures_result.get("fixtures", [])
+            if _is_matchup_fixture(fixture)
+        ]
+        if not fixtures:
+            return _cds_payload(
+                status="cds_no_fixtures",
+                events=[],
+                config=config,
+                fixtures_result=fixtures_result,
+                warnings=warnings + ["Public CDS returned no MLB matchup fixtures."],
+            )
+
+        events: list[dict[str, Any]] = []
+        fixture_errors: list[dict[str, Any]] = []
+        for fixture in fixtures[:fixture_limit]:
+            view = await _fetch_public_fixture_view(
+                client,
+                cds_api_url=cds_api_url,
+                access_id=access_id,
+                fixture_id=str(fixture.get("id")),
+            )
+            if view.get("status") != "ok":
+                fixture_errors.append({
+                    "fixture_id": fixture.get("id"),
+                    "game": _value_name(fixture),
+                    "error": view.get("error"),
+                    "http_status": view.get("http_status"),
+                })
+                continue
+            event = _parse_fixture_view_odds(view.get("fixture") or fixture)
+            if event.get("has_any_market"):
+                events.append(event)
+            else:
+                fixture_errors.append({
+                    "fixture_id": fixture.get("id"),
+                    "game": _value_name(fixture),
+                    "error": "No complete moneyline or totals markets in fixture-view.",
+                })
+
+    if fixture_errors:
+        warnings.append(f"{len(fixture_errors)} fixture views did not produce usable odds.")
+
+    return _cds_payload(
+        status="ok" if events else "cds_no_public_odds_found",
+        events=events,
+        config=config,
+        fixtures_result={
+            key: value for key, value in fixtures_result.items()
+            if key != "fixtures"
+        } | {
+            "matchup_fixtures": len(fixtures),
+            "fixture_limit": fixture_limit,
+            "fixture_errors": fixture_errors[:10],
+        },
+        warnings=warnings,
+    )
+
+
+async def _fetch_public_cds_config(client: httpx.AsyncClient) -> dict[str, Any]:
+    headers = {"User-Agent": _PUBLIC_USER_AGENT, "Accept": "text/html,application/xhtml+xml"}
+    try:
+        page = await client.get(BETMGM_PUBLIC_MLB_URL, headers=headers)
+        final_url = str(page.url)
+        parts = urlsplit(final_url)
+        if not parts.netloc:
+            raise RuntimeError("BetMGM page did not return a usable final host.")
+        browser_url = final_url.replace("https://", "http://", 1)
+        encoded_browser_url = quote(browser_url, safe="")
+        config_url = f"https://{parts.netloc}/en/api/clientconfig"
+        config_headers = {
+            "User-Agent": _PUBLIC_USER_AGENT,
+            "Accept": "application/json",
+            "x-bwin-browser-url": encoded_browser_url,
+            "x-from-product": "host-app",
+            "x-bwin-sports-api": "prod",
+        }
+        response = await client.get(
+            config_url,
+            params={"browserUrl": browser_url, "x-from-product": "host-app"},
+            headers=config_headers,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        connection = payload.get("msConnection") or {}
+        sports_version = payload.get("msSportsApiVersion") or {}
+        return {
+            "status": "ok",
+            "final_page_url": final_url,
+            "config_url": str(response.url),
+            "public_access_id": connection.get("publicAccessId"),
+            "cds_api_url": connection.get("cdsApiUrl"),
+            "sports_api_version": sports_version.get("sportsApiVersion"),
+            "sports_api_version_header": sports_version.get("sportsApiVersionHeaderName"),
+        }
+    except Exception as exc:
+        return {"status": "error", "error": _compact_error(exc)}
+
+
+async def _fetch_public_mlb_fixture_list(
+    client: httpx.AsyncClient,
+    *,
+    cds_api_url: str,
+    access_id: str,
+) -> dict[str, Any]:
+    url = f"{cds_api_url}/bettingoffer/fixtures"
+    try:
+        response = await client.get(url, params=_cds_params(access_id), headers=_cds_headers())
+        response.raise_for_status()
+        payload = response.json()
+        fixtures = payload.get("fixtures") or []
+        return {
+            "status": "ok",
+            "url": str(response.url),
+            "http_status": response.status_code,
+            "total_count": payload.get("totalCount"),
+            "fixtures_count": len(fixtures),
+            "fixtures": fixtures,
+        }
+    except Exception as exc:
+        return {"status": "error", "url": url, "error": _compact_error(exc)}
+
+
+async def _fetch_public_fixture_view(
+    client: httpx.AsyncClient,
+    *,
+    cds_api_url: str,
+    access_id: str,
+    fixture_id: str,
+) -> dict[str, Any]:
+    url = f"{cds_api_url}/bettingoffer/fixture-view"
+    params = _cds_params(access_id) | {
+        "fixtureIds": fixture_id,
+        "offerMapping": "All",
+        "scoreboardMode": "Full",
+    }
+    try:
+        response = await client.get(url, params=params, headers=_cds_headers())
+        response.raise_for_status()
+        payload = response.json()
+        return {
+            "status": "ok",
+            "url": str(response.url),
+            "http_status": response.status_code,
+            "fixture": payload.get("fixture") or {},
+        }
+    except Exception as exc:
+        return {"status": "error", "url": url, "error": _compact_error(exc)}
+
+
+def _cds_params(access_id: str) -> dict[str, Any]:
+    return {
+        "x-bwin-accessid": access_id,
+        "lang": "en-us",
+        "country": "US",
+        "usercountry": "US",
+        "state": "Latest",
+        "sportIds": BETMGM_BASEBALL_SPORT_ID,
+        "competitionIds": BETMGM_MLB_COMPETITION_ID,
+    }
+
+
+def _cds_headers() -> dict[str, str]:
+    return {
+        "User-Agent": _PUBLIC_USER_AGENT,
+        "Accept": "application/json",
+        "Origin": "https://www.il.betmgm.com",
+        "Referer": BETMGM_PUBLIC_MLB_URL,
+        "Sports-Api-Version": "SportsAPIv2",
+    }
+
+
+def _cds_payload(
+    *,
+    status: str,
+    events: list[dict[str, Any]],
+    config: dict[str, Any],
+    fixtures_result: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "provider": BETMGM_PUBLIC_SPORTSBOOK,
+        "source_mode": "public_cds",
+        "source_url": BETMGM_PUBLIC_MLB_URL,
+        "parsed_at": datetime.now(timezone.utc).isoformat(),
+        "events_count": len(events),
+        "events": events,
+        "warnings": warnings[:25],
+        "public_cds": {
+            "config": config,
+            "fixtures": fixtures_result,
+        },
+    }
+
+
+def _is_matchup_fixture(fixture: dict[str, Any]) -> bool:
+    participants = fixture.get("participants") or []
+    name = _value_name(fixture)
+    return (
+        len(participants) >= 2
+        and " at " in name.lower()
+        and (fixture.get("sport") or {}).get("id") == BETMGM_BASEBALL_SPORT_ID
+        and ((fixture.get("competition") or {}).get("id") == BETMGM_MLB_COMPETITION_ID)
+    )
+
+
+def _parse_fixture_view_odds(fixture: dict[str, Any]) -> dict[str, Any]:
+    away_team, home_team = _split_matchup(_value_name(fixture))
+    event: dict[str, Any] = {
+        "sportsbook": BETMGM_PUBLIC_SPORTSBOOK,
+        "fixture_id": str(fixture.get("id")) if fixture.get("id") is not None else None,
+        "away_team_hint": away_team,
+        "home_team_hint": home_team,
+        "event_label": _value_name(fixture),
+        "commence_time": fixture.get("startDate"),
+        "source_url": BETMGM_PUBLIC_MLB_URL,
+        "market_format": "public_cds",
+        "away_ml": None,
+        "home_ml": None,
+        "total_line": None,
+        "over_odds": None,
+        "under_odds": None,
+        "spread_rows": [],
+    }
+
+    for market in fixture.get("optionMarkets") or []:
+        market_name = _value_name(market).lower()
+        if market_name == "moneyline":
+            _parse_cds_moneyline(event, market)
+        elif market_name == "totals":
+            _parse_cds_totals(event, market)
+        elif "run line" in market_name:
+            _parse_cds_spread(event, market)
+
+    event["has_any_market"] = any(
+        event.get(key) is not None
+        for key in ("away_ml", "home_ml", "total_line", "over_odds", "under_odds")
+    )
+    event["complete_h2h"] = event.get("away_ml") is not None and event.get("home_ml") is not None
+    event["complete_total"] = (
+        event.get("total_line") is not None
+        and event.get("over_odds") is not None
+        and event.get("under_odds") is not None
+    )
+    return event
+
+
+def _parse_cds_moneyline(event: dict[str, Any], market: dict[str, Any]) -> None:
+    for option in market.get("options") or []:
+        source = _nested_value(option, "sourceName").strip()
+        american = _cds_american_odds(option)
+        if source == "1":
+            event["away_ml"] = american
+        elif source == "2":
+            event["home_ml"] = american
+
+
+def _parse_cds_totals(event: dict[str, Any], market: dict[str, Any]) -> None:
+    for option in market.get("options") or []:
+        name = _value_name(option)
+        american = _cds_american_odds(option)
+        line = _line_from_option_name(name)
+        if line is not None:
+            event["total_line"] = line
+        if name.lower().startswith("over"):
+            event["over_odds"] = american
+        elif name.lower().startswith("under"):
+            event["under_odds"] = american
+
+
+def _parse_cds_spread(event: dict[str, Any], market: dict[str, Any]) -> None:
+    spreads = event.setdefault("spread_rows", [])
+    for option in market.get("options") or []:
+        name = _value_name(option)
+        line = _line_from_option_name(name)
+        if line is None:
+            continue
+        spreads.append({
+            "name": name,
+            "point": line,
+            "american_odds": _cds_american_odds(option),
+        })
+
+
+def _cds_american_odds(option: dict[str, Any]) -> int | None:
+    price = option.get("price") or {}
+    american = price.get("americanOdds")
+    if american is not None:
+        try:
+            return int(american)
+        except (TypeError, ValueError):
+            pass
+    return decimal_to_american(_to_float(price.get("odds")))
+
+
+def _line_from_option_name(name: str) -> float | None:
+    match = re.search(r"([+-]?\d+(?:\.\d+)?)\s*$", name or "")
+    return _to_float(match.group(1)) if match else None
+
+
+def _value_name(row: dict[str, Any]) -> str:
+    return _nested_value(row, "name")
+
+
+def _nested_value(row: dict[str, Any], key: str) -> str:
+    value = row.get(key)
+    if isinstance(value, dict):
+        return str(value.get("value") or "")
+    return str(value or "")
+
+
+def _split_matchup(name: str) -> tuple[str | None, str | None]:
+    parts = re.split(r"\s+at\s+", name or "", maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) != 2:
+        return None, None
+    return parts[0].strip(), parts[1].strip()
 
 
 async def _fetch_static_page_text(*, timeout_seconds: float) -> dict[str, Any]:

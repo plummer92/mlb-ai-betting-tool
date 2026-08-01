@@ -30,6 +30,7 @@ from app.routes.reviews import get_review_summary, profitability_report
 from app.scheduler import _recent_pregame_board_rows, schedule_pregame_jobs_for_today
 from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.betmgm_public_odds_service import decimal_to_american, parse_betmgm_public_page_text
+from app.services.betmgm_public_odds_service import _parse_fixture_view_odds
 from app.services.decision_journal_service import build_daily_trade_summary, persist_tradable_decisions
 from app.services.edge_service import clear_edge_persistence_failures
 from app.services.sharp_move_journal_service import build_sharp_move_rows, get_sharp_move_grade_report, persist_sharp_move_journal
@@ -2085,6 +2086,60 @@ class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(payload["status"], "no_public_odds_found")
         self.assertEqual(payload["events_count"], 0)
+
+    def test_betmgm_public_cds_fixture_parser_extracts_moneyline_and_total(self) -> None:
+        fixture = {
+            "id": "19829087",
+            "name": {"value": "Pittsburgh Pirates at Cincinnati Reds"},
+            "startDate": "2026-08-01T22:40:00Z",
+            "sport": {"id": 23},
+            "competition": {"id": 75},
+            "optionMarkets": [
+                {
+                    "name": {"value": "Moneyline"},
+                    "options": [
+                        {
+                            "name": {"value": "Pirates"},
+                            "sourceName": {"value": "1"},
+                            "price": {"odds": 1.8, "americanOdds": -125},
+                        },
+                        {
+                            "name": {"value": "Reds"},
+                            "sourceName": {"value": "2"},
+                            "price": {"odds": 2.05, "americanOdds": 105},
+                        },
+                    ],
+                },
+                {
+                    "name": {"value": "Totals"},
+                    "options": [
+                        {"name": {"value": "Over 8.5"}, "price": {"odds": 1.95, "americanOdds": -105}},
+                        {"name": {"value": "Under 8.5"}, "price": {"odds": 1.87, "americanOdds": -115}},
+                    ],
+                },
+                {
+                    "name": {"value": "Run Line Spread"},
+                    "options": [
+                        {"name": {"value": "Pittsburgh Pirates -1.5"}, "price": {"americanOdds": 135}},
+                        {"name": {"value": "Cincinnati Reds +1.5"}, "price": {"americanOdds": -165}},
+                    ],
+                },
+            ],
+        }
+
+        parsed = _parse_fixture_view_odds(fixture)
+
+        self.assertEqual(parsed["fixture_id"], "19829087")
+        self.assertEqual(parsed["away_team_hint"], "Pittsburgh Pirates")
+        self.assertEqual(parsed["home_team_hint"], "Cincinnati Reds")
+        self.assertEqual(parsed["away_ml"], -125)
+        self.assertEqual(parsed["home_ml"], 105)
+        self.assertEqual(parsed["total_line"], 8.5)
+        self.assertEqual(parsed["over_odds"], -105)
+        self.assertEqual(parsed["under_odds"], -115)
+        self.assertTrue(parsed["complete_h2h"])
+        self.assertTrue(parsed["complete_total"])
+        self.assertEqual(len(parsed["spread_rows"]), 2)
 
 
 if __name__ == "__main__":
