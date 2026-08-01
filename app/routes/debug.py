@@ -19,7 +19,7 @@ from app.middleware.limiter import limiter
 from app.models.schema import EdgeResult, Game, GameOdds, GameOutcomeReview, LineMovement, OddsApiRequestLog, Prediction, SnapshotType
 from app.scheduler import scheduler
 from app.services.betting_policy import get_betting_profile, qualifies_for_bet_policy
-from app.services.betmgm_public_odds_service import probe_betmgm_public_odds
+from app.services.betmgm_public_odds_service import build_betmgm_public_validation_report, probe_betmgm_public_odds
 from app.services.edge_service import (
     TOTAL_STD_DEV,
     calculate_all_edges_today,
@@ -139,6 +139,14 @@ async def betmgm_public_odds_probe_debug(
         "and no betting decisions until this feed proves stable."
     )
     return payload
+
+
+@router.get("/betmgm-public-odds-validation")
+async def betmgm_public_odds_validation_debug(
+    fixture_limit: int = Query(15, ge=1, le=30),
+    db: Session = Depends(get_db),
+):
+    return await build_betmgm_public_validation_report(db=db, fixture_limit=fixture_limit)
 
 
 @router.get("/jobs", dependencies=[Depends(verify_api_key)])

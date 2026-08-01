@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote, urlsplit
 
 import httpx
+from sqlalchemy.orm import Session
+
+from app.models.schema import Game, GameOdds, SnapshotType
 
 BETMGM_PUBLIC_MLB_URL = "https://www.betmgm.com/en/sports/baseball-23/betting/usa-9/mlb-75"
 BETMGM_PUBLIC_SPORTSBOOK = "betmgm_public"
@@ -13,6 +17,12 @@ BETMGM_BASEBALL_SPORT_ID = 23
 BETMGM_MLB_COMPETITION_ID = 75
 BETMGM_PUBLIC_ACCESS_ID_FALLBACK = "ZTg4YWEwMTgtZTlhYy00MWRkLWIzYWYtZjMzODI5ZDE0Mjc5"
 BETMGM_CDS_API_URL_FALLBACK = "https://cf-us3-cds-api.itsfogo.com"
+MLB_TOTAL_MIN = 5.0
+MLB_TOTAL_MAX = 13.5
+MAX_MAIN_TOTAL_PRICE_ABS = 350
+TOTAL_MATCH_TOLERANCE = 0.5
+MONEYLINE_MATCH_TOLERANCE = 35
+TOTAL_PRICE_MATCH_TOLERANCE = 45
 
 _PUBLIC_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -61,6 +71,11 @@ _TEAM_PATTERN = re.compile(
 _SPREAD_RE = re.compile(r"^(?P<point>[+-]\d+(?:\.\d+)?)\s+(?P<decimal>\d+(?:\.\d+)?)$")
 _TOTAL_RE = re.compile(r"^(?P<side>[OU])\s+(?P<line>\d+(?:\.\d+)?)\s+(?P<decimal>\d+(?:\.\d+)?)$", re.IGNORECASE)
 _DECIMAL_RE = re.compile(r"^\d+(?:\.\d+)?$")
+
+
+def _normalize_name(value: str | None) -> str:
+    normalized = "".join(ch.lower() if ch.isalnum() else " " for ch in (value or ""))
+    return " ".join(normalized.split())
 
 
 def decimal_to_american(decimal_odds: float | None) -> int | None:
@@ -161,6 +176,40 @@ async def probe_betmgm_public_odds(
         if rendered_result.get("error"):
             rendered_payload["warnings"].append(str(rendered_result["error"]))
     return rendered_payload
+
+
+async def build_betmgm_public_validation_report(
+    db: Session,
+    *,
+    fixture_limit: int = 15,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    now_utc = _aware_utc(now or datetime.now(timezone.utc))
+    probe = await probe_betmgm_public_odds(use_cds=True, fixture_limit=fixture_limit)
+    events = probe.get("events") or []
+    rows = [_validate_public_event(db, event, now_utc=now_utc) for event in events]
+    counts = Counter(row["validation_status"] for row in rows)
+    return {
+        "status": "ok" if probe.get("status") == "ok" else "source_warning",
+        "source_status": probe.get("status"),
+        "provider": BETMGM_PUBLIC_SPORTSBOOK,
+        "validated_at": now_utc.isoformat(),
+        "events_checked": len(rows),
+        "counts": dict(counts),
+        "match": [row for row in rows if row["validation_status"] == "MATCH"],
+        "mismatch": [row for row in rows if row["validation_status"] == "MISMATCH"],
+        "rejected": [row for row in rows if row["validation_status"] == "REJECTED"],
+        "source_summary": {
+            "source_mode": probe.get("source_mode"),
+            "events_count": probe.get("events_count"),
+            "warnings": probe.get("warnings") or [],
+            "public_cds": probe.get("public_cds"),
+        },
+        "guardrail": (
+            "Validation only: rows must be pre-start, main-market shaped, and close to trusted stored odds "
+            "before betmgm_public can be considered as a fallback."
+        ),
+    }
 
 
 async def _probe_public_cds_odds(*, fixture_limit: int, timeout_seconds: float) -> dict[str, Any]:
@@ -381,6 +430,189 @@ def _cds_payload(
     }
 
 
+def _validate_public_event(db: Session, event: dict[str, Any], *, now_utc: datetime) -> dict[str, Any]:
+    reasons: list[str] = []
+    game = _match_db_game(db, event)
+    trusted = _latest_trusted_odds(db, game.game_id) if game else None
+    start_utc = _event_start_utc(event, game)
+    if game is None:
+        reasons.append("no_matching_db_game")
+    if start_utc is None:
+        reasons.append("missing_start_time")
+    elif start_utc <= now_utc:
+        reasons.append("fixture_already_started")
+    if not event.get("complete_h2h"):
+        reasons.append("missing_moneyline")
+    if not event.get("complete_total"):
+        reasons.append("missing_total")
+    reasons.extend(_event_total_reject_reasons(event))
+    if trusted is None:
+        reasons.append("missing_trusted_odds_snapshot")
+
+    comparison = _compare_to_trusted(event, trusted) if trusted is not None else {"matches": False, "diffs": {}}
+    status = "REJECTED"
+    if not reasons:
+        status = "MATCH" if comparison.get("matches") else "MISMATCH"
+
+    return {
+        "validation_status": status,
+        "reasons": reasons,
+        "game_id": game.game_id if game else None,
+        "matchup": f"{game.away_team} @ {game.home_team}" if game else event.get("event_label"),
+        "start_time": game.start_time if game else event.get("commence_time"),
+        "minutes_to_start": (
+            round((start_utc - now_utc).total_seconds() / 60, 1)
+            if start_utc is not None else None
+        ),
+        "betmgm_public": _event_odds_summary(event),
+        "trusted_odds": _trusted_odds_summary(trusted),
+        "comparison": comparison,
+        "total_candidates": event.get("total_candidates") or [],
+        "total_rejected_candidates": event.get("total_rejected_candidates") or [],
+    }
+
+
+def _match_db_game(db: Session, event: dict[str, Any]) -> Game | None:
+    away = _normalize_name(event.get("away_team_hint"))
+    home = _normalize_name(event.get("home_team_hint"))
+    start = _parse_datetime(event.get("commence_time"))
+    query = db.query(Game)
+    if start is not None:
+        query = query.filter(Game.game_date.in_([start.date(), start.astimezone(timezone.utc).date()]))
+    games = query.all()
+    for game in games:
+        if _normalize_name(game.away_team) == away and _normalize_name(game.home_team) == home:
+            return game
+    return None
+
+
+def _latest_trusted_odds(db: Session, game_id: int) -> GameOdds | None:
+    return (
+        db.query(GameOdds)
+        .filter(
+            GameOdds.game_id == game_id,
+            GameOdds.sportsbook != BETMGM_PUBLIC_SPORTSBOOK,
+            GameOdds.snapshot_type.in_([SnapshotType.pregame, SnapshotType.open]),
+        )
+        .order_by(
+            GameOdds.snapshot_type.desc(),
+            GameOdds.fetched_at.desc(),
+            GameOdds.id.desc(),
+        )
+        .first()
+    )
+
+
+def _event_start_utc(event: dict[str, Any], game: Game | None) -> datetime | None:
+    return _parse_datetime(game.start_time if game else None) or _parse_datetime(event.get("commence_time"))
+
+
+def _event_total_reject_reasons(event: dict[str, Any]) -> list[str]:
+    reasons = []
+    candidate = {
+        "line": event.get("total_line"),
+        "over_odds": event.get("over_odds"),
+        "under_odds": event.get("under_odds"),
+    }
+    for reason in _total_candidate_reject_reasons(candidate):
+        reasons.append(f"selected_{reason}")
+    return reasons
+
+
+def _compare_to_trusted(event: dict[str, Any], trusted: GameOdds | None) -> dict[str, Any]:
+    if trusted is None:
+        return {"matches": False, "diffs": {}}
+    trusted_total = float(trusted.total_line) if trusted.total_line is not None else None
+    diffs = {
+        "away_ml": _int_diff(event.get("away_ml"), trusted.away_ml),
+        "home_ml": _int_diff(event.get("home_ml"), trusted.home_ml),
+        "total_line": _float_diff(event.get("total_line"), trusted_total),
+        "over_odds": _int_diff(event.get("over_odds"), trusted.over_odds),
+        "under_odds": _int_diff(event.get("under_odds"), trusted.under_odds),
+    }
+    checks = {
+        "away_ml": _abs_le(diffs["away_ml"], MONEYLINE_MATCH_TOLERANCE),
+        "home_ml": _abs_le(diffs["home_ml"], MONEYLINE_MATCH_TOLERANCE),
+        "total_line": _abs_le(diffs["total_line"], TOTAL_MATCH_TOLERANCE),
+        "over_odds": _abs_le(diffs["over_odds"], TOTAL_PRICE_MATCH_TOLERANCE),
+        "under_odds": _abs_le(diffs["under_odds"], TOTAL_PRICE_MATCH_TOLERANCE),
+    }
+    return {
+        "matches": all(checks.values()),
+        "checks": checks,
+        "diffs": diffs,
+        "tolerances": {
+            "moneyline": MONEYLINE_MATCH_TOLERANCE,
+            "total_line": TOTAL_MATCH_TOLERANCE,
+            "total_price": TOTAL_PRICE_MATCH_TOLERANCE,
+        },
+    }
+
+
+def _event_odds_summary(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "fixture_id": event.get("fixture_id"),
+        "away_team": event.get("away_team_hint"),
+        "home_team": event.get("home_team_hint"),
+        "away_ml": event.get("away_ml"),
+        "home_ml": event.get("home_ml"),
+        "total_line": event.get("total_line"),
+        "over_odds": event.get("over_odds"),
+        "under_odds": event.get("under_odds"),
+        "selected_total_candidate": event.get("selected_total_candidate"),
+    }
+
+
+def _trusted_odds_summary(odds: GameOdds | None) -> dict[str, Any] | None:
+    if odds is None:
+        return None
+    return {
+        "id": odds.id,
+        "sportsbook": odds.sportsbook,
+        "snapshot_type": odds.snapshot_type.value if odds.snapshot_type else None,
+        "fetched_at": odds.fetched_at.isoformat() if odds.fetched_at else None,
+        "away_ml": odds.away_ml,
+        "home_ml": odds.home_ml,
+        "total_line": float(odds.total_line) if odds.total_line is not None else None,
+        "over_odds": odds.over_odds,
+        "under_odds": odds.under_odds,
+    }
+
+
+def _parse_datetime(value: str | datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return _aware_utc(value)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return _aware_utc(parsed)
+
+
+def _aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _int_diff(left: Any, right: Any) -> int | None:
+    if left is None or right is None:
+        return None
+    return int(left) - int(right)
+
+
+def _float_diff(left: Any, right: Any) -> float | None:
+    if left is None or right is None:
+        return None
+    return round(float(left) - float(right), 3)
+
+
+def _abs_le(value: int | float | None, threshold: int | float) -> bool:
+    return value is not None and abs(value) <= threshold
+
+
 def _is_matchup_fixture(fixture: dict[str, Any]) -> bool:
     participants = fixture.get("participants") or []
     name = _value_name(fixture)
@@ -408,6 +640,8 @@ def _parse_fixture_view_odds(fixture: dict[str, Any]) -> dict[str, Any]:
         "total_line": None,
         "over_odds": None,
         "under_odds": None,
+        "total_candidates": [],
+        "total_rejected_candidates": [],
         "spread_rows": [],
     }
 
@@ -420,6 +654,7 @@ def _parse_fixture_view_odds(fixture: dict[str, Any]) -> dict[str, Any]:
         elif "run line" in market_name:
             _parse_cds_spread(event, market)
 
+    _select_main_total(event)
     event["has_any_market"] = any(
         event.get(key) is not None
         for key in ("away_ml", "home_ml", "total_line", "over_odds", "under_odds")
@@ -444,16 +679,82 @@ def _parse_cds_moneyline(event: dict[str, Any], market: dict[str, Any]) -> None:
 
 
 def _parse_cds_totals(event: dict[str, Any], market: dict[str, Any]) -> None:
+    candidate: dict[str, Any] = {
+        "line": None,
+        "over_odds": None,
+        "under_odds": None,
+        "market_id": market.get("id"),
+    }
     for option in market.get("options") or []:
         name = _value_name(option)
         american = _cds_american_odds(option)
         line = _line_from_option_name(name)
         if line is not None:
-            event["total_line"] = line
+            candidate["line"] = line
         if name.lower().startswith("over"):
-            event["over_odds"] = american
+            candidate["over_odds"] = american
         elif name.lower().startswith("under"):
-            event["under_odds"] = american
+            candidate["under_odds"] = american
+    if candidate["line"] is not None and (candidate["over_odds"] is not None or candidate["under_odds"] is not None):
+        event.setdefault("total_candidates", []).append(candidate)
+
+
+def _select_main_total(event: dict[str, Any]) -> None:
+    candidates = event.get("total_candidates") or []
+    viable = [
+        candidate for candidate in candidates
+        if not _total_candidate_reject_reasons(candidate)
+    ]
+    selected = min(viable, key=_main_total_score) if viable else None
+    rejected: list[dict[str, Any]] = []
+    for candidate in candidates:
+        reasons = _total_candidate_reject_reasons(candidate)
+        if selected is candidate:
+            continue
+        rejected.append(candidate | {"reject_reasons": reasons or ["alternate_total_after_main_selection"]})
+
+    if selected is None and candidates:
+        selected = candidates[0]
+        selected = selected | {"selected_with_warnings": _total_candidate_reject_reasons(selected)}
+        rejected = [
+            candidate | {"reject_reasons": _total_candidate_reject_reasons(candidate) or ["not_first_total_candidate"]}
+            for candidate in candidates[1:]
+        ]
+
+    if selected:
+        event["total_line"] = selected.get("line")
+        event["over_odds"] = selected.get("over_odds")
+        event["under_odds"] = selected.get("under_odds")
+        event["selected_total_candidate"] = selected
+    event["total_rejected_candidates"] = rejected
+
+
+def _main_total_score(candidate: dict[str, Any]) -> float:
+    over = candidate.get("over_odds")
+    under = candidate.get("under_odds")
+    if over is None or under is None:
+        return 9999
+    # Main totals tend to have the most balanced prices around even/-110.
+    return abs(abs(int(over)) - 110) + abs(abs(int(under)) - 110)
+
+
+def _total_candidate_reject_reasons(candidate: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    line = _to_float(candidate.get("line"))
+    over_odds = candidate.get("over_odds")
+    under_odds = candidate.get("under_odds")
+    if line is None:
+        reasons.append("missing_total_line")
+    elif line < MLB_TOTAL_MIN or line > MLB_TOTAL_MAX:
+        reasons.append("suspicious_total_line")
+    if over_odds is None or under_odds is None:
+        reasons.append("missing_total_side")
+    if (
+        (isinstance(over_odds, int) and abs(over_odds) > MAX_MAIN_TOTAL_PRICE_ABS)
+        or (isinstance(under_odds, int) and abs(under_odds) > MAX_MAIN_TOTAL_PRICE_ABS)
+    ):
+        reasons.append("suspicious_total_price")
+    return reasons
 
 
 def _parse_cds_spread(event: dict[str, Any], market: dict[str, Any]) -> None:

@@ -2141,6 +2141,98 @@ class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(parsed["complete_total"])
         self.assertEqual(len(parsed["spread_rows"]), 2)
 
+    def test_betmgm_public_cds_fixture_parser_rejects_alternate_totals(self) -> None:
+        fixture = {
+            "id": "19829094",
+            "name": {"value": "San Francisco Giants at San Diego Padres"},
+            "startDate": "2026-08-02T00:40:00Z",
+            "sport": {"id": 23},
+            "competition": {"id": 75},
+            "optionMarkets": [
+                {
+                    "name": {"value": "Moneyline"},
+                    "options": [
+                        {"sourceName": {"value": "1"}, "price": {"americanOdds": 115}},
+                        {"sourceName": {"value": "2"}, "price": {"americanOdds": -140}},
+                    ],
+                },
+                {
+                    "name": {"value": "Totals"},
+                    "options": [
+                        {"name": {"value": "Over 8.5"}, "price": {"americanOdds": -110}},
+                        {"name": {"value": "Under 8.5"}, "price": {"americanOdds": -110}},
+                    ],
+                },
+                {
+                    "name": {"value": "Totals"},
+                    "options": [
+                        {"name": {"value": "Over 3.0"}, "price": {"americanOdds": -10000}},
+                        {"name": {"value": "Under 3.0"}, "price": {"americanOdds": 1650}},
+                    ],
+                },
+                {
+                    "name": {"value": "Totals"},
+                    "options": [
+                        {"name": {"value": "Over 17.5"}, "price": {"americanOdds": 475}},
+                        {"name": {"value": "Under 17.5"}, "price": {"americanOdds": -800}},
+                    ],
+                },
+            ],
+        }
+
+        parsed = _parse_fixture_view_odds(fixture)
+
+        self.assertEqual(parsed["total_line"], 8.5)
+        self.assertEqual(parsed["over_odds"], -110)
+        self.assertEqual(parsed["under_odds"], -110)
+        self.assertEqual(len(parsed["total_candidates"]), 3)
+        self.assertEqual(len(parsed["total_rejected_candidates"]), 2)
+        rejected_reasons = {
+            reason
+            for candidate in parsed["total_rejected_candidates"]
+            for reason in candidate["reject_reasons"]
+        }
+        self.assertIn("suspicious_total_line", rejected_reasons)
+        self.assertIn("suspicious_total_price", rejected_reasons)
+
+    def test_betmgm_public_cds_fixture_parser_selects_balanced_main_total(self) -> None:
+        fixture = {
+            "id": "19829094",
+            "name": {"value": "San Francisco Giants at San Diego Padres"},
+            "startDate": "2026-08-02T00:40:00Z",
+            "sport": {"id": 23},
+            "competition": {"id": 75},
+            "optionMarkets": [
+                {
+                    "name": {"value": "Totals"},
+                    "options": [
+                        {"name": {"value": "Over 6.0"}, "price": {"americanOdds": -325}},
+                        {"name": {"value": "Under 6.0"}, "price": {"americanOdds": 260}},
+                    ],
+                },
+                {
+                    "name": {"value": "Totals"},
+                    "options": [
+                        {"name": {"value": "Over 8.5"}, "price": {"americanOdds": -102}},
+                        {"name": {"value": "Under 8.5"}, "price": {"americanOdds": -118}},
+                    ],
+                },
+                {
+                    "name": {"value": "Totals"},
+                    "options": [
+                        {"name": {"value": "Over 12.0"}, "price": {"americanOdds": 375}},
+                        {"name": {"value": "Under 12.0"}, "price": {"americanOdds": -500}},
+                    ],
+                },
+            ],
+        }
+
+        parsed = _parse_fixture_view_odds(fixture)
+
+        self.assertEqual(parsed["total_line"], 8.5)
+        self.assertEqual(parsed["over_odds"], -102)
+        self.assertEqual(parsed["under_odds"], -118)
+
 
 if __name__ == "__main__":
     unittest.main()
