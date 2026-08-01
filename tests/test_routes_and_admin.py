@@ -34,6 +34,7 @@ from app.services.betmgm_public_odds_service import _parse_fixture_view_odds
 from app.services.decision_journal_service import build_daily_trade_summary, persist_tradable_decisions
 from app.services.edge_service import clear_edge_persistence_failures
 from app.services.pregame_bet_reminder_service import send_pregame_bet_reminder_for_game
+from app.services.prediction_digest_service import send_daily_prediction_digest
 from app.services.report_snapshot_service import refresh_betmgm_public_validation_snapshot
 from app.services.sharp_move_journal_service import build_sharp_move_rows, get_sharp_move_grade_report, persist_sharp_move_journal
 
@@ -2089,6 +2090,72 @@ class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["scheduled"], 1)
         mocked_scheduler.add_job.assert_called_once()
         self.assertEqual(mocked_scheduler.add_job.call_args.kwargs["id"], "bet_reminder_27")
+
+    def test_daily_prediction_digest_sends_all_games_once(self) -> None:
+        target_date = date(2026, 8, 1)
+        first = Game(
+            game_id=28,
+            game_date=target_date,
+            season=2026,
+            away_team="Away One",
+            home_team="Home One",
+            start_time="2026-08-01T17:05:00+00:00",
+        )
+        second = Game(
+            game_id=29,
+            game_date=target_date,
+            season=2026,
+            away_team="Away Two",
+            home_team="Home Two",
+            start_time="2026-08-01T20:10:00+00:00",
+        )
+        self.db.add_all([first, second])
+        self.db.commit()
+        self.db.add_all([
+            Prediction(
+                game_id=28,
+                model_version="v-test",
+                run_stage="daily_open",
+                is_active=True,
+                sim_count=1000,
+                away_win_pct=0.57,
+                home_win_pct=0.43,
+                projected_away_score=4.4,
+                projected_home_score=3.7,
+                projected_total=8.1,
+                confidence_score=14.0,
+                recommended_side="AWAY",
+            ),
+            Prediction(
+                game_id=29,
+                model_version="v-test",
+                run_stage="daily_open",
+                is_active=True,
+                sim_count=1000,
+                away_win_pct=0.48,
+                home_win_pct=0.52,
+                projected_away_score=3.9,
+                projected_home_score=4.2,
+                projected_total=8.1,
+                confidence_score=4.0,
+                recommended_side="HOME",
+            ),
+        ])
+        self.db.commit()
+
+        with patch("app.services.prediction_digest_service.send_alert_message", return_value=(True, None)) as send_mock:
+            result = send_daily_prediction_digest(self.db, target_date=target_date)
+            duplicate = send_daily_prediction_digest(self.db, target_date=target_date)
+
+        self.assertEqual(result["games"], 2)
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(duplicate["reason"], "already_sent")
+        send_mock.assert_called_once()
+        message = send_mock.call_args.args[0]
+        self.assertIn("MLB ALL-GAMES PREDICTION BOARD", message)
+        self.assertIn("Away One @ Home One", message)
+        self.assertIn("Away One 57.0%", message)
+        self.assertIn("Tracking: postgame review grades winner + projected total.", message)
 
     async def test_betmgm_public_validation_refresh_stores_report_snapshot(self) -> None:
         report_date = date(2026, 8, 1)

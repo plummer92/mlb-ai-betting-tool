@@ -7,7 +7,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.config import PREGAME_BET_REMINDER_MINUTES
+from app.config import PREDICTION_DISCORD_DIGEST_ENABLED, PREGAME_BET_REMINDER_MINUTES
 from app.db import SessionLocal
 from app.models.schema import EdgeResult, Game, GameOdds, LineMovement, Prediction
 from app.services.alert_service import create_and_send_alert_for_game, create_and_send_alerts_for_today
@@ -28,6 +28,7 @@ from app.services.pipeline_service import (
     sync_games_for_date,
 )
 from app.services.prediction_service import deactivate_stale_active_predictions
+from app.services.prediction_digest_service import send_daily_prediction_digest
 from app.services.pregame_bet_reminder_service import send_pregame_bet_reminder_for_game
 from app.services.ranked_alerts import send_ranked_bets_to_discord_job
 from app.services.report_snapshot_service import (
@@ -387,6 +388,9 @@ def run_monte_carlo_and_schedule_pregame():
             include_sandbox=True,
         )
         print(f"[scheduler] Monte Carlo: {result['ran']} ok, {len(result['errors'])} errors")
+        if PREDICTION_DISCORD_DIGEST_ENABLED:
+            digest_result = send_daily_prediction_digest(db, target_date=today, run_stage="daily_open")
+            print(f"[scheduler] Prediction Discord digest: {digest_result}")
 
         schedule_result = schedule_pregame_jobs_for_today(db)
         print(f"[scheduler] Pregame jobs: {schedule_result}")
@@ -443,6 +447,23 @@ def send_morning_alerts_job():
         print(f"[scheduler] Morning alerts: {result}")
     except (SQLAlchemyError, RuntimeError, ValueError):
         logger.exception("[scheduler] Alert error")
+    finally:
+        db.close()
+
+
+@scheduler.scheduled_job(CronTrigger(hour=10, minute=20, timezone="America/New_York"))
+def prediction_digest_discord_job():
+    if not PREDICTION_DISCORD_DIGEST_ENABLED:
+        print("[scheduler] Prediction Discord digest skipped: disabled")
+        return {"status": "disabled"}
+    db = SessionLocal()
+    try:
+        today = datetime.now(ET).date()
+        result = send_daily_prediction_digest(db, target_date=today, run_stage="daily_open")
+        print(f"[scheduler] Prediction Discord digest backup: {result}")
+        return result
+    except (SQLAlchemyError, RuntimeError, ValueError):
+        logger.exception("[scheduler] Prediction Discord digest error")
     finally:
         db.close()
 
