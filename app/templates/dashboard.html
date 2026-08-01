@@ -216,7 +216,7 @@ body::after {
 
 .freshness-strip {
   display: grid;
-  grid-template-columns: repeat(7, minmax(120px, 1fr));
+  grid-template-columns: repeat(8, minmax(120px, 1fr));
   gap: 8px;
   margin-bottom: 18px;
 }
@@ -944,6 +944,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <a class="quick-tab" href="#shadow-policy-section">Shadow V4</a>
     <a class="quick-tab" href="#today-read-section">Today</a>
     <a class="quick-tab" href="#odds-integrity-section">Odds Trust</a>
+    <a class="quick-tab" href="#betmgm-validation-section">BetMGM</a>
     <a class="quick-tab" href="#market-audit-section">Markets</a>
     <a class="quick-tab" href="#market-shadow-section">Shadow</a>
     <a class="quick-tab" href="#profitability-section">Profit</a>
@@ -958,6 +959,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <div class="freshness-pill"><div class="freshness-name">Decision Queue</div><div class="freshness-age">Loading</div></div>
     <div class="freshness-pill"><div class="freshness-name">Ranked Bets</div><div class="freshness-age">Loading</div></div>
     <div class="freshness-pill"><div class="freshness-name">Odds Warehouse</div><div class="freshness-age">Loading</div></div>
+    <div class="freshness-pill"><div class="freshness-name">BetMGM Scout</div><div class="freshness-age">Loading</div></div>
     <div class="freshness-pill"><div class="freshness-name">Totals Policy</div><div class="freshness-age">Loading</div></div>
     <div class="freshness-pill"><div class="freshness-name">Bullpen</div><div class="freshness-age">Loading</div></div>
     <div class="freshness-pill"><div class="freshness-name">Slow Endpoint Watch</div><div class="freshness-age">Loading</div></div>
@@ -1071,6 +1073,20 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <div class="card" style="padding:0;margin-top:12px">
       <div class="tbl-wrap" id="odds-integrity-table">
         <div class="loading">Loading odds integrity</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="betmgm-validation-section">
+    <div class="section-head">
+      <div class="section-label">BetMGM Public Scout</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="betmgm-validation-badge">LOADING</div>
+    </div>
+    <div id="betmgm-validation-summary"></div>
+    <div class="card" style="padding:0;margin-top:12px">
+      <div class="tbl-wrap" id="betmgm-validation-table">
+        <div class="loading">Loading cached BetMGM validation</div>
       </div>
     </div>
   </div>
@@ -1519,6 +1535,7 @@ function renderFreshness(live, research, slowCount = null) {
   const rankedSnap = live?.snapshots?.ranked_rows;
   const reports = research?.reports || {};
   const oddsSnap = reports.odds_warehouse?.snapshot;
+  const betmgmSnap = reports.betmgm_public_validation?.snapshot;
   const totalsSnap = reports.totals_policy?.snapshot;
   const bullpenSnap = reports.bullpen_today?.snapshot;
   const liveSnap = {
@@ -1531,6 +1548,7 @@ function renderFreshness(live, research, slowCount = null) {
     ${freshnessPill('Decision Queue', decisionSnap, { warnMinutes: 30, badMinutes: 60 })}
     ${freshnessPill('Ranked Bets', rankedSnap, { warnMinutes: 30, badMinutes: 60 })}
     ${freshnessPill('Odds Warehouse', oddsSnap, { warnMinutes: 30, badMinutes: 60 })}
+    ${freshnessPill('BetMGM Scout', betmgmSnap, { warnMinutes: 180, badMinutes: 360 })}
     ${freshnessPill('Totals Policy', totalsSnap, { warnMinutes: 30, badMinutes: 60 })}
     ${freshnessPill('Bullpen', bullpenSnap, { warnMinutes: 30, badMinutes: 60 })}
     <div class="freshness-pill ${slowCls}">
@@ -1621,6 +1639,16 @@ function policyStatusChip(status) {
     'CAUTION': 'c-medium',
     'BLOCKED': 'c-loss',
     'CLUSTER_RISK': 'sig-orange',
+  };
+  return `<span class="chip ${map[status] || 'c-none'}">${esc(status || 'UNKNOWN')}</span>`;
+}
+
+function validationStatusChip(status) {
+  const map = {
+    MATCH: 'c-strong',
+    MISMATCH: 'c-medium',
+    REJECTED: 'c-loss',
+    MISSING: 'c-none',
   };
   return `<span class="chip ${map[status] || 'c-none'}">${esc(status || 'UNKNOWN')}</span>`;
 }
@@ -2332,6 +2360,103 @@ async function loadOddsIntegrity() {
   } catch(e) {
     $('odds-integrity-badge').textContent = 'SLOW';
     $('odds-integrity-table').innerHTML = `<div class="empty">Odds integrity is still calculating. The odds warehouse may have the current provider state.</div>`;
+  }
+}
+
+function betmgmDiffSummary(row) {
+  const diffs = row?.comparison?.diffs || {};
+  const parts = [];
+  if (diffs.away_ml != null) parts.push(`away ${diffs.away_ml}`);
+  if (diffs.home_ml != null) parts.push(`home ${diffs.home_ml}`);
+  if (diffs.total_line != null) parts.push(`total ${diffs.total_line}`);
+  if (diffs.over_odds != null) parts.push(`over ${diffs.over_odds}`);
+  if (diffs.under_odds != null) parts.push(`under ${diffs.under_odds}`);
+  return parts.length ? parts.join(' | ') : '---';
+}
+
+function oddsMiniLine(label, odds) {
+  if (!odds) return `<div class="mono muted">${esc(label)}: ---</div>`;
+  return `<div class="mono">
+    <span class="muted">${esc(label)}:</span>
+    ML ${odds.away_ml ?? '---'} / ${odds.home_ml ?? '---'}
+    <span class="muted">T</span> ${odds.total_line ?? '---'}
+    <span class="muted">O/U</span> ${odds.over_odds ?? '---'} / ${odds.under_odds ?? '---'}
+  </div>`;
+}
+
+async function loadBetmgmValidation() {
+  try {
+    const research = await loadDashboardResearch();
+    const data = research.reports?.betmgm_public_validation || null;
+    if (!data) {
+      $('betmgm-validation-badge').textContent = 'NO SNAPSHOT';
+      $('betmgm-validation-summary').innerHTML = `
+        <div class="empty compact">
+          BetMGM public validation has not produced a cached snapshot yet. The scheduled scout runs hourly during the MLB day and never feeds betting logic.
+        </div>`;
+      $('betmgm-validation-table').innerHTML = '';
+      return;
+    }
+
+    const counts = data.counts || {};
+    const checked = data.events_checked || 0;
+    const match = counts.MATCH || 0;
+    const mismatch = counts.MISMATCH || 0;
+    const rejected = counts.REJECTED || 0;
+    const matchRate = checked ? match / checked : null;
+    const matchPct = matchRate != null ? `${(matchRate * 100).toFixed(1)}%` : '---';
+    const statusCls = matchRate == null ? 'muted' : matchRate >= 0.8 ? 'green' : matchRate >= 0.5 ? 'yellow' : 'red';
+    const badge = checked ? `${match} MATCH / ${mismatch} MISMATCH / ${rejected} REJECTED` : 'EMPTY';
+    $('betmgm-validation-badge').textContent = badge;
+    const source = data.source_summary || {};
+    const cds = source.public_cds || {};
+    const fixtures = cds.fixtures || {};
+
+    $('betmgm-validation-summary').innerHTML = `
+      ${snapshotLine(data, 'BetMGM validation snapshot')}
+      <div class="summary-bar" style="border-left-color: var(--blue); background: var(--surface3);">
+        <div class="s-stat"><div class="s-stat-val ${statusCls}">${matchPct}</div><div class="s-stat-lbl">Match Rate</div></div>
+        <div class="s-stat"><div class="s-stat-val">${checked}</div><div class="s-stat-lbl">Events Checked</div></div>
+        <div class="s-stat"><div class="s-stat-val green">${match}</div><div class="s-stat-lbl">Matched Trusted</div></div>
+        <div class="s-stat"><div class="s-stat-val yellow">${mismatch}</div><div class="s-stat-lbl">Mismatched</div></div>
+        <div class="s-stat"><div class="s-stat-val red">${rejected}</div><div class="s-stat-lbl">Rejected</div></div>
+        <div class="s-stat"><div class="s-stat-val">${fixtures.fixture_limit ?? '---'}</div><div class="s-stat-lbl">Fixture Limit</div></div>
+      </div>
+      <div class="audit-note">
+        ${esc(data.guardrail || 'Validation only. This feed is not allowed to drive betting logic.')}
+        ${(source.warnings || []).length ? `<div class="mono muted" style="margin-top:5px">${(source.warnings || []).slice(0, 2).map(esc).join(' | ')}</div>` : ''}
+      </div>`;
+
+    const rows = [
+      ...(data.mismatch || []),
+      ...(data.rejected || []),
+      ...(data.match || []),
+    ].slice(0, 14);
+    $('betmgm-validation-table').innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Game</th><th>Status</th><th>BetMGM vs Trusted</th><th>Diffs</th><th>Reason</th>
+        </tr></thead>
+        <tbody>
+          ${rows.length ? rows.map(row => {
+            const reasons = (row.reasons || []).join(', ') || (row.validation_status === 'MATCH' ? 'within tolerance' : 'outside tolerance');
+            return `<tr>
+              <td style="font-weight:600;white-space:nowrap">${esc(row.matchup || '---')}<div class="muted mono" style="font-size:10px">${row.minutes_to_start != null ? `${row.minutes_to_start} min to start` : gameTime(row.start_time)}</div></td>
+              <td>${validationStatusChip(row.validation_status)}</td>
+              <td>
+                ${oddsMiniLine('BetMGM', row.betmgm_public)}
+                ${oddsMiniLine('Trusted', row.trusted_odds)}
+              </td>
+              <td class="mono">${esc(betmgmDiffSummary(row))}</td>
+              <td>${esc(reasons)}</td>
+            </tr>`;
+          }).join('') : '<tr><td colspan="5"><div class="empty compact">No BetMGM validation rows in the cached snapshot.</div></td></tr>'}
+        </tbody>
+      </table>`;
+  } catch(e) {
+    $('betmgm-validation-badge').textContent = 'ERROR';
+    $('betmgm-validation-summary').innerHTML = '';
+    $('betmgm-validation-table').innerHTML = `<div class="empty compact">Cached BetMGM validation unavailable: ${esc(e.message)}</div>`;
   }
 }
 
@@ -3789,6 +3914,7 @@ const primaryLoaders = [
   [loadQualifiedPolicyToday, 'qualified policy'],
   [loadShadowPolicyV2, 'shadow policy v2'],
   [loadOddsIntegrity, 'pregame integrity'],
+  [loadBetmgmValidation, 'betmgm validation'],
   [loadOddsWarehouse, 'odds warehouse'],
   [loadTodayRead, 'today read'],
   [loadTopBets, 'top bets'],

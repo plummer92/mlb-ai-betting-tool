@@ -29,6 +29,7 @@ from app.services.pipeline_service import (
 from app.services.prediction_service import deactivate_stale_active_predictions
 from app.services.ranked_alerts import send_ranked_bets_to_discord_job
 from app.services.report_snapshot_service import (
+    refresh_betmgm_public_validation_snapshot,
     refresh_dashboard_report_snapshots,
     refresh_decision_snapshots,
     refresh_decision_snapshots_for_date,
@@ -561,5 +562,18 @@ def refresh_live_dashboard_reports_job():
         print(f"[scheduler] Live decision snapshots: {decision_result}")
     except (SQLAlchemyError, RuntimeError, ValueError):
         logger.exception("[scheduler] Live dashboard report snapshot error")
+    finally:
+        db.close()
+
+
+@scheduler.scheduled_job(CronTrigger(hour="10-23", minute=20, timezone="America/New_York"))
+async def refresh_betmgm_public_validation_job():
+    db = SessionLocal()
+    try:
+        today = datetime.now(ET).date()
+        result = await refresh_betmgm_public_validation_snapshot(db, report_date=today, fixture_limit=15)
+        print(f"[scheduler] BetMGM public validation snapshot: {result}")
+    except (SQLAlchemyError, RuntimeError, ValueError):
+        logger.exception("[scheduler] BetMGM public validation snapshot error")
     finally:
         db.close()

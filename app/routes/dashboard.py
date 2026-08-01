@@ -14,7 +14,11 @@ from app.models.schema import Game, Prediction
 from app.routes.debug import build_market_readiness_report
 from app.routes.edges import get_cached_today_edges
 from app.routes.ranked import get_cached_decision_queue, get_cached_ranked_rows
-from app.services.report_snapshot_service import get_report_snapshot
+from app.services.report_snapshot_service import (
+    BETMGM_PUBLIC_VALIDATION_REPORT,
+    BETMGM_PUBLIC_VALIDATION_TTL_SECONDS,
+    get_report_snapshot,
+)
 
 router = APIRouter(tags=["dashboard"])
 ET = ZoneInfo("America/New_York")
@@ -88,12 +92,20 @@ def dashboard_research(db: Session = Depends(get_db)):
                 report_date=today,
                 max_age_seconds=LIVE_RESEARCH_MAX_AGE_SECONDS,
             )
+        if name == BETMGM_PUBLIC_VALIDATION_REPORT:
+            return get_report_snapshot(
+                db,
+                name,
+                report_date=today,
+                max_age_seconds=BETMGM_PUBLIC_VALIDATION_TTL_SECONDS,
+            )
         return get_report_snapshot(db, name, report_date=today)
 
     reports = {
         name: snapshot_for(name)
         for name in (
             "odds_warehouse",
+            BETMGM_PUBLIC_VALIDATION_REPORT,
             "totals_policy",
             "paper_clv",
             "movement_report",

@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 
 DASHBOARD_REPORT_TTL_SECONDS = 60 * 60 * 12
+BETMGM_PUBLIC_VALIDATION_REPORT = "betmgm_public_validation"
+BETMGM_PUBLIC_VALIDATION_TTL_SECONDS = 60 * 60 * 6
 
 
 def _utcnow() -> datetime:
@@ -102,6 +104,37 @@ def build_and_store_report_snapshot(
     runtime_ms = int((perf_counter() - started) * 1000)
     store_report_snapshot(db, report_name, payload, report_date=report_date, runtime_ms=runtime_ms)
     return {"report_name": report_name, "runtime_ms": runtime_ms, "status": "ok"}
+
+
+async def async_build_and_store_report_snapshot(
+    db: Session,
+    report_name: str,
+    builder: Callable[[], Any],
+    *,
+    report_date: date | None = None,
+) -> dict:
+    started = perf_counter()
+    payload = await builder()
+    runtime_ms = int((perf_counter() - started) * 1000)
+    store_report_snapshot(db, report_name, payload, report_date=report_date, runtime_ms=runtime_ms)
+    return {"report_name": report_name, "runtime_ms": runtime_ms, "status": "ok"}
+
+
+async def refresh_betmgm_public_validation_snapshot(
+    db: Session,
+    *,
+    report_date: date | None = None,
+    fixture_limit: int = 15,
+) -> dict:
+    from app.services.betmgm_public_odds_service import build_betmgm_public_validation_report
+
+    target_date = report_date or date.today()
+    return await async_build_and_store_report_snapshot(
+        db,
+        BETMGM_PUBLIC_VALIDATION_REPORT,
+        lambda: build_betmgm_public_validation_report(db=db, fixture_limit=fixture_limit),
+        report_date=target_date,
+    )
 
 
 def build_performance_summary(db: Session) -> dict:

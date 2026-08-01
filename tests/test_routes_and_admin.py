@@ -33,6 +33,7 @@ from app.services.betmgm_public_odds_service import decimal_to_american, parse_b
 from app.services.betmgm_public_odds_service import _parse_fixture_view_odds
 from app.services.decision_journal_service import build_daily_trade_summary, persist_tradable_decisions
 from app.services.edge_service import clear_edge_persistence_failures
+from app.services.report_snapshot_service import refresh_betmgm_public_validation_snapshot
 from app.services.sharp_move_journal_service import build_sharp_move_rows, get_sharp_move_grade_report, persist_sharp_move_journal
 
 
@@ -1490,6 +1491,7 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertIn("/api/debug/totals-policy", paths)
         self.assertIn("/api/debug/market-readiness", paths)
         self.assertIn("/api/debug/odds-warehouse", paths)
+        self.assertIn("/api/debug/betmgm-public-odds-validation", paths)
 
     def test_dashboard_research_expires_stale_live_reports(self) -> None:
         report_date = date.today()
@@ -1571,6 +1573,29 @@ class RouteAndAdminTests(unittest.TestCase):
         self.assertIsNotNone(live["snapshots"]["decision_queue"])
         self.assertIsNotNone(live["snapshots"]["ranked_rows"])
         self.assertIsNotNone(research["reports"]["odds_warehouse"])
+
+    def test_dashboard_research_includes_cached_betmgm_validation(self) -> None:
+        report_date = date(2026, 8, 1)
+        self.db.add(
+            ReportSnapshot(
+                report_name="betmgm_public_validation",
+                report_date=report_date,
+                generated_at=datetime.now(timezone.utc),
+                status="ok",
+                runtime_ms=5011,
+                payload_json='{"status":"ok","events_checked":4,"counts":{"MATCH":3,"MISMATCH":1}}',
+            )
+        )
+        self.db.commit()
+
+        with patch("app.routes.dashboard._dashboard_today", return_value=report_date):
+            research = dashboard_research(db=self.db)
+
+        payload = research["reports"]["betmgm_public_validation"]
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["events_checked"], 4)
+        self.assertEqual(payload["counts"]["MATCH"], 3)
+        self.assertEqual(payload["snapshot"]["runtime_ms"], 5011)
 
     def test_dashboard_health_reports_pre_run_before_morning_pipeline_due(self) -> None:
         class FixedDateTime(datetime):
@@ -1951,6 +1976,39 @@ class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):
         edge_mock.assert_not_called()
         alert_mock.assert_not_called()
 
+    async def test_betmgm_public_validation_refresh_stores_report_snapshot(self) -> None:
+        report_date = date(2026, 8, 1)
+        payload = {
+            "status": "ok",
+            "events_checked": 5,
+            "counts": {"MATCH": 4, "MISMATCH": 1},
+        }
+
+        with patch(
+            "app.services.betmgm_public_odds_service.build_betmgm_public_validation_report",
+            new_callable=AsyncMock,
+            return_value=payload,
+        ) as builder_mock:
+            result = await refresh_betmgm_public_validation_snapshot(
+                self.db,
+                report_date=report_date,
+                fixture_limit=12,
+            )
+
+        builder_mock.assert_awaited_once()
+        self.assertEqual(builder_mock.call_args.kwargs["fixture_limit"], 12)
+        self.assertEqual(result["report_name"], "betmgm_public_validation")
+        row = (
+            self.db.query(ReportSnapshot)
+            .filter(
+                ReportSnapshot.report_name == "betmgm_public_validation",
+                ReportSnapshot.report_date == report_date,
+            )
+            .first()
+        )
+        self.assertIsNotNone(row)
+        self.assertIn('"events_checked":5', row.payload_json)
+
     def test_live_dashboard_report_refresh_job_refreshes_live_reports(self) -> None:
         with patch("app.scheduler.SessionLocal", return_value=self.db), \
              patch("app.scheduler.refresh_live_dashboard_report_snapshots", return_value={"status": "ok"}) as refresh_mock, \
@@ -1963,6 +2021,17 @@ class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refresh_mock.call_args.kwargs["report_date"], date.today())
         decision_mock.assert_called_once()
         self.assertEqual(decision_mock.call_args.kwargs["report_date"], date.today())
+
+    async def test_betmgm_public_validation_job_refreshes_snapshot(self) -> None:
+        with patch("app.scheduler.SessionLocal", return_value=self.db), \
+             patch("app.scheduler.refresh_betmgm_public_validation_snapshot", new_callable=AsyncMock, return_value={"status": "ok"}) as refresh_mock:
+            from app.scheduler import refresh_betmgm_public_validation_job
+
+            await refresh_betmgm_public_validation_job()
+
+        refresh_mock.assert_awaited_once()
+        self.assertEqual(refresh_mock.call_args.kwargs["fixture_limit"], 15)
+        self.assertEqual(refresh_mock.call_args.kwargs["report_date"], date.today())
 
     def _backtest_result(self, accuracy: float) -> BacktestResult:
         result = BacktestResult(
