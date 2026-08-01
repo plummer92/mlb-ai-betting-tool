@@ -27,12 +27,13 @@ from app.routes.debug import (
 from app.routes.model import get_today_predictions, run_model
 from app.routes.ranked import _build_ranked_rows, _decision_row_from_ranked
 from app.routes.reviews import get_review_summary, profitability_report
-from app.scheduler import _recent_pregame_board_rows, schedule_pregame_jobs_for_today
+from app.scheduler import _recent_pregame_board_rows, schedule_pregame_bet_reminder_jobs_for_today, schedule_pregame_jobs_for_today
 from app.services.betting_policy import qualifies_for_bet_policy
 from app.services.betmgm_public_odds_service import decimal_to_american, parse_betmgm_public_page_text
 from app.services.betmgm_public_odds_service import _parse_fixture_view_odds
 from app.services.decision_journal_service import build_daily_trade_summary, persist_tradable_decisions
 from app.services.edge_service import clear_edge_persistence_failures
+from app.services.pregame_bet_reminder_service import send_pregame_bet_reminder_for_game
 from app.services.report_snapshot_service import refresh_betmgm_public_validation_snapshot
 from app.services.sharp_move_journal_service import build_sharp_move_rows, get_sharp_move_grade_report, persist_sharp_move_journal
 
@@ -1975,6 +1976,119 @@ class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):
         movement_mock.assert_not_called()
         edge_mock.assert_not_called()
         alert_mock.assert_not_called()
+
+    def test_pregame_bet_reminder_sends_fire_trade_once(self) -> None:
+        game = Game(
+            game_id=25,
+            game_date=date.today(),
+            season=2026,
+            away_team="Away",
+            home_team="Home",
+            away_team_id=1,
+            home_team_id=2,
+            status="Preview",
+            start_time=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+        )
+        odds = GameOdds(
+            game_id=25,
+            sportsbook="betrivers",
+            snapshot_type=SnapshotType.pregame,
+            fetched_at=datetime.now(timezone.utc),
+            total_line=8.5,
+            over_odds=-108,
+            under_odds=-112,
+        )
+        self.db.add_all([game, odds])
+        self.db.commit()
+        decision_row = {
+            "game_id": 25,
+            "game_date": game.game_date.isoformat(),
+            "game": "Away @ Home",
+            "matchup": "Away @ Home",
+            "play": "under",
+            "start_time": game.start_time,
+            "decision_status": "FIRE",
+            "tradable_signal": "TRADE",
+            "tradable_reason": "market agreed with positive CLV",
+            "trade_allowed": True,
+            "adjusted_edge_pct": 0.18,
+            "raw_edge_pct": 0.18,
+            "market_trust_score": 72,
+            "market_respect_tags": ["MARKET AGREED"],
+            "totals_policy_score": 82,
+            "decision_reason": "All trade gates passed.",
+            "sportsbook": "betrivers",
+        }
+
+        with patch("app.services.pregame_bet_reminder_service._build_decision_queue", return_value=[decision_row]), \
+             patch("app.services.pregame_bet_reminder_service.send_alert_message", return_value=(True, None)) as send_mock:
+            first = send_pregame_bet_reminder_for_game(self.db, game_id=25)
+            second = send_pregame_bet_reminder_for_game(self.db, game_id=25)
+
+        self.assertEqual(first["sent"], 1)
+        self.assertEqual(second["reason"], "already_sent")
+        send_mock.assert_called_once()
+        self.assertIn("5-MIN MLB BET ALERT", send_mock.call_args.args[0])
+        self.assertIn("UNDER 8.5 (-112)", send_mock.call_args.args[0])
+
+    def test_pregame_bet_reminder_skips_non_trade_rows(self) -> None:
+        game = Game(
+            game_id=26,
+            game_date=date.today(),
+            season=2026,
+            away_team="Away",
+            home_team="Home",
+            away_team_id=1,
+            home_team_id=2,
+            status="Preview",
+            start_time=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+        )
+        self.db.add(game)
+        self.db.commit()
+        decision_row = {
+            "game_id": 26,
+            "play": "under",
+            "decision_status": "WATCH",
+            "tradable_signal": "PASS",
+            "tradable_reason": "market confirmation insufficient",
+            "trade_allowed": False,
+            "adjusted_edge_pct": 0.25,
+        }
+
+        with patch("app.services.pregame_bet_reminder_service._build_decision_queue", return_value=[decision_row]), \
+             patch("app.services.pregame_bet_reminder_service.send_alert_message") as send_mock:
+            result = send_pregame_bet_reminder_for_game(self.db, game_id=26)
+
+        self.assertEqual(result["sent"], 0)
+        self.assertEqual(result["reason"], "not_bettable")
+        send_mock.assert_not_called()
+
+    def test_schedule_pregame_bet_reminder_jobs_for_today(self) -> None:
+        game = Game(
+            game_id=27,
+            game_date=date.today(),
+            season=2026,
+            away_team="Away",
+            home_team="Home",
+            away_team_id=1,
+            home_team_id=2,
+            status="Preview",
+            start_time=(datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+        )
+        self.db.add(game)
+        self.db.commit()
+
+        with patch("app.scheduler.scheduler") as mocked_scheduler:
+            mocked_scheduler.get_job.return_value = None
+            result = schedule_pregame_bet_reminder_jobs_for_today(
+                self.db,
+                now_utc=datetime.now(timezone.utc),
+                minutes_before=5,
+            )
+
+        self.assertEqual(result["scheduled"], 1)
+        mocked_scheduler.add_job.assert_called_once()
+        self.assertEqual(mocked_scheduler.add_job.call_args.kwargs["id"], "bet_reminder_27")
 
     async def test_betmgm_public_validation_refresh_stores_report_snapshot(self) -> None:
         report_date = date(2026, 8, 1)

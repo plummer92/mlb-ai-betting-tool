@@ -29,7 +29,7 @@ from app.routes.bullpen import router as bullpen_router
 from app.routes.paper import router as paper_router
 from app.routes.playbyplay import router as playbyplay_router
 
-from app.scheduler import schedule_pregame_jobs_for_today, scheduler
+from app.scheduler import schedule_pregame_bet_reminder_jobs_for_today, schedule_pregame_jobs_for_today, scheduler
 
 
 @asynccontextmanager
@@ -46,6 +46,8 @@ async def lifespan(app: FastAPI):
             seed_known_umpires(_db)
             schedule_result = schedule_pregame_jobs_for_today(_db, catch_up_missing=True)
             print(f"[startup] Pregame jobs hydrated: {schedule_result}", flush=True)
+            reminder_result = schedule_pregame_bet_reminder_jobs_for_today(_db, catch_up_missing=True)
+            print(f"[startup] Pregame bet reminder jobs hydrated: {reminder_result}", flush=True)
         finally:
             _db.close()
     except Exception as e:

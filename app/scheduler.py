@@ -7,6 +7,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.config import PREGAME_BET_REMINDER_MINUTES
 from app.db import SessionLocal
 from app.models.schema import EdgeResult, Game, GameOdds, LineMovement, Prediction
 from app.services.alert_service import create_and_send_alert_for_game, create_and_send_alerts_for_today
@@ -27,6 +28,7 @@ from app.services.pipeline_service import (
     sync_games_for_date,
 )
 from app.services.prediction_service import deactivate_stale_active_predictions
+from app.services.pregame_bet_reminder_service import send_pregame_bet_reminder_for_game
 from app.services.ranked_alerts import send_ranked_bets_to_discord_job
 from app.services.report_snapshot_service import (
     refresh_betmgm_public_validation_snapshot,
@@ -149,6 +151,71 @@ def schedule_pregame_jobs_for_today(
             result["scheduled"] += 1
         logger.info(
             "[scheduler] Pregame job scheduled for game %s at %s catch_up=%s",
+            game.game_id,
+            run_at,
+            is_catch_up,
+        )
+    return result
+
+
+def schedule_pregame_bet_reminder_jobs_for_today(
+    db,
+    *,
+    now_utc: datetime | None = None,
+    catch_up_missing: bool = False,
+    minutes_before: int = PREGAME_BET_REMINDER_MINUTES,
+) -> dict:
+    """Schedule one strict bettable-only Discord reminder shortly before first pitch."""
+    now_utc = now_utc or datetime.now(UTC)
+    today = datetime.now(ET).date()
+    games = db.query(Game).filter(Game.game_date == today).all()
+    result = {
+        "games": len(games),
+        "scheduled": 0,
+        "catch_up_scheduled": 0,
+        "already_scheduled": 0,
+        "past_start": 0,
+        "missing_start_time": 0,
+        "minutes_before": minutes_before,
+    }
+
+    catch_up_offset_seconds = 20
+    for game in games:
+        game_dt = _parse_game_start_time(game)
+        if game_dt is None:
+            result["missing_start_time"] += 1
+            continue
+
+        job_id = f"bet_reminder_{game.game_id}"
+        if scheduler.get_job(job_id):
+            result["already_scheduled"] += 1
+            continue
+
+        reminder_time = game_dt - timedelta(minutes=minutes_before)
+        run_at = reminder_time
+        is_catch_up = False
+        if reminder_time <= now_utc:
+            if not catch_up_missing or game_dt <= now_utc:
+                result["past_start"] += 1
+                continue
+            run_at = now_utc + timedelta(seconds=catch_up_offset_seconds)
+            catch_up_offset_seconds += 5
+            is_catch_up = True
+
+        scheduler.add_job(
+            run_pregame_bet_reminder,
+            trigger=DateTrigger(run_date=run_at),
+            args=[game.game_id],
+            id=job_id,
+            replace_existing=True,
+            misfire_grace_time=300,
+        )
+        if is_catch_up:
+            result["catch_up_scheduled"] += 1
+        else:
+            result["scheduled"] += 1
+        logger.info(
+            "[scheduler] Bet reminder job scheduled for game %s at %s catch_up=%s",
             game.game_id,
             run_at,
             is_catch_up,
@@ -323,6 +390,8 @@ def run_monte_carlo_and_schedule_pregame():
 
         schedule_result = schedule_pregame_jobs_for_today(db)
         print(f"[scheduler] Pregame jobs: {schedule_result}")
+        reminder_result = schedule_pregame_bet_reminder_jobs_for_today(db)
+        print(f"[scheduler] Pregame bet reminder jobs: {reminder_result}")
     except (SQLAlchemyError, RuntimeError, ValueError):
         logger.exception("[scheduler] Monte Carlo job error")
     finally:
@@ -374,6 +443,22 @@ def send_morning_alerts_job():
         print(f"[scheduler] Morning alerts: {result}")
     except (SQLAlchemyError, RuntimeError, ValueError):
         logger.exception("[scheduler] Alert error")
+    finally:
+        db.close()
+
+
+def run_pregame_bet_reminder(game_id: int):
+    db = SessionLocal()
+    try:
+        result = send_pregame_bet_reminder_for_game(
+            db,
+            game_id=game_id,
+            minutes_before=PREGAME_BET_REMINDER_MINUTES,
+        )
+        print(f"[scheduler] Pregame bet reminder for game {game_id}: {result}")
+        return result
+    except (SQLAlchemyError, RuntimeError, ValueError):
+        logger.exception("[scheduler] Pregame bet reminder error for game %s", game_id)
     finally:
         db.close()
 
