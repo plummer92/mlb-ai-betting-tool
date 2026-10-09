@@ -20,6 +20,15 @@ from sqlalchemy.sql import func
 from app.db import Base
 
 
+class DailyPipelineRun(Base):
+    __tablename__ = "daily_pipeline_runs"
+
+    run_date = Column(Date, primary_key=True)
+    status = Column(String(20), nullable=False)
+    side_effects_started = Column(Boolean, nullable=False, default=False)
+    result_json = Column(Text, nullable=True)
+
+
 class Game(Base):
     __tablename__ = "games"
 

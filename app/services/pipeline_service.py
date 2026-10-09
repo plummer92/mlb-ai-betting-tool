@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models.schema import Game
 from app.services.alert_service import create_and_send_alerts_for_today
+from app.services.daily_run_guard import DailyRunGuard
 from app.services.backtest_service import (
     apply_calibration,
     build_live_feature_vector,
@@ -302,6 +303,25 @@ def send_daily_alerts(db: Session) -> dict:
 
 async def run_daily_pipeline(db: Session, target_date: date | None = None) -> dict:
     today = target_date or datetime.now(ET).date()
+    guard = DailyRunGuard(db, today)
+    previous = guard.claim()
+    if previous is not None:
+        return previous
+    try:
+        result = await _run_daily_pipeline(db, today, guard)
+        guard.complete(result)
+        return result
+    except BaseException:
+        db.rollback()
+        try:
+            guard.fail()
+        except SQLAlchemyError:
+            # A database outage leaves ownership in place, preventing replay.
+            logger.exception("Could not record daily pipeline failure for %s", today)
+        raise
+
+
+async def _run_daily_pipeline(db: Session, today: date, guard: DailyRunGuard) -> dict:
     results = {"date": str(today), "steps": {}}
 
     try:
@@ -347,6 +367,7 @@ async def run_daily_pipeline(db: Session, target_date: date | None = None) -> di
     }
 
     # Series Opener alerts (non-blocking, separate from sandbox alerts)
+    guard.start_side_effects()
     series_opener_sent = 0
     try:
         from app.services.sandbox_alerts import send_series_opener_alert
