@@ -109,6 +109,10 @@ def resolve_completed_games(db: Session) -> dict:
     returned the real score yet (true 0-0 MLB finals are essentially
     non-existent).
     """
+    # Settle saved final results even if a subsequent schedule refresh fails.
+    from app.services.paper_settlement_service import backfill_finished_paper_bets
+    prior_settlement = backfill_finished_paper_bets(db)
+
     # Remove any previously-created reviews that were stamped before a game
     # was truly final, or whose stored scores are now stale.
     purged = _purge_stale_reviews(db)
@@ -252,7 +256,17 @@ def resolve_completed_games(db: Session) -> dict:
         resolved += 1
 
     db.commit()
-    return {"resolved": resolved, "skipped": skipped, "purged_scoreless": purged}
+    # Both scheduled resolvers and the daily pipeline use this entry point.
+    # Paper settlement must run even when no recent predictions were reviewed.
+    paper_settlement = backfill_finished_paper_bets(db)
+    for ledger in ("paper_trades", "bet_orders"):
+        paper_settlement[ledger]["settled"] += prior_settlement[ledger]["settled"]
+    paper_settlement["paper_trades"]["repaired_prices"] += prior_settlement["paper_trades"]["repaired_prices"]
+    paper_settlement["paper_trades"]["settled_without_price"] += prior_settlement["paper_trades"]["settled_without_price"]
+    paper_settlement["bet_orders"]["net_pl_dollars"] += prior_settlement["bet_orders"]["net_pl_dollars"]
+    paper_settlement["bet_orders"]["detail"] = prior_settlement["bet_orders"]["detail"] + paper_settlement["bet_orders"]["detail"]
+    return {"resolved": resolved, "skipped": skipped, "purged_scoreless": purged,
+            "paper_settlement": paper_settlement}
 
 
 from scipy.stats import norm

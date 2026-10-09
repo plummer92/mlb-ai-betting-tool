@@ -7,7 +7,8 @@ from decimal import Decimal
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.schema import BetAlert, EdgeResult, PaperTrade
+from app.models.schema import BetAlert, EdgeResult, Game, GameOdds, PaperTrade
+from app.services.paper_settlement_service import final_scores, paper_outcome
 
 DEFAULT_PAPER_STAKE = Decimal("100.00")
 
@@ -39,7 +40,7 @@ def _profit_loss(result: str | None, odds: int | None, stake: Decimal) -> Decima
         return Decimal("0.00")
     if result == "loss":
         return -stake
-    if result != "win" or odds is None:
+    if result != "win" or odds is None or abs(odds) < 100:
         return None
     if odds > 0:
         return (stake * Decimal(odds) / Decimal(100)).quantize(Decimal("0.01"))
@@ -50,6 +51,93 @@ def _roi(staked: Decimal, profit_loss: Decimal) -> float:
     if staked == 0:
         return 0.0
     return round(float(profit_loss / staked), 4)
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _recorded_terms(db: Session, alert: BetAlert | None, edge: EdgeResult | None, play: str, line):
+    """Recover only an exact linked price available at the original alert time.
+
+    Historical mirror creation time is not entry time. Never substitute latest
+    odds or guess -110 for a missing historical price.
+    """
+    if alert is None or edge is None or alert.alert_time is None or edge.game_id != alert.game_id:
+        return None, line
+    cutoff = _as_utc(alert.alert_time)
+    if edge.calculated_at is not None and _as_utc(edge.calculated_at) <= cutoff:
+        edge_line = _line_for_play(edge, play)
+        if play not in {"over", "under"} or line is None or edge_line == line:
+            price = _odds_for_play(edge, play)
+            if price is not None:
+                return price, edge_line if line is None else line
+    odds = db.get(GameOdds, edge.odds_id) if edge.odds_id is not None else None
+    if odds is None or odds.game_id != alert.game_id or odds.fetched_at is None or _as_utc(odds.fetched_at) > cutoff:
+        return None, line
+    if play in {"over", "under"} and line is not None and odds.total_line != line:
+        return None, line
+    price = {"home_ml": odds.home_ml, "away_ml": odds.away_ml,
+             "over": odds.over_odds, "under": odds.under_odds}.get(play)
+    return price, odds.total_line if play in {"over", "under"} and line is None else line
+
+
+def settle_finished_paper_trades(db: Session) -> dict:
+    """Persist alert mirrors from final scores at their own recorded price/line.
+
+    No date window, prediction/review requirement, or network calls. Locks open
+    rows on databases supporting row locks; preserves settled outcomes.
+    """
+    rows = (
+        db.query(PaperTrade)
+        .filter(PaperTrade.status.in_(["open", "settled"]))
+        .order_by(PaperTrade.id)
+        .populate_existing().with_for_update().all()
+    )
+    settled = 0
+    repaired_prices = 0
+    unpriced = 0
+    skipped = 0
+    for trade in rows:
+        scores = final_scores(db, db.get(Game, trade.game_id))
+        if scores is None:
+            skipped += 1
+            continue
+        stake = Decimal(trade.paper_stake) if trade.paper_stake is not None else None
+        if stake is None or stake <= 0:
+            skipped += 1
+            continue
+        if trade.odds is None or (trade.play in {"over", "under"} and trade.line is None):
+            alert = db.get(BetAlert, trade.bet_alert_id)
+            edge = db.get(EdgeResult, trade.edge_result_id) if trade.edge_result_id else None
+            price, line = _recorded_terms(db, alert, edge, trade.play, trade.line)
+            if trade.odds is None and price is not None and abs(price) >= 100:
+                trade.odds = price
+                repaired_prices += 1
+            if trade.line is None:
+                trade.line = line
+        outcome = paper_outcome(trade.play, *scores, trade.line)
+        if outcome is None:
+            skipped += 1
+            continue
+        if trade.status == "settled":
+            # Repair missing price/P&L only; never change a settled outcome.
+            if trade.result == outcome and trade.profit_loss is None:
+                trade.profit_loss = _profit_loss(outcome, trade.odds, stake)
+            continue
+        if trade.result is not None:
+            skipped += 1
+            continue
+        trade.result = outcome
+        trade.profit_loss = _profit_loss(outcome, trade.odds, stake)
+        trade.status = "settled"
+        trade.settled_at = datetime.now(timezone.utc)
+        settled += 1
+        if trade.odds is None or abs(trade.odds) < 100:
+            unpriced += 1
+    db.commit()
+    return {"settled": settled, "skipped": skipped, "repaired_prices": repaired_prices,
+            "settled_without_price": unpriced}
 
 
 def log_alert_as_paper_trade(db: Session, alert: BetAlert, edge: EdgeResult | None = None) -> None:
@@ -68,6 +156,7 @@ def log_alert_as_paper_trade(db: Session, alert: BetAlert, edge: EdgeResult | No
                 return
 
             play = alert.play or "none"
+            price, line = _recorded_terms(db, alert, edge, play, _line_for_play(edge, play))
             db.add(
                 PaperTrade(
                     bet_alert_id=alert.id,
@@ -80,8 +169,8 @@ def log_alert_as_paper_trade(db: Session, alert: BetAlert, edge: EdgeResult | No
                     edge_pct=alert.edge_pct,
                     ev=alert.ev,
                     paper_stake=DEFAULT_PAPER_STAKE,
-                    odds=_odds_for_play(edge, play),
-                    line=_line_for_play(edge, play),
+                    odds=price,
+                    line=line,
                     status="open",
                 )
             )
@@ -119,7 +208,7 @@ def backfill_missing_paper_trades(db: Session, limit: int | None = None) -> dict
         try:
             stake = DEFAULT_PAPER_STAKE
             result = alert.bet_result if alert.bet_result in {"win", "loss", "push"} else None
-            odds = _odds_for_play(edge, alert.play)
+            odds, line = _recorded_terms(db, alert, edge, alert.play, _line_for_play(edge, alert.play))
             profit_loss = _profit_loss(result, odds, stake)
             db.add(
                 PaperTrade(
@@ -134,7 +223,7 @@ def backfill_missing_paper_trades(db: Session, limit: int | None = None) -> dict
                     ev=alert.ev,
                     paper_stake=stake,
                     odds=odds,
-                    line=_line_for_play(edge, alert.play),
+                    line=line,
                     status="settled" if result else "open",
                     result=result,
                     profit_loss=profit_loss,
@@ -181,6 +270,7 @@ def get_paper_summary(db: Session) -> dict:
     settled_trades = 0
     total_pl = Decimal("0.00")
     total_staked = Decimal("0.00")
+    unpriced_settled_trades = 0
 
     for trade, alert in rows:
         result = trade.result or (alert.bet_result if alert else None)
@@ -197,11 +287,14 @@ def get_paper_summary(db: Session) -> dict:
         if result in {"win", "loss", "push"}:
             settled_trades += 1
             by_confidence[confidence]["settled"] += 1
-            by_confidence[confidence]["staked"] += stake
-            if profit_loss is not None:
+            priced = trade.odds is not None and abs(trade.odds) >= 100 and profit_loss is not None
+            if not priced:
+                unpriced_settled_trades += 1
+            if priced:
+                by_confidence[confidence]["staked"] += stake
                 by_confidence[confidence]["profit_loss"] += profit_loss
                 total_pl += profit_loss
-            total_staked += stake
+                total_staked += stake
 
             if result == "win":
                 by_play[play]["wins"] += 1
@@ -212,8 +305,8 @@ def get_paper_summary(db: Session) -> dict:
 
             if rolling_start <= trade.game_date <= today:
                 daily[trade.game_date]["settled"] += 1
-                daily[trade.game_date]["staked"] += stake
-                if profit_loss is not None:
+                if priced:
+                    daily[trade.game_date]["staked"] += stake
                     daily[trade.game_date]["profit_loss"] += profit_loss
         else:
             open_trades += 1
@@ -264,6 +357,9 @@ def get_paper_summary(db: Session) -> dict:
         "missing_paper_trades": max(total_alerts - len(rows), 0),
         "open_trades": open_trades,
         "settled_trades": settled_trades,
+        "priced_settled_trades": settled_trades - unpriced_settled_trades,
+        "unpriced_settled_trades": unpriced_settled_trades,
+        "roi_scope": "settled trades with recorded or safely recovered odds only",
         "all_time_roi": _roi(total_staked, total_pl),
         "all_time_profit_loss": round(float(total_pl), 2),
         "roi_by_confidence": confidence_rows,

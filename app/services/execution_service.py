@@ -22,6 +22,7 @@ from app.services.books.base import BetRequest
 from app.services.books.factory import get_provider
 from app.services.risk import evaluate_bet_for_execution
 from app.services.staking import compute_stake
+from app.services.paper_settlement_service import final_scores, paper_outcome
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -285,8 +286,8 @@ def execute_paper_bets_for_today(db: Session) -> dict:
 
 def settle_paper_bets(db: Session) -> dict:
     """
-    Settle open paper bets using final scores from the games table.
-    Only settles games where final_away_score and final_home_score are populated.
+    Settle paper fills from validated final scores, without a provider API.
+    Settlement and returned-stake bankroll credit share one transaction.
     """
     open_pairs = (
         db.query(BetOrder, BetExecution)
@@ -294,7 +295,10 @@ def settle_paper_bets(db: Session) -> dict:
         .filter(
             BetOrder.provider_mode == "paper",
             BetOrder.status == "placed_paper",
+            BetExecution.settled_result.is_(None),
         )
+        .order_by(BetOrder.id, BetExecution.id)
+        .populate_existing().with_for_update()
         .all()
     )
 
@@ -302,20 +306,18 @@ def settle_paper_bets(db: Session) -> dict:
 
     for order, execution in open_pairs:
         game = db.query(Game).filter(Game.game_id == order.game_id).first()
-        if not game:
+        scores = final_scores(db, game)
+        if scores is None:
             continue
-        if game.final_away_score is None or game.final_home_score is None:
-            continue  # game not yet complete
-
-        away = game.final_away_score
-        home = game.final_home_score
+        away, home = scores
         side = order.side
-        odds = execution.placed_odds or order.requested_odds or -110
-        stake = float(order.requested_stake or 0)
-        if stake == 0:
+        odds = execution.placed_odds if execution.placed_odds is not None else order.requested_odds
+        stake = float(execution.placed_stake if execution.placed_stake is not None else order.requested_stake or 0)
+        if stake <= 0 or odds is None or abs(odds) < 100:
             continue
 
-        outcome = _determine_outcome(side, away, home, order)
+        line = execution.placed_line if execution.placed_line is not None else order.requested_line
+        outcome = paper_outcome(side, away, home, line)
         if outcome is None:
             logger.warning("Could not determine outcome for order %s side=%s", order.id, side)
             continue
@@ -343,20 +345,24 @@ def settle_paper_bets(db: Session) -> dict:
         )
 
     if settled_results:
-        db.commit()
-        # Credit bankroll for net P/L
-        provider = get_provider(db)
-        current_bal = provider.get_balance().available
-        net = sum(r["pl_dollars"] for r in settled_results)
-        # Also add back the stakes on winning/push bets
+        from app.config import DEFAULT_BANKROLL
+        latest = (
+            db.query(BankrollSnapshot).filter(BankrollSnapshot.provider_mode == "paper")
+            .order_by(BankrollSnapshot.captured_at.desc(), BankrollSnapshot.id.desc())
+            .with_for_update().first()
+        )
+        current_bal = float(latest.available_balance) if latest else DEFAULT_BANKROLL
+        # Stakes were debited at placement. Return stake plus profit on wins/pushes.
         net_balance = current_bal + sum(
             r["stake"] + r["pl_dollars"] if r["result"] in ("win", "push")
             else 0
             for r in settled_results
         )
-        provider.snapshot_bankroll(net_balance)
-    else:
-        db.commit()
+        db.add(BankrollSnapshot(
+            provider_mode="paper", sportsbook="paper", bankroll=net_balance,
+            available_balance=net_balance, captured_at=datetime.now(timezone.utc),
+        ))
+    db.commit()
 
     return {
         "settled": len(settled_results),
