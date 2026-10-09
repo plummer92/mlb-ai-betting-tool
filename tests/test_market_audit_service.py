@@ -123,6 +123,9 @@ class MarketAuditServiceTests(unittest.TestCase):
 
     def test_clv_report_marks_bet_as_beating_close(self) -> None:
         _game, _prediction, _entry_odds, edge, alert = self._base_rows()
+        # This legacy snapshot remains explicitly fallback; it needs a first-pitch cutoff.
+        from datetime import timedelta
+        _game.start_time = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
         self.db.add_all(
             [
                 GameOdds(
@@ -158,6 +161,8 @@ class MarketAuditServiceTests(unittest.TestCase):
         self.assertEqual(report["summary"]["bets"], 1)
         self.assertEqual(report["summary"]["beat_close"], 1)
         self.assertGreater(report["summary"]["avg_price_clv"], 0)
+        self.assertEqual(report["recent"][0]["verification"], "legacy_mutable_fallback")
+        self.assertEqual(report["verified_clv"]["by_market"][4]["verified"], 0)
 
     def test_movement_backtest_groups_results(self) -> None:
         game, prediction, entry_odds, edge, _alert = self._base_rows(game_id=2)

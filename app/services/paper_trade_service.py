@@ -144,6 +144,10 @@ def log_alert_as_paper_trade(db: Session, alert: BetAlert, edge: EdgeResult | No
     """
     Best-effort alert mirror. This must never block Discord alerts.
     """
+    from app.services.prospective_gate_service import gate_allows_action
+    if not gate_allows_action(db, game_id=alert.game_id, play=alert.play, action="paper_mirror",
+                              sportsbook=edge.sportsbook if edge else None):
+        return
     try:
         if alert.id is None:
             db.flush()
@@ -157,8 +161,7 @@ def log_alert_as_paper_trade(db: Session, alert: BetAlert, edge: EdgeResult | No
 
             play = alert.play or "none"
             price, line = _recorded_terms(db, alert, edge, play, _line_for_play(edge, play))
-            db.add(
-                PaperTrade(
+            trade = PaperTrade(
                     bet_alert_id=alert.id,
                     game_id=alert.game_id,
                     prediction_id=alert.prediction_id,
@@ -173,7 +176,14 @@ def log_alert_as_paper_trade(db: Session, alert: BetAlert, edge: EdgeResult | No
                     line=line,
                     status="open",
                 )
-            )
+            db.add(trade)
+            db.flush()
+            from app.services.history_service import append_decision
+            append_decision(db, dict(game_id=alert.game_id, edge_result_id=alert.edge_result_id,
+                play=play, sportsbook=edge.sportsbook if edge else None,
+                line=float(line) if line is not None else None, paper_trade_id=trade.id,
+                decision_status="PAPER", reason="alert_paper_mirror", action="paper_placement",
+                entry_time=alert.alert_time.isoformat() if alert.alert_time else None))
             db.flush()
             nested.commit()
         except Exception as exc:
@@ -205,6 +215,10 @@ def backfill_missing_paper_trades(db: Session, limit: int | None = None) -> dict
     errors: list[str] = []
 
     for alert, edge in query.all():
+        from app.services.prospective_gate_service import gate_allows_action
+        if not gate_allows_action(db, game_id=alert.game_id, play=alert.play, action="paper_backfill"):
+            skipped += 1
+            continue
         try:
             stake = DEFAULT_PAPER_STAKE
             result = alert.bet_result if alert.bet_result in {"win", "loss", "push"} else None

@@ -186,7 +186,11 @@ def classify_tradable_signal(
     else:
         signal, reason = "PASS", "market confirmation insufficient"
 
+    gate = respect.get("prospective_gate")
+    if signal == "TRADE" and gate is not None and gate.get("status") != "PASS":
+        signal, reason = "SHADOW", "prospective out-of-sample gate has not passed"
     return {
+        "prospective_gate": gate,
         "tradable_signal": signal,
         "tradable_reason": reason,
         "trade_allowed": signal == "TRADE",
@@ -350,7 +354,12 @@ def market_respect_for_edge(
             "freshness_reason": freshness["reason"],
             "minutes_since_update": freshness["minutes_since_update"],
         },
-    ).as_dict()
+    ).as_dict() | {"prospective_gate": _prospective_gate_for_edge(db, edge)}
+
+
+def _prospective_gate_for_edge(db, edge):
+    from app.services.prospective_gate_service import gate_for_play
+    return gate_for_play(db, edge.recommended_play)
 
 
 def _movement_for_edge(db: Session, edge: EdgeResult) -> LineMovement | None:

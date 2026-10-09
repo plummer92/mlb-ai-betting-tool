@@ -337,6 +337,10 @@ def create_and_send_alerts_for_today(db: Session) -> dict:
         if not qualifies_for_alert(edge, adjustment, totals_policy, tradable):
             skipped += 1
             continue
+        from app.services.prospective_gate_service import gate_allows_action
+        if not gate_allows_action(db, game_id=game.game_id, play=edge.recommended_play, action="sniper_alert", sportsbook=edge.sportsbook):
+            skipped += 1
+            continue
 
         qualified += 1
         message = build_sniper_alert_message(game, edge, db)
@@ -464,6 +468,9 @@ def create_and_send_alert_for_game(db: Session, game_id: int) -> dict:
             "totals_policy": totals_policy,
         }
 
+    from app.services.prospective_gate_service import gate_allows_action
+    if not gate_allows_action(db, game_id=game.game_id, play=edge.recommended_play, action="single_sniper_alert", sportsbook=edge.sportsbook):
+        return {"created": 0, "sent": 0, "skipped": 1, "reason": "prospective_gate_shadow"}
     message = build_sniper_alert_message(game, edge, db)
     from app.services.synopsis_service import build_edge_synopsis
     _syn, rationale = build_edge_synopsis(game, edge)

@@ -1656,6 +1656,7 @@ function adjustedEdgeHtml(row) {
 function decisionStatusChip(status) {
   const map = {
     'FIRE': 'c-strong',
+    'SHADOW': 'c-medium',
     'WATCH': 'c-medium',
     'WAIT FOR ODDS': 'sig-blue',
     'POST START': 'c-loss',
@@ -1708,6 +1709,8 @@ async function loadHealthScore() {
   try {
     const data = await fetchJsonWithTimeout('/api/dashboard/health', 'Dashboard health', 8000);
     const checks = data.checks || [];
+    const verified = data.verified_clv || {};
+    const clvStats = verified.summary || {};
     const summary = data.summary || {};
     $('health-badge').textContent = data.status || 'UNKNOWN';
     const cls = data.status === 'OK' ? 'green' : (data.status === 'WARNING' || data.status === 'PRE-RUN') ? 'yellow' : 'red';
@@ -1737,6 +1740,14 @@ async function loadHealthScore() {
           <div class="s-stat-val ${summary.slow_endpoint_count ? 'yellow' : 'green'}">${summary.slow_endpoint_count ?? 0}</div>
           <div class="s-stat-lbl">Slow Endpoints</div>
         </div>
+      </div>
+      <div class="card" style="padding:16px; margin-bottom:12px;">
+        <strong>Verified CLV — primary model health</strong>
+        ${(data.prospective_gates || []).map(g => `<div>Prospective gate ${esc(g.market)}: <strong>${esc(g.status)}</strong> — ${g.graded}/${g.required} graded; ${esc(g.reason)}</div>`).join('')}
+        <div class="mono">Mean probability CLV: ${clvStats.mean_probability_clv != null ? (clvStats.mean_probability_clv * 100).toFixed(2) + ' pts' : 'unavailable'};
+          90% interval: ${clvStats.low90 != null ? (clvStats.low90 * 100).toFixed(2) + ' to ' + (clvStats.high90 * 100).toFixed(2) + ' pts' : 'unavailable'}.</div>
+        ${(verified.by_market || []).map(r => `<div>${esc(r.kind)} ${esc(r.market)}: ${r.verified ?? 0}/${r.observations ?? 0} verified same-book, same-line (${((r.coverage || 0) * 100).toFixed(1)}%)</div>`).join('')}
+        ${(data.shadow_scores || []).map(r => `<div>${esc(r.market)} shadow ${esc(r.model_version)}: ${r.graded} graded; Brier ${r.brier != null ? r.brier.toFixed(4) : 'unavailable'}, log loss ${r.log_loss != null ? r.log_loss.toFixed(4) : 'unavailable'}; ${r.pushes} pushes.</div>`).join('')}
       </div>
       <div class="card" style="padding:0;">
         <div class="tbl-wrap">
@@ -1785,7 +1796,9 @@ async function loadDecisionQueue() {
             <tr>
               <td class="mono" style="font-weight:700;color:var(--cyan)">#${r.rank}</td>
               <td style="font-weight:600;white-space:nowrap">${esc(r.game || r.matchup || '---')}</td>
-              <td class="mono">${esc((r.play || '---').replace('_', ' ').toUpperCase())}</td>
+              <td class="mono">${esc((r.play || '---').replace('_', ' ').toUpperCase())}
+                ${Object.entries(r.shadow_forecasts || {}).filter(([m, f]) => f && f.probability != null).map(([m, f]) => `<div class="muted" style="font-size:10px">SHADOW ${m === 'moneyline' ? 'home' : 'over'} ${(f.probability * 100).toFixed(1)}%; edge ${(f.edge * 100).toFixed(1)} pts</div>`).join('')}
+              </td>
               <td class="mono">${r.raw_edge_pct != null ? (r.raw_edge_pct * 100).toFixed(1) + '%' : '---'}</td>
               <td class="mono ${r.adjusted_edge_pct > 0 ? 'green' : 'red'}">${r.adjusted_edge_pct != null ? (r.adjusted_edge_pct * 100).toFixed(1) + '%' : '---'}</td>
               <td>${marketTrustMeter(r.market_respect_adjustment)}</td>

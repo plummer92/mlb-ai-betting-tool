@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 from datetime import date, datetime, timezone
 
 from sqlalchemy import create_engine
@@ -106,7 +107,8 @@ class PaperTradeServiceTests(unittest.TestCase):
         self.db.refresh(alert)
         return alert, edge
 
-    def test_log_alert_as_paper_trade_and_summary(self) -> None:
+    @patch("app.services.prospective_gate_service.gate_for_play", return_value={"status": "PASS"})
+    def test_log_alert_as_paper_trade_and_summary(self, passed_gate) -> None:
         winning_alert, winning_edge = self._seed_alert(
             game_id=1,
             play="home_ml",
@@ -138,7 +140,8 @@ class PaperTradeServiceTests(unittest.TestCase):
         self.assertGreater(by_confidence["strong"]["roi"], 0)
         self.assertLess(by_confidence["medium"]["roi"], 0)
 
-    def test_backfill_missing_paper_trades_is_idempotent(self) -> None:
+    @patch("app.services.prospective_gate_service.gate_for_play", return_value={"status": "PASS"})
+    def test_backfill_missing_paper_trades_is_idempotent(self, passed_gate) -> None:
         self._seed_alert(
             game_id=1,
             play="home_ml",

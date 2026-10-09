@@ -12,6 +12,8 @@ router = APIRouter(prefix="/api", tags=["status"])
 
 @router.get("/status")
 def get_system_status(db: Session = Depends(get_db)):
+    from app.services.shadow_service import shadow_score_report
+    from app.services.prospective_gate_service import gate_report
     jobs = []
     for job in scheduler.get_jobs():
         jobs.append({
@@ -36,6 +38,8 @@ def get_system_status(db: Session = Depends(get_db)):
     backtest = db.query(BacktestResult).order_by(BacktestResult.run_at.desc()).first()
 
     return {
+        "shadow_scores": shadow_score_report(db),
+        "prospective_gates": gate_report(db),
         "jobs": jobs,
         "model": {
             "version": MODEL_VERSION,

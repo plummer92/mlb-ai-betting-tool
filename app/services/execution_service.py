@@ -46,7 +46,8 @@ def create_candidate_bets_for_today(db: Session) -> list[dict]:
     # Import here to avoid circular import (ranked imports from db/models)
     from app.routes.ranked import _build_ranked_rows
     all_bets = _build_ranked_rows(db=db, limit=50, active_only=True)
-    candidates = [b for b in all_bets if _is_elite(b)]
+    from app.services.prospective_gate_service import gate_for_play
+    candidates = [b for b in all_bets if _is_elite(b) and gate_for_play(db, b.get("play"))["status"] == "PASS"]
     logger.info(
         "Candidates | total=%d elite=%d (EV≥%.2f edge≥%.2f conf=%s)",
         len(all_bets), len(candidates), _MIN_EV, _MIN_EDGE, _REQ_CONF,
@@ -136,6 +137,10 @@ def execute_paper_bets_for_today(db: Session) -> dict:
     for bet in candidates:
         game_id = bet["game_id"]
         side = bet["play"]
+        from app.services.prospective_gate_service import gate_allows_action
+        if not gate_allows_action(db, game_id=game_id, play=side, action="paper_execution"):
+            results["rejected"].append({"game_id": game_id, "reason": "prospective_gate_shadow"})
+            continue
         ev = float(bet.get("ev") or 0)
         edge = float(bet.get("edge_pct") or 0)
 

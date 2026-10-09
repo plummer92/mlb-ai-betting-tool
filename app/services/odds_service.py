@@ -238,12 +238,7 @@ def _store_provider_events(
         matched_event_count += 1
         matched_game_ids.add(game.game_id)
 
-        if snapshot_type == SnapshotType.pregame and _is_after_game_start(game):
-            skipped_inserts.append(
-                f"game_id={game.game_id} snapshot={snapshot_type.value} "
-                f"reason=pregame_fetch_after_start"
-            )
-            continue
+        after_start = snapshot_type == SnapshotType.pregame and _is_after_game_start(game)
 
         valid_for_game = False
         bookmakers = _sorted_bookmakers(event, requested_books)
@@ -257,10 +252,19 @@ def _store_provider_events(
         for bookmaker in bookmakers:
             odds_row, parse_reason = _parse_bookmaker(event, bookmaker, game.game_id, snapshot_type)
             if not odds_row:
+                from app.services.history_service import append_prices
+                partial, _ = _parse_bookmaker(event, bookmaker, game.game_id, snapshot_type, allow_incomplete=True)
+                append_prices(db, partial, bookmaker=bookmaker)
                 skipped_inserts.append(
                     f"game_id={game.game_id} sportsbook={bookmaker.get('key', '?')} "
                     f"snapshot={snapshot_type.value} reason={parse_reason}"
                 )
+                continue
+            # Capture the newly received quote even when today's active row is reused.
+            from app.services.history_service import append_prices
+            append_prices(db, odds_row, bookmaker=bookmaker)
+            if after_start:
+                skipped_inserts.append(f"game_id={game.game_id} snapshot={snapshot_type.value} reason=pregame_fetch_after_start")
                 continue
             valid_for_game = True
             existing = _get_existing_snapshot(
@@ -1096,6 +1100,7 @@ def _parse_bookmaker(
     bookmaker: dict,
     game_id: int,
     snapshot_type: SnapshotType,
+    *, allow_incomplete: bool = False,
 ) -> tuple[GameOdds | None, str | None]:
     row = GameOdds(
         game_id=game_id,
@@ -1119,7 +1124,7 @@ def _parse_bookmaker(
                 elif o["name"] == "Under":
                     row.under_odds = int(o["price"])
 
-    if row.away_ml is None or row.home_ml is None:
+    if not allow_incomplete and (row.away_ml is None or row.home_ml is None):
         return None, "missing_h2h_prices"
     return row, None
 

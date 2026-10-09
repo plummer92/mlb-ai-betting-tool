@@ -30,6 +30,18 @@ def get_ttl_cached(
     return value
 
 
+def peek_cached(key: Hashable) -> Any:
+    """Return the cached value even if expired, or None. Never builds."""
+    with _lock:
+        entry = _cache.get(key)
+    return entry[1] if entry else None
+
+
+def set_cached(key: Hashable, ttl_seconds: int, value: Any) -> None:
+    with _lock:
+        _cache[key] = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds), value)
+
+
 def clear_report_cache(prefix: str | None = None) -> int:
     with _lock:
         if prefix is None:

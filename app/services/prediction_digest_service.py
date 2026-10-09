@@ -138,6 +138,13 @@ def send_daily_prediction_digest(
         return {"sent": 0, "skipped": 1, "reason": "already_sent", "report_name": report_name}
 
     rows = _build_rows(db, target_date=target_date, run_stage=run_stage)
+    from app.services.prospective_gate_service import gate_allows_action
+    if rows:
+        rows = [row for row in rows if gate_allows_action(db, game_id=row["game_id"],
+            play="home_ml" if row["home_win_pct"] >= row["away_win_pct"] else "away_ml",
+            action="prediction_pick_digest")]
+        if not rows:
+            return {"sent": 0, "skipped": 1, "reason": "prospective_gate_shadow", "report_name": report_name}
     if not rows:
         return {
             "sent": 0,

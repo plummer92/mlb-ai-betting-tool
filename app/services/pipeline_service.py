@@ -186,6 +186,10 @@ def run_predictions_for_date(
                 park_factor_adv=live_features.get("park_factor_adv"),
                 pythagorean_win_pct_adv=live_features.get("pythagorean_win_pct_adv"),
                 calibration_result_id=cal_result_id,
+                feature_inputs={"home": home_features, "away": away_features,
+                    "live": live_features, "market_home_prob": market_home_prob,
+                    "logistic_home_prob": logistic_home_prob, "calibration_params": cal_params,
+                    "run_stage": run_stage, "sim_count": result["sim_count"]},
             )
             ok.append(game.game_id)
             probability_results.append(result)

@@ -565,7 +565,7 @@ def _pick_odds_snapshot_for_game(
     return None, "stale_existing_odds_snapshot"
 
 
-def calculate_edge_for_game(
+def _calculate_edge_for_game(
     db: Session,
     game_id: int,
     *,
@@ -950,6 +950,25 @@ def calculate_edge_for_game(
         "edge": edge,
         "odds_id": odds.id,
     }
+
+
+def calculate_edge_for_game(db: Session, game_id: int, **kwargs) -> dict:
+    from app.services.shadow_service import produce_shadow_forecasts
+    produce_shadow_forecasts(db, game_id)
+    result = _calculate_edge_for_game(db, game_id, **kwargs)
+    if result.get("reason") != "edge_persist_failed":
+        from app.services.history_service import append_decision
+        edge = result.get("edge")
+        append_decision(db, {"game_id": game_id, "run_stage": kwargs.get("run_stage"),
+            "decision_status": "EVALUATED" if edge else "BLOCKED",
+            "reason": result.get("reason") or "edge_computed_pending_policy",
+            "edge_result_id": edge.id if edge else None,
+            "play": edge.recommended_play if edge else None,
+            "sportsbook": edge.sportsbook if edge else None,
+            "line": float(edge.book_total) if edge and edge.book_total is not None else None,
+            "result": {k: v for k, v in result.items() if k != "edge"}})
+        db.commit()
+    return result
 
 
 def calculate_all_edges_today(

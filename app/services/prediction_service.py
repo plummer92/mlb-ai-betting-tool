@@ -54,7 +54,22 @@ def store_prediction(
     park_factor_adv: float | None,
     pythagorean_win_pct_adv: float | None,
     calibration_result_id: int | None,
+    feature_inputs: dict | None = None,
 ) -> Prediction:
+    from app.services.history_service import append_forecast
+    append_forecast(db, game_id=game_id, model_version=model_version,
+        calibration_version=str(calibration_result_id) if calibration_result_id is not None else "uncalibrated",
+        inputs=feature_inputs if feature_inputs is not None else {
+            "home_starter_xera": home_starter_xera, "away_starter_xera": away_starter_xera,
+            "using_xera": using_xera, "kbb_adv": kbb_adv, "park_factor_adv": park_factor_adv,
+            "pythagorean_win_pct_adv": pythagorean_win_pct_adv, "sim_count": sim_count,
+            "run_stage": run_stage, "input_coverage": "stored_key_inputs_only"},
+        outputs={"home_win_pct": home_win_pct, "away_win_pct": away_win_pct,
+            "calibrated_home_win_pct": calibrated_home_win_pct,
+            "calibrated_away_win_pct": calibrated_away_win_pct,
+            "projected_home_score": projected_home_score, "projected_away_score": projected_away_score,
+            "projected_total": projected_total, "confidence_score": confidence_score,
+            "recommended_side": recommended_side})
     # Upsert: if an active prediction already exists for this game+stage today,
     # update it in place to avoid duplicate rows from the pipeline running twice.
     existing = (

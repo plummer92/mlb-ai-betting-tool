@@ -162,6 +162,9 @@ def send_pregame_bet_reminder_for_game(
             "tradable_reason": row.get("tradable_reason"),
         }
 
+    from app.services.prospective_gate_service import gate_allows_action
+    if not gate_allows_action(db, game_id=game_id, play=row.get("play"), action="pregame_reminder"):
+        return {"sent": 0, "skipped": 1, "reason": "prospective_gate_shadow", "game_id": game_id}
     odds = _latest_preferred_odds(db, game_id)
     message = _build_message(row, game, odds, minutes_before=minutes_before)
     ok, error = send_alert_message(message)

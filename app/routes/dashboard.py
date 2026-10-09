@@ -171,8 +171,17 @@ def _due_label(due_time: time) -> str:
     return f"{display_hour}:{minute:02d} {suffix} ET"
 
 
+VERIFIED_CLV_CACHE_KEY = ("verified_clv_report",)
+
+
 @router.get("/api/dashboard/health")
 def dashboard_health(db: Session = Depends(get_db)):
+    # The full verified-CLV scan is slow on Neon (~15 s); the scheduler refreshes it
+    # every 10 minutes and the dashboard only reads the cached copy.
+    from app.services.report_cache import peek_cached
+    verified_clv = peek_cached(VERIFIED_CLV_CACHE_KEY) or {"status": "warming"}
+    from app.services.prospective_gate_service import gate_report
+    from app.services.shadow_service import shadow_score_report
     today = _dashboard_today()
     now_et = datetime.now(ET)
     before_pipeline_due = _before_time(now_et, DAILY_PIPELINE_DUE_TIME)
@@ -273,6 +282,9 @@ def dashboard_health(db: Session = Depends(get_db)):
 
     return {
         "status": _health_status(checks),
+        "verified_clv": verified_clv,
+        "prospective_gates": gate_report(db),
+        "shadow_scores": shadow_score_report(db),
         "date": today.isoformat(),
         "checks": checks,
         "summary": {

@@ -94,6 +94,8 @@ def persist_tradable_decisions(db: Session, limit: int = 50, active_only: bool =
         else:
             updated += 1
         _apply_snapshot_row(snapshot, row)
+        from app.services.history_service import append_decision
+        append_decision(db, row)
 
     db.commit()
 
@@ -131,6 +133,7 @@ def build_daily_trade_summary(db: Session, limit: int = 50, active_only: bool = 
     rows = journal["rows"]
     trades = [row for row in rows if row.get("tradable_signal") == "TRADE" and row.get("trade_allowed")]
     watch = [row for row in rows if row.get("tradable_signal") == "WATCH"]
+    shadow = [row for row in rows if row.get("tradable_signal") == "SHADOW"]
     passes = [row for row in rows if row.get("tradable_signal") == "PASS"]
     blocked = [row for row in rows if row.get("decision_status") == "BLOCKED"]
     quota = _odds_quota_summary(db)
@@ -143,7 +146,7 @@ def build_daily_trade_summary(db: Session, limit: int = 50, active_only: bool = 
     title = "MLB Trade Summary" if trades else "MLB No-Trade Summary"
     lines = [
         f"**{title}**",
-        f"TRADE {len(trades)} | WATCH {len(watch)} | PASS {len(passes)} | BLOCKED {len(blocked)}",
+        f"TRADE {len(trades)} | SHADOW {len(shadow)} | WATCH {len(watch)} | PASS {len(passes)} | BLOCKED {len(blocked)}",
         f"Odds quota: {quota['used']}/{quota['quota']} used, {quota['remaining']} left",
     ]
 

@@ -20,6 +20,123 @@ from sqlalchemy.sql import func
 from app.db import Base
 
 
+class ForecastHistory(Base):
+    __tablename__ = "forecast_history"
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    scheduled_start = Column(DateTime(timezone=True))
+    model_version = Column(String(100), nullable=False)
+    calibration_version = Column(String(100), nullable=False)
+    feature_hash = Column(String(64), nullable=False)
+    inputs_json = Column(Text, nullable=False)
+    outputs_json = Column(Text, nullable=False)
+    market = Column(String(20))
+    sportsbook = Column(String(50))
+    line = Column(Float)
+    price_id = Column(Integer, ForeignKey("price_history.id"))
+
+
+class PriceHistory(Base):
+    __tablename__ = "price_history"
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, nullable=False, index=True)
+    sportsbook = Column(String(50), nullable=False)
+    market = Column(String(20), nullable=False)
+    line = Column(Float)
+    first_price = Column(Integer, nullable=False)
+    second_price = Column(Integer, nullable=False)
+    fetched_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    source_updated_at = Column(DateTime(timezone=True))
+    scheduled_start = Column(DateTime(timezone=True))
+
+
+class DecisionHistory(Base):
+    __tablename__ = "decision_history"
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    scheduled_start = Column(DateTime(timezone=True))
+    policy_version = Column(String(100), nullable=False)
+    decision_status = Column(String(30), nullable=False)
+    reason = Column(Text, nullable=False)
+    play = Column(String(20))
+    market = Column(String(20))
+    forecast_id = Column(Integer, ForeignKey("forecast_history.id"))
+    price_id = Column(Integer, ForeignKey("price_history.id"))
+    payload_json = Column(Text, nullable=False)
+
+
+# Guard ordinary ORM writes too; migrations install database triggers for bulk SQL.
+from sqlalchemy import event
+
+
+def _immutable_history(mapper, connection, target):
+    raise ValueError("History is append-only")
+
+
+for _history_model in (ForecastHistory, PriceHistory, DecisionHistory):
+    event.listen(_history_model, "before_update", _immutable_history)
+    event.listen(_history_model, "before_delete", _immutable_history)
+
+
+class ShadowFit(Base):
+    __tablename__ = "shadow_fits"
+    id = Column(Integer, primary_key=True)
+    model_version = Column(String(100), nullable=False)
+    market = Column(String(20), nullable=False)
+    period = Column(String(7), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    train_cutoff = Column(DateTime(timezone=True), nullable=False)
+    payload_json = Column(Text, nullable=False)
+    __table_args__ = (UniqueConstraint("model_version", "market", "period", name="uq_shadow_fit_period"),)
+
+
+class ForecastGrade(Base):
+    __tablename__ = "forecast_grades"
+    id = Column(Integer, primary_key=True)
+    forecast_id = Column(Integer, ForeignKey("forecast_history.id"), nullable=False, unique=True)
+    observed_at = Column(DateTime(timezone=True), nullable=False)
+    home_score = Column(Integer, nullable=False)
+    away_score = Column(Integer, nullable=False)
+    y = Column(Integer)
+    push = Column(Boolean, nullable=False)
+    brier = Column(Float)
+    log_loss = Column(Float)
+
+
+for _history_model in (ShadowFit, ForecastGrade):
+    event.listen(_history_model, "before_update", _immutable_history)
+    event.listen(_history_model, "before_delete", _immutable_history)
+
+
+class GateDeployment(Base):
+    __tablename__ = "gate_deployments"
+    id = Column(Integer, primary_key=True)
+    market = Column(String(20), nullable=False, unique=True)
+    candidate_version = Column(String(100), nullable=False)
+    deployed_at = Column(DateTime(timezone=True), nullable=False)
+    cohort_size = Column(Integer, nullable=False)
+    horizon_minutes = Column(Integer, nullable=False)
+    tolerance_minutes = Column(Integer, nullable=False)
+    policy_version = Column(String(100), nullable=False)
+
+
+class GateMember(Base):
+    __tablename__ = "gate_members"
+    id = Column(Integer, primary_key=True)
+    deployment_id = Column(Integer, ForeignKey("gate_deployments.id"), nullable=False)
+    game_id = Column(Integer, nullable=False)
+    forecast_id = Column(Integer, ForeignKey("forecast_history.id"), nullable=False, unique=True)
+    enrolled_at = Column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (UniqueConstraint("deployment_id", "game_id", name="uq_gate_game"),)
+
+
+for _history_model in (GateDeployment, GateMember):
+    event.listen(_history_model, "before_update", _immutable_history)
+    event.listen(_history_model, "before_delete", _immutable_history)
+
+
 class DailyPipelineRun(Base):
     __tablename__ = "daily_pipeline_runs"
 

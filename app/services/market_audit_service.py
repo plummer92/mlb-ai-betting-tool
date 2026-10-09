@@ -21,19 +21,22 @@ FINAL_SNAPSHOT = SnapshotType.pregame
 
 
 def _closing_odds_for_trade(db: Session, trade: PaperTrade, edge: EdgeResult | None) -> GameOdds | None:
+    from app.services.history_service import utc
+    game = db.get(Game, trade.game_id)
+    start = utc(game.start_time) if game else None
     sportsbook = edge.sportsbook if edge and edge.sportsbook else None
+    if not start or not sportsbook:
+        return None
     query = db.query(GameOdds).filter(
         GameOdds.game_id == trade.game_id,
         GameOdds.snapshot_type == FINAL_SNAPSHOT,
+        GameOdds.fetched_at < start,
+        GameOdds.sportsbook == sportsbook,
     )
-    if sportsbook:
-        same_book = (
-            query.filter(GameOdds.sportsbook == sportsbook)
-            .order_by(GameOdds.fetched_at.desc(), GameOdds.id.desc())
-            .first()
-        )
-        if same_book:
-            return same_book
+    if trade.play in {"over", "under"}:
+        if trade.line is None:
+            return None
+        query = query.filter(GameOdds.total_line == trade.line)
     return query.order_by(GameOdds.fetched_at.desc(), GameOdds.id.desc()).first()
 
 
@@ -78,6 +81,8 @@ def _signed_clv(trade: PaperTrade, close_odds: int | None, close_line: float | N
 
 
 def get_clv_report(db: Session, *, limit: int = 25) -> dict:
+    from app.services.verified_clv_service import get_verified_clv_report
+    verified_report = get_verified_clv_report(db)
     rows = (
         db.query(PaperTrade, EdgeResult)
         .outerjoin(EdgeResult, EdgeResult.id == PaperTrade.edge_result_id)
@@ -100,6 +105,7 @@ def get_clv_report(db: Session, *, limit: int = 25) -> dict:
             "confidence": trade.confidence,
             "sportsbook": edge.sportsbook if edge else None,
             "closing_sportsbook": close.sportsbook if close else None,
+            "verification": "legacy_mutable_fallback" if close else "unavailable",
             **clv,
         }
         if edge:
@@ -124,6 +130,9 @@ def get_clv_report(db: Session, *, limit: int = 25) -> dict:
         }
 
     return {
+        "verified_clv": verified_report,
+        "primary_health_metric": "verified_clv.summary.mean_probability_clv",
+        "legacy_warning": "Legacy summaries use mutable snapshots and are fallback only, never verified CLV.",
         "summary": summarize(details),
         "sample_limit": limit,
         "sampled_rows": len(details),

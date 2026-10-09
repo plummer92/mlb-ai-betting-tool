@@ -28,6 +28,9 @@ def send_sandbox_alert(v4_pred: dict, game, db: Session) -> None:
         webhook_url = os.getenv("DISCORD_SANDBOX_WEBHOOK_URL", "").strip()
         if not webhook_url:
             return
+        from app.services.prospective_gate_service import gate_allows_action
+        if not gate_allows_action(db, game_id=game.game_id, play="over", action="sandbox_totals_alert"):
+            return
 
         away = v4_pred.get("away_team", "AWAY")
         home = v4_pred.get("home_team", "HOME")
@@ -125,6 +128,9 @@ def send_series_opener_alert(v4_pred: dict, game, db: Session) -> None:
         if not webhook_url:
             return
         if not v4_pred.get("is_series_opener"):
+            return
+        from app.services.prospective_gate_service import gate_allows_action
+        if not gate_allows_action(db, game_id=game.game_id, play="over", action="series_opener_alert"):
             return
 
         away = v4_pred.get("away_team", "AWAY")

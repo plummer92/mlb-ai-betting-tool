@@ -28,6 +28,7 @@ ET = ZoneInfo("America/New_York")
 FINAL_STATUSES = {"Final", "Completed Early", "Cancelled"}
 DECISION_ORDER = {
     "FIRE": 0,
+    "SHADOW": 1,
     "WATCH": 1,
     "WAIT FOR ODDS": 2,
     "BLOCKED": 3,
@@ -80,6 +81,13 @@ def _build_ranked_rows(
 
     ranked = []
     for edge, game, prediction, odds in latest_by_game.values():
+        from app.services.history_service import forecast_as_of
+        from app.services.shadow_math import JOINT_VERSION
+        import json
+        shadow = {}
+        for market in ("moneyline", "totals"):
+            forecast = forecast_as_of(db, game.game_id, datetime.now(ET), model_version=JOINT_VERSION, market=market)
+            shadow[market] = json.loads(forecast.outputs_json) if forecast else None
         ev = _pick_ev(edge)
         market_respect = market_respect_for_edge(db, edge, odds=odds, game=game)
         adjustment = market_respect_adjustment(
@@ -111,6 +119,7 @@ def _build_ranked_rows(
         ranked.append(
             {
                 "game_id": game.game_id,
+                "shadow_forecasts": shadow,
                 "edge_result_id": edge.id,
                 "prediction_id": prediction.prediction_id if prediction else None,
                 "game_date": game.game_date.isoformat() if game.game_date else today.isoformat(),
@@ -270,6 +279,8 @@ def _decision_row_from_ranked(row: dict) -> dict:
         status = "WATCH"
     elif tradable_signal == "TRADE":
         status = "FIRE"
+    elif tradable_signal == "SHADOW":
+        status = "SHADOW"
     elif tradable_signal == "WATCH":
         status = "WATCH"
     elif tradable_signal == "PASS":
@@ -286,6 +297,7 @@ def _decision_row_from_ranked(row: dict) -> dict:
         "game_id": row.get("game_id"),
         "edge_result_id": row.get("edge_result_id"),
         "prediction_id": row.get("prediction_id"),
+        "shadow_forecasts": row.get("shadow_forecasts") or {},
         "game_date": row.get("game_date"),
         "game": row.get("matchup"),
         "matchup": row.get("matchup"),
@@ -297,6 +309,7 @@ def _decision_row_from_ranked(row: dict) -> dict:
         "market_respect_tags": tags,
         "odds_freshness_status": row.get("odds_freshness_status", "UNKNOWN"),
         "decision_status": status,
+        "prospective_gate": (row.get("market_respect") or {}).get("prospective_gate"),
         "decision_reason": reason,
         "tradable_signal": tradable_signal,
         "tradable_reason": tradable_reason,
@@ -345,13 +358,13 @@ def get_cached_ranked_rows(db: Session, limit: int = 10, active_only: bool = Tru
     if active_only:
         snapshot = get_report_snapshot(db, "ranked_rows", report_date=datetime.now(ET).date(), max_age_seconds=3600)
         if snapshot and isinstance(snapshot.get("rows"), list):
-            return snapshot["rows"][:limit]
+            return _gate_cached_rows(db, snapshot["rows"][:limit])
     rows = get_ttl_cached(
         ("ranked_rows", today, active_only),
         ttl_seconds=30,
         builder=lambda: _build_ranked_rows(db=db, limit=50, active_only=active_only),
     )
-    return rows[:limit]
+    return _gate_cached_rows(db, rows[:limit])
 
 
 def get_cached_decision_queue(db: Session, limit: int = 20, active_only: bool = True) -> list[dict]:
@@ -359,13 +372,31 @@ def get_cached_decision_queue(db: Session, limit: int = 20, active_only: bool = 
     if active_only:
         snapshot = get_report_snapshot(db, "decision_queue", report_date=datetime.now(ET).date(), max_age_seconds=3600)
         if snapshot and isinstance(snapshot.get("rows"), list):
-            return snapshot["rows"][:limit]
+            return _gate_cached_rows(db, snapshot["rows"][:limit])
     rows = get_ttl_cached(
         ("decision_queue", today, active_only),
         ttl_seconds=30,
         builder=lambda: _build_decision_queue(db=db, limit=50, active_only=active_only),
     )
-    return rows[:limit]
+    return _gate_cached_rows(db, rows[:limit])
+
+
+def _gate_cached_rows(db, rows):
+    from app.services.prospective_gate_service import gate_for_play
+    result = []
+    for saved in rows:
+        row = dict(saved)
+        gate = gate_for_play(db, row.get("play"))
+        row["prospective_gate"] = gate
+        if gate["status"] != "PASS":
+            row["trade_allowed"] = False
+            if row.get("tradable_signal") == "TRADE":
+                row["tradable_signal"] = "SHADOW"
+                row["tradable_reason"] = "prospective out-of-sample gate has not passed"
+            if row.get("decision_status") == "FIRE":
+                row["decision_status"] = "SHADOW"
+        result.append(row)
+    return result
 
 
 def _build_discord_lines(bets: list[dict], title: str = "📊 **Ranked MLB Bets**") -> list[str]:
@@ -431,6 +462,10 @@ def send_ranked_bets_to_discord(
     if not bets:
         return {"sent": 0, "message": "No ranked bets found"}
 
+    from app.services.prospective_gate_service import gate_allows_action
+    bets = [b for b in bets if gate_allows_action(db, game_id=b["game_id"], play=b.get("play"), action="ranked_alert")]
+    if not bets:
+        return {"sent": 0, "message": "Prospective gate: SHADOW"}
     lines = _build_discord_lines(bets)
     payload = {"content": "\n".join(lines)}
     resp = requests.post(webhook, json=payload, timeout=15)
@@ -461,6 +496,9 @@ def send_single_game_discord_alert(
         raise HTTPException(status_code=404, detail=f"No edge data found for game {game_id} today")
 
     bet = match[0]
+    from app.services.prospective_gate_service import gate_allows_action
+    if not gate_allows_action(db, game_id=game_id, play=bet.get("play"), action="manual_ranked_alert"):
+        raise HTTPException(status_code=409, detail="Prospective gate: SHADOW")
     if not bet.get("market_respect_alert_allowed"):
         raise HTTPException(status_code=409, detail="Market respect gate suppressed this alert")
     snap = f" [{bet['snapshot_type']}]" if bet.get("snapshot_type") else ""

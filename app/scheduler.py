@@ -642,6 +642,35 @@ def ranked_bets_discord_job():
         logger.exception("[scheduler] Discord summary error")
 
 
+@scheduler.scheduled_job(CronTrigger(minute="*/10", timezone="America/New_York"), id="refresh_verified_clv",
+                         next_run_time=datetime.now(UTC) + timedelta(seconds=20))
+def refresh_verified_clv_job():
+    from app.routes.dashboard import VERIFIED_CLV_CACHE_KEY
+    from app.services.report_cache import set_cached
+    from app.services.verified_clv_service import get_verified_clv_report
+    db = SessionLocal()
+    try:
+        set_cached(VERIFIED_CLV_CACHE_KEY, 1800, get_verified_clv_report(db))
+    except (SQLAlchemyError, RuntimeError, ValueError):
+        db.rollback()
+        print("[scheduler] verified CLV refresh failed")
+    finally:
+        db.close()
+
+
+@scheduler.scheduled_job(CronTrigger(minute="*/15", timezone="America/New_York"), id="grade_shadow_history")
+def grade_shadow_history_job():
+    from app.services.shadow_service import grade_shadow_forecasts
+    db = SessionLocal()
+    try:
+        grade_shadow_forecasts(db)
+    except (SQLAlchemyError, RuntimeError, ValueError):
+        db.rollback()
+        logger.exception("[scheduler] Shadow grading failed")
+    finally:
+        db.close()
+
+
 @scheduler.scheduled_job(CronTrigger(hour=11, minute=5, timezone="America/New_York"))
 def refresh_dashboard_reports_job():
     db = SessionLocal()

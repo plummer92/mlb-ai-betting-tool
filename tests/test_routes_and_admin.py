@@ -2022,6 +2022,7 @@ class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):
         }
 
         with patch("app.services.pregame_bet_reminder_service._build_decision_queue", return_value=[decision_row]), \
+             patch("app.services.prospective_gate_service.gate_for_play", return_value={"status": "PASS"}), \
              patch("app.services.pregame_bet_reminder_service.send_alert_message", return_value=(True, None)) as send_mock:
             first = send_pregame_bet_reminder_for_game(self.db, game_id=25)
             second = send_pregame_bet_reminder_for_game(self.db, game_id=25)
@@ -2143,7 +2144,8 @@ class SchedulerPathTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.db.commit()
 
-        with patch("app.services.prediction_digest_service.send_alert_message", return_value=(True, None)) as send_mock:
+        with patch("app.services.prospective_gate_service.gate_for_play", return_value={"status": "PASS"}), \
+             patch("app.services.prediction_digest_service.send_alert_message", return_value=(True, None)) as send_mock:
             result = send_daily_prediction_digest(self.db, target_date=target_date)
             duplicate = send_daily_prediction_digest(self.db, target_date=target_date)
 
