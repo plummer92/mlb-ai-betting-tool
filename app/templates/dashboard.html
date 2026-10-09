@@ -916,6 +916,7 @@ tr:hover td { background: rgba(6,182,212,0.025); }
   <div class="header-brand">
     <div class="war-room-title">MLB AI WAR ROOM</div>
     <nav class="header-nav">
+      <a href="/static/calibration-research/index.html" class="nav-link">[ RESEARCH NOTEBOOK ]</a>
       <a href="/dashboard" class="nav-link active">[ WAR ROOM ]</a>
       <span class="nav-sep">|</span>
       <a href="/bets" class="nav-link ">[ TOP BETS ]</a>
@@ -945,7 +946,9 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     <a class="quick-tab" href="#today-read-section">Today</a>
     <a class="quick-tab" href="#odds-integrity-section">Odds Trust</a>
     <a class="quick-tab" href="#betmgm-validation-section">BetMGM</a>
+    <a class="quick-tab" href="#market-sources-section">Sources</a>
     <a class="quick-tab" href="#market-audit-section">Markets</a>
+    <a class="quick-tab" href="#market-replay-section">Replay</a>
     <a class="quick-tab" href="#market-shadow-section">Shadow</a>
     <a class="quick-tab" href="#profitability-section">Profit</a>
     <a class="quick-tab" href="#debrief-section">Debrief</a>
@@ -1091,6 +1094,20 @@ tr:hover td { background: rgba(6,182,212,0.025); }
     </div>
   </div>
 
+  <div class="section" id="market-sources-section">
+    <div class="section-head">
+      <div class="section-label">Market Sources</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="market-sources-badge">LOADING</div>
+    </div>
+    <div id="market-sources-summary"></div>
+    <div class="card" style="padding:0;margin-top:12px">
+      <div class="tbl-wrap" id="market-sources-table">
+        <div class="loading">Loading source routing</div>
+      </div>
+    </div>
+  </div>
+
   <div class="section" id="odds-warehouse-section">
     <div class="section-head">
       <div class="section-label">Odds Warehouse</div>
@@ -1188,6 +1205,21 @@ tr:hover td { background: rgba(6,182,212,0.025); }
         <div class="loading">Loading CLV and movement audit</div>
       </div>
     </div>
+  </div>
+
+  <div class="section" id="market-replay-section">
+    <div class="section-head">
+      <div class="section-label">Market Replay</div>
+      <div class="section-rule"></div>
+      <div class="section-badge" id="market-replay-badge">LOADING</div>
+    </div>
+    <div id="market-replay-summary"></div>
+    <div class="card" style="padding:0;margin-top:12px">
+      <div class="tbl-wrap" id="market-replay-table">
+        <div class="loading">Loading completed-game replays</div>
+      </div>
+    </div>
+    <div id="market-replay-detail" style="margin-top:12px"></div>
   </div>
 
   <div class="section" id="market-shadow-section">
@@ -2457,6 +2489,98 @@ async function loadBetmgmValidation() {
     $('betmgm-validation-badge').textContent = 'ERROR';
     $('betmgm-validation-summary').innerHTML = '';
     $('betmgm-validation-table').innerHTML = `<div class="empty compact">Cached BetMGM validation unavailable: ${esc(e.message)}</div>`;
+  }
+}
+
+function sourceStatusClass(status) {
+  if (['OK', 'VALIDATED'].includes(status)) return 'green';
+  if (['SCOUTING', 'PAUSED'].includes(status)) return 'yellow';
+  return 'red';
+}
+
+async function loadMarketSources() {
+  try {
+    const research = await loadDashboardResearch();
+    const data = research.reports?.market_sources || await fetchJsonWithTimeout('/api/debug/market-sources', 'Market sources', 8000);
+    const sources = data.sources || [];
+    const primary = sources.find(source => source.id === 'the_odds_api');
+    const publicSource = sources.find(source => source.id === 'betmgm_public');
+    const primaryStatus = primary?.status || 'UNKNOWN';
+    const publicStatus = publicSource?.status || 'UNAVAILABLE';
+    $('market-sources-badge').textContent = `${primaryStatus} / ${publicStatus}`;
+    $('market-sources-summary').innerHTML = `
+      ${snapshotLine(data, 'Market sources snapshot')}
+      <div class="summary-bar" style="border-left-color:var(--cyan);background:var(--surface3);">
+        <div class="s-stat"><div class="s-stat-val ${sourceStatusClass(primaryStatus)}">${esc(primaryStatus)}</div><div class="s-stat-lbl">Primary Feed</div></div>
+        <div class="s-stat"><div class="s-stat-val ${sourceStatusClass(publicStatus)}">${esc(publicStatus)}</div><div class="s-stat-lbl">Public Scout</div></div>
+        <div class="s-stat"><div class="s-stat-val">${publicSource?.events_checked ?? 0}</div><div class="s-stat-lbl">BetMGM Checked</div></div>
+        <div class="s-stat"><div class="s-stat-val">${publicSource?.match_rate != null ? (publicSource.match_rate * 100).toFixed(0) + '%' : '---'}</div><div class="s-stat-lbl">Validation Match</div></div>
+      </div>
+      <div class="audit-note">${esc(data.routing?.guardrail || 'Public observations are isolated from trading decisions.')}</div>`;
+    $('market-sources-table').innerHTML = `
+      <table><thead><tr><th>Source</th><th>Role</th><th>Status</th><th>Decision Eligible</th><th>Observations</th><th>Detail</th></tr></thead>
+      <tbody>${sources.map(source => `<tr>
+        <td style="font-weight:600">${esc(source.label || source.id)}</td>
+        <td class="mono">${esc(source.role || '---')}</td>
+        <td class="${sourceStatusClass(source.status)} mono">${esc(source.status || '---')}</td>
+        <td>${source.decision_eligible ? '<span class="chip c-strong">YES</span>' : '<span class="chip c-no_bet">NO</span>'}</td>
+        <td class="mono">${source.observations ?? 0}</td>
+        <td>${esc(source.detail || '---')}</td>
+      </tr>`).join('') || '<tr><td colspan="6"><div class="empty compact">No market sources registered.</div></td></tr>'}</tbody></table>`;
+  } catch(e) {
+    $('market-sources-badge').textContent = 'ERROR';
+    $('market-sources-summary').innerHTML = '';
+    $('market-sources-table').innerHTML = `<div class="empty compact">Market sources unavailable: ${esc(e.message)}</div>`;
+  }
+}
+
+async function loadMarketReplayDetails(gameId) {
+  const detail = $('market-replay-detail');
+  detail.innerHTML = '<div class="loading">Loading game replay</div>';
+  try {
+    const data = await fetchJsonWithTimeout(`/api/reviews/market-replay/${gameId}`, 'Market replay', 8000);
+    if (data.status !== 'ok') throw new Error('Game replay was not found.');
+    const game = data.game || {};
+    const outcome = data.outcome || {};
+    const model = data.model || {};
+    const edge = data.edge || {};
+    const decision = data.decision || {};
+    const rows = data.odds_timeline || [];
+    detail.innerHTML = `
+      <div class="card" style="padding:14px;">
+        <div class="gc-header"><div style="font-size:14px;font-weight:700">${esc(game.matchup || 'Game replay')}</div><span class="chip c-${esc(outcome.bet_result || 'no_bet')}">${esc((outcome.bet_result || 'no_bet').toUpperCase())}</span></div>
+        <div class="today-read" style="margin:12px 0;">
+          <div class="read-tile"><div class="read-label">Final</div><div class="read-main">${esc(outcome.final_score || '---')}</div><div class="read-sub">${esc(outcome.winning_side || 'unresolved')}</div></div>
+          <div class="read-tile"><div class="read-label">Model</div><div class="read-main">${model.projected_total != null ? fmt(model.projected_total) : '---'}</div><div class="read-sub">${esc(model.recommended_side || 'no side')}</div></div>
+          <div class="read-tile"><div class="read-label">Edge</div><div class="read-main">${edge.edge_pct != null ? pct0_1(edge.edge_pct) : '---'}</div><div class="read-sub">${esc(edge.recommended_play || 'no play')}</div></div>
+          <div class="read-tile"><div class="read-label">Decision</div><div class="read-main">${esc(decision.status || '---')}</div><div class="read-sub">${decision.trade_allowed ? 'trade allowed' : 'not allowed'}</div></div>
+        </div>
+        ${decision.reason ? `<div class="audit-note">${esc(decision.reason)}</div>` : ''}
+        <div class="tbl-wrap" style="margin-top:12px"><table><thead><tr><th>Time</th><th>Source</th><th>Stage</th><th>Away ML</th><th>Home ML</th><th>Total</th><th>Over / Under</th></tr></thead>
+        <tbody>${rows.length ? rows.map(row => `<tr><td class="mono">${esc(gameTime(row.fetched_at))}</td><td>${esc(row.source || '---')}</td><td class="mono">${esc(row.snapshot_type || '---')}</td><td class="mono">${fmtAmericanOdds(row.away_ml)}</td><td class="mono">${fmtAmericanOdds(row.home_ml)}</td><td class="mono">${row.total_line ?? '---'}</td><td class="mono">${fmtAmericanOdds(row.over_odds)} / ${fmtAmericanOdds(row.under_odds)}</td></tr>`).join('') : '<tr><td colspan="7"><div class="empty compact">No stored odds snapshots for this game.</div></td></tr>'}</tbody></table></div>
+        <div class="audit-note" style="margin-top:10px">${esc(data.guardrail || '')}</div>
+      </div>`;
+  } catch(e) {
+    detail.innerHTML = `<div class="empty compact">Market replay unavailable: ${esc(e.message)}</div>`;
+  }
+}
+
+async function loadMarketReplayIndex() {
+  try {
+    const data = await fetchJsonWithTimeout('/api/reviews/market-replays?limit=12', 'Market replays', 8000);
+    const rows = data.rows || [];
+    $('market-replay-badge').textContent = `${data.count || 0} COMPLETE`;
+    $('market-replay-summary').innerHTML = `<div class="audit-note">Completed-game audit. Review the stored line path, model read, decision state, and outcome without changing live logic.</div>`;
+    $('market-replay-table').innerHTML = `
+      <table><thead><tr><th>Date</th><th>Game</th><th>Final</th><th>Model Play</th><th>Result</th><th>Odds</th><th></th></tr></thead>
+      <tbody>${rows.length ? rows.map(row => `<tr>
+        <td class="mono">${esc(row.game_date)}</td><td style="font-weight:600">${esc(row.matchup)}</td><td class="mono">${esc(row.final_score)}</td><td class="mono">${esc(row.recommended_play || '---')}</td><td>${betChip(row.bet_result)}</td><td class="mono">${row.odds_snapshots} snapshots / ${row.sources} sources</td>
+        <td><button class="refresh-btn" onclick="loadMarketReplayDetails(${row.game_id})">VIEW</button></td>
+      </tr>`).join('') : '<tr><td colspan="7"><div class="empty compact">No completed games are ready for replay.</div></td></tr>'}</tbody></table>`;
+  } catch(e) {
+    $('market-replay-badge').textContent = 'ERROR';
+    $('market-replay-summary').innerHTML = '';
+    $('market-replay-table').innerHTML = `<div class="empty compact">Market Replay unavailable: ${esc(e.message)}</div>`;
   }
 }
 
@@ -3915,6 +4039,7 @@ const primaryLoaders = [
   [loadShadowPolicyV2, 'shadow policy v2'],
   [loadOddsIntegrity, 'pregame integrity'],
   [loadBetmgmValidation, 'betmgm validation'],
+  [loadMarketSources, 'market sources'],
   [loadOddsWarehouse, 'odds warehouse'],
   [loadTodayRead, 'today read'],
   [loadTopBets, 'top bets'],
@@ -3932,6 +4057,7 @@ const secondaryLoaders = [
   [loadProfitabilityDrilldowns, 'profitability drilldowns'],
   [loadBestPlaysWeek, 'best plays week'],
   [loadMarketAudit, 'market audit'],
+  [loadMarketReplayIndex, 'market replay'],
   [loadMarketShadow, 'market shadow'],
   [loadDebrief, 'debrief'],
   [loadBullpen, 'bullpen'],

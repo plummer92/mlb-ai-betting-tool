@@ -19,6 +19,7 @@ from app.services.report_snapshot_service import (
     BETMGM_PUBLIC_VALIDATION_TTL_SECONDS,
     get_report_snapshot,
 )
+from app.services.market_source_service import MARKET_SOURCES_REPORT
 
 router = APIRouter(tags=["dashboard"])
 ET = ZoneInfo("America/New_York")
@@ -113,6 +114,7 @@ def dashboard_research(db: Session = Depends(get_db)):
             "profitability_report_min1",
             "bullpen_today",
             "performance_summary",
+            MARKET_SOURCES_REPORT,
         )
     }
     return {

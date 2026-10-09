@@ -10,11 +10,13 @@ from sqlalchemy.orm import sessionmaker
 from app.db import Base
 from app.models.schema import Game, GameOdds, OddsApiRequestLog, SnapshotType
 from app.services.odds_service import (
+    OddsProviderPaused,
     _event_game_date,
     _match_game,
     _normalize_betstack_events,
     compute_line_movement,
     fetch_and_store_odds,
+    get_odds_provider_pause,
     odds_freshness_metadata,
 )
 
@@ -104,6 +106,125 @@ class OddsServiceTests(unittest.IsolatedAsyncioTestCase):
     def test_event_game_date_uses_et(self) -> None:
         event = {"commence_time": "2026-04-03T01:45:00Z"}
         self.assertEqual(_event_game_date(event), date(2026, 4, 2))
+
+    def _out_of_usage_log(self, requested_at: datetime) -> OddsApiRequestLog:
+        log = OddsApiRequestLog(
+            provider="the_odds_api",
+            endpoint="odds",
+            snapshot_type="open",
+            bookmakers="draftkings",
+            status="error",
+            requested_at=requested_at,
+            error="provider_error_code=OUT_OF_USAGE_CREDITS",
+        )
+        self.db.add(log)
+        self.db.commit()
+        return log
+
+    def test_provider_pause_last_through_current_month_after_credit_exhaustion(self) -> None:
+        now = datetime(2026, 8, 19, 12, tzinfo=timezone.utc)
+        self._out_of_usage_log(now - timedelta(minutes=1))
+
+        with patch.multiple("app.services.odds_service",
+                            ODDS_API_QUOTA_EXHAUSTED_PAUSE_UNTIL_MONTH_RESET=True,
+                            ODDS_API_QUOTA_RESET_DAY=1):
+            pause = get_odds_provider_pause(self.db, now=now)
+
+        self.assertIsNotNone(pause)
+        self.assertEqual(pause.paused_until, datetime(2026, 9, 1, tzinfo=timezone.utc))
+
+    def _pause_at(self, now: datetime, *, reset_day: int = 15,
+                  month_reset: bool = True, cooldown: int = 180):
+        with patch.multiple("app.services.odds_service",
+                            ODDS_API_QUOTA_RESET_DAY=reset_day,
+                            ODDS_API_QUOTA_EXHAUSTED_PAUSE_UNTIL_MONTH_RESET=month_reset,
+                            ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES=cooldown):
+            return get_odds_provider_pause(self.db, now=now)
+
+    def test_reset_day_15_exhaustion_on_20th_pauses_until_next_month(self) -> None:
+        exhausted_at = datetime(2026, 8, 20, 12, tzinfo=timezone.utc)
+        self._out_of_usage_log(exhausted_at)
+        pause = self._pause_at(exhausted_at + timedelta(minutes=1))
+        self.assertIsNotNone(pause)
+        self.assertEqual(pause.paused_since, exhausted_at)
+        self.assertEqual(pause.paused_until, datetime(2026, 9, 15, tzinfo=timezone.utc))
+
+    def test_reset_day_15_exhaustion_on_10th_pauses_until_same_month(self) -> None:
+        exhausted_at = datetime(2026, 8, 10, 12, tzinfo=timezone.utc)
+        self._out_of_usage_log(exhausted_at)
+        pause = self._pause_at(exhausted_at + timedelta(minutes=1))
+        self.assertIsNotNone(pause)
+        self.assertEqual(pause.paused_until, datetime(2026, 8, 15, tzinfo=timezone.utc))
+
+    def test_exhaustion_before_latest_reset_does_not_pause(self) -> None:
+        self._out_of_usage_log(datetime(2026, 8, 14, 23, 59, 59, tzinfo=timezone.utc))
+        self.assertIsNone(self._pause_at(datetime(2026, 8, 15, tzinfo=timezone.utc)))
+
+    def test_december_exhaustion_pauses_until_january_next_year(self) -> None:
+        self._out_of_usage_log(datetime(2026, 12, 20, tzinfo=timezone.utc))
+        pause = self._pause_at(datetime(2026, 12, 21, tzinfo=timezone.utc), reset_day=1)
+        self.assertIsNotNone(pause)
+        self.assertEqual(pause.paused_until, datetime(2027, 1, 1, tzinfo=timezone.utc))
+
+    def test_month_reset_still_pauses_with_zero_cooldown(self) -> None:
+        self._out_of_usage_log(datetime(2026, 8, 20, tzinfo=timezone.utc))
+        pause = self._pause_at(datetime(2026, 8, 21, tzinfo=timezone.utc), cooldown=0)
+        self.assertIsNotNone(pause)
+        self.assertEqual(pause.paused_until, datetime(2026, 9, 15, tzinfo=timezone.utc))
+
+    def test_minutes_mode_preserves_cooldown_and_expiry(self) -> None:
+        exhausted_at = datetime(2026, 8, 14, 23, tzinfo=timezone.utc)
+        self._out_of_usage_log(exhausted_at)
+        pause = self._pause_at(datetime(2026, 8, 15, tzinfo=timezone.utc), month_reset=False)
+        self.assertIsNotNone(pause)
+        self.assertEqual(pause.paused_until, datetime(2026, 8, 15, 2, tzinfo=timezone.utc))
+        self.assertEqual(pause.cooldown_minutes, 180)
+        self.assertIsNone(self._pause_at(pause.paused_until, month_reset=False))
+        self.assertIsNone(self._pause_at(exhausted_at, month_reset=False, cooldown=0))
+
+    def test_exhaustion_at_reset_boundary_still_pauses(self) -> None:
+        reset = datetime(2026, 8, 15, tzinfo=timezone.utc)
+        self._out_of_usage_log(reset)
+        pause = self._pause_at(reset)
+        self.assertIsNotNone(pause)
+        self.assertEqual(pause.paused_until, datetime(2026, 9, 15, tzinfo=timezone.utc))
+
+    def test_january_before_reset_uses_previous_december(self) -> None:
+        self._out_of_usage_log(datetime(2026, 12, 20, tzinfo=timezone.utc))
+        pause = self._pause_at(datetime(2027, 1, 10, tzinfo=timezone.utc))
+        self.assertIsNotNone(pause)
+        self.assertEqual(pause.paused_until, datetime(2027, 1, 15, tzinfo=timezone.utc))
+
+    def test_reset_boundary_uses_utc_with_offset_and_naive_now(self) -> None:
+        self._out_of_usage_log(datetime(2026, 8, 14, 23, 30, tzinfo=timezone.utc))
+        local_now = datetime(2026, 8, 14, 20, tzinfo=timezone(timedelta(hours=-4)))
+        self.assertIsNone(self._pause_at(local_now))
+        self.assertIsNone(self._pause_at(datetime(2026, 8, 15)))
+
+    def test_reset_day_config_defaults_and_clamps(self) -> None:
+        import os
+        import runpy
+        from pathlib import Path
+
+        config_path = Path(__file__).resolve().parents[1] / "app" / "config.py"
+        for value, expected in ((None, 1), ("-3", 1), ("31", 28), ("15", 15)):
+            with self.subTest(value=value):
+                environment = {"DATABASE_URL": "sqlite:///./_codex_test.db"}
+                if value is not None:
+                    environment["ODDS_API_QUOTA_RESET_DAY"] = value
+                with patch.dict(os.environ, environment, clear=True), patch("dotenv.load_dotenv"):
+                    config = runpy.run_path(str(config_path))
+                self.assertEqual(config["ODDS_API_QUOTA_RESET_DAY"], expected)
+
+    async def test_exhausted_provider_does_not_make_another_http_request(self) -> None:
+        self._out_of_usage_log(datetime.now(timezone.utc) - timedelta(minutes=1))
+
+        with patch("app.services.odds_service.ODDS_API_QUOTA_EXHAUSTED_PAUSE_UNTIL_MONTH_RESET", True), \
+             patch("app.services.odds_service.httpx.AsyncClient") as client:
+            with self.assertRaises(OddsProviderPaused):
+                await fetch_and_store_odds(self.db, SnapshotType.open)
+
+        client.assert_not_called()
 
     async def test_fetch_and_store_reuses_fresh_existing_rows(self) -> None:
         self._game(1, date(2026, 4, 2), "Toronto Blue Jays", "Chicago White Sox")

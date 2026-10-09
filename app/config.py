@@ -22,9 +22,13 @@ ODDS_DATA_PROVIDER = os.getenv("ODDS_DATA_PROVIDER", "the_odds_api").strip().low
 BETSTACK_API_KEY = os.getenv("BETSTACK_API_KEY", "")
 BETSTACK_API_URL = os.getenv("BETSTACK_API_URL", "https://api.betstack.dev/api/v1")
 ODDS_API_MONTHLY_QUOTA = int(os.getenv("ODDS_API_MONTHLY_QUOTA", "500"))
+ODDS_API_QUOTA_RESET_DAY = max(1, min(28, int(os.getenv("ODDS_API_QUOTA_RESET_DAY", "1"))))
 ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES = int(
     os.getenv("ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES", "180")
 )
+ODDS_API_QUOTA_EXHAUSTED_PAUSE_UNTIL_MONTH_RESET = os.getenv(
+    "ODDS_API_QUOTA_EXHAUSTED_PAUSE_UNTIL_MONTH_RESET", "true"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 ALERT_MIN_EV = float(os.getenv("ALERT_MIN_EV", "0.03"))
 ALERT_MIN_EDGE = float(os.getenv("ALERT_MIN_EDGE", "0.04"))

@@ -62,6 +62,7 @@ Optional:
 
 - `THE_ODDS_API_KEY`
 - `ODDS_DATA_PROVIDER` (`the_odds_api`, `betstack`, or `auto`)
+- `ODDS_API_QUOTA_RESET_DAY` (account billing reset day at 00:00 UTC; default `1`, clamped to `1..28`)
 - `BETSTACK_API_KEY`
 - `BETSTACK_API_URL`
 - `DISCORD_WEBHOOK_URL`

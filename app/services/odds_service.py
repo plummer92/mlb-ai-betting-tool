@@ -11,6 +11,8 @@ from app.config import (
     BETSTACK_API_URL,
     ODDS_DATA_PROVIDER,
     ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES,
+    ODDS_API_QUOTA_EXHAUSTED_PAUSE_UNTIL_MONTH_RESET,
+    ODDS_API_QUOTA_RESET_DAY,
     THE_ODDS_API_KEY,
     THE_ODDS_API_URL,
 )
@@ -384,31 +386,67 @@ def _record_odds_api_request(
     db.flush()
 
 
-def get_odds_provider_pause(db: Session) -> OddsProviderPause | None:
-    exhausted_log = _recent_out_of_usage_log(db)
+def get_odds_provider_pause(
+    db: Session,
+    *,
+    now: datetime | None = None,
+) -> OddsProviderPause | None:
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    exhausted_log = _recent_out_of_usage_log(db, now=now)
     if exhausted_log is None or exhausted_log.requested_at is None:
         return None
     paused_since = exhausted_log.requested_at
     if paused_since.tzinfo is None:
         paused_since = paused_since.replace(tzinfo=timezone.utc)
-    paused_until = paused_since + timedelta(minutes=ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES)
-    if paused_until <= datetime.now(timezone.utc):
+    if ODDS_API_QUOTA_EXHAUSTED_PAUSE_UNTIL_MONTH_RESET:
+        paused_until = _next_quota_reset(paused_since)
+    else:
+        paused_until = paused_since + timedelta(minutes=ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES)
+    if paused_until <= now:
         return None
     return OddsProviderPause(
         reason="out_of_usage_credits",
         provider_status="OUT_OF_USAGE_CREDITS",
         paused_since=paused_since,
         paused_until=paused_until,
-        cooldown_minutes=ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES,
+        cooldown_minutes=max(0, int((paused_until - paused_since).total_seconds() // 60)),
     )
 
 
-def _recent_out_of_usage_log(db: Session) -> OddsApiRequestLog | None:
-    if ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES <= 0:
+def _most_recent_quota_reset(value: datetime) -> datetime:
+    value = _aware_utc_dt(value)
+    reset = value.replace(day=ODDS_API_QUOTA_RESET_DAY, hour=0, minute=0, second=0, microsecond=0)
+    if reset > value:
+        if reset.month == 1:
+            reset = reset.replace(year=reset.year - 1, month=12)
+        else:
+            reset = reset.replace(month=reset.month - 1)
+    return reset
+
+
+def _next_quota_reset(value: datetime) -> datetime:
+    reset = _most_recent_quota_reset(value)
+    if reset.month == 12:
+        return reset.replace(year=reset.year + 1, month=1)
+    return reset.replace(month=reset.month + 1)
+
+
+def _recent_out_of_usage_log(
+    db: Session,
+    *,
+    now: datetime | None = None,
+) -> OddsApiRequestLog | None:
+    if not ODDS_API_QUOTA_EXHAUSTED_PAUSE_UNTIL_MONTH_RESET and ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES <= 0:
         return None
-    cutoff = datetime.now(timezone.utc) - timedelta(
-        minutes=ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES
-    )
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if ODDS_API_QUOTA_EXHAUSTED_PAUSE_UNTIL_MONTH_RESET:
+        cutoff = _most_recent_quota_reset(now)
+    else:
+        cutoff = now - timedelta(minutes=ODDS_API_QUOTA_EXHAUSTED_COOLDOWN_MINUTES)
     return (
         db.query(OddsApiRequestLog)
         .filter(

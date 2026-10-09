@@ -166,6 +166,7 @@ def _dashboard_report_builders(db: Session, target_date: date) -> dict[str, Call
     from app.routes.bullpen import _build_bullpen_today
     from app.services.market_audit_service import get_clv_report, get_movement_backtest_report
     from app.services.profitability_report_service import get_profitability_report
+    from app.services.market_source_service import build_market_source_report
 
     return {
         "odds_warehouse": lambda: build_odds_warehouse_report(db),
@@ -176,6 +177,7 @@ def _dashboard_report_builders(db: Session, target_date: date) -> dict[str, Call
         "profitability_report_min1": lambda: get_profitability_report(db, min_sample=1),
         "bullpen_today": lambda: {"status": "ok", "reports": _build_bullpen_today(db, target_date)},
         "performance_summary": lambda: build_performance_summary(db),
+        "market_sources": lambda: build_market_source_report(db, report_date=target_date),
     }
 
 
@@ -220,7 +222,7 @@ def refresh_live_dashboard_report_snapshots(db: Session, *, report_date: date | 
     builders = _dashboard_report_builders(db, target_date)
     live_builders = {
         name: builders[name]
-        for name in ("odds_warehouse", "totals_policy", "bullpen_today")
+        for name in ("odds_warehouse", "totals_policy", "bullpen_today", "market_sources")
     }
     return _refresh_dashboard_builders(db, live_builders, report_date=target_date)
 

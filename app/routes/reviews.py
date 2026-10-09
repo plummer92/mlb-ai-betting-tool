@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models.schema import Game, GameOutcomeReview
 from app.services.market_audit_service import get_movement_backtest_report
+from app.services.market_replay_service import build_market_replay, list_market_replays
 from app.services.profitability_report_service import get_profitability_report
 from app.services.report_cache import get_ttl_cached
 from app.services.report_snapshot_service import get_report_snapshot
@@ -14,6 +15,22 @@ from app.services.review_service import get_accuracy_segmented, resolve_complete
 
 router = APIRouter(prefix="/api/reviews", tags=["reviews"])
 CURRENT_MODEL = "v0.2-backtest-weighted"
+
+
+@router.get("/market-replays")
+def market_replays(
+    limit: int = Query(default=12, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    return list_market_replays(db, limit=limit)
+
+
+@router.get("/market-replay/{game_id}")
+def market_replay(game_id: int, db: Session = Depends(get_db)):
+    replay = build_market_replay(db, game_id)
+    if replay is None:
+        return {"status": "not_found", "game_id": game_id}
+    return replay
 
 
 @router.post("/resolve")

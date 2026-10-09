@@ -520,6 +520,14 @@ def build_odds_quota_report(db: Session) -> dict:
     }
 
 
+@router.get("/market-sources")
+def market_sources(db: Session = Depends(get_db)):
+    """Cached/source-neutral status only; public fallback data never reaches decisions."""
+    from app.services.market_source_service import build_market_source_report
+
+    return build_market_source_report(db, report_date=datetime.now(ET).date())
+
+
 def _provider_error_code(error: str | None) -> str | None:
     if not error:
         return None
