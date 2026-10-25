@@ -40,11 +40,13 @@ Two daily moneyline/totals board requests cost about 120 credits in 30 days. Sta
 
 ## Winter data work
 
-Backfill prior-day team, batter, pitcher and bullpen statistics; reconstruct announced starters and lineups only where timing is supported. Public MLB game logs and Baseball Savant/Statcast are free sources, subject to access limits; reconstructed historical availability must stay labeled uncertain.
+**Data-source decision (Jared, 2026-10-25).** MLB.com's Terms of Use (Section 1, item xi, updated March 11, 2025) prohibit using automated scripts to collect information from MLB Digital Properties, which covers the Stats API and Baseball Savant. Jared chose to keep the daily pipeline's existing low-volume Stats API use as is, as a hobby, and to do **no bulk historical backfill**. Winter work uses only the owned export of the 2026 database (`mlb-export-20261025`, 31 tables, taken read-only on 2026-10-25) and the N1 inventory built from it (TKT-0015).
+
+The December dataset is therefore built from exported rows only: prior-day team, pitcher and bullpen features come from what the database already stored (`games`, `predictions`, `forecast_history`, `reliever_workload`, `umpire_assignments_v4`, `game_odds`). Fields the export lacks stay missing and are labeled; they are not fetched. N1 found every game has a pre-start prediction and 99.25% have final scores, both starter xERA values exist for 70.3% of games, a known umpire before first pitch for 9%, and lineups for 0%.
 
 Export available 2026 `forecast_history`, `price_history`, `decision_history`, fits and grades. Preserve feature hashes, source/receipt times, starts, book, line, both prices and rejected decisions. October append-only history cannot recreate earlier missing snapshots. Keep legacy exports separate; never invent closes or lineup announcement times.
 
-Owned exports are free. Historical intraday odds/props and reliable timestamped lineup archives may require paid providers; Odds API historical access is paid. Purchase nothing without a separate budget decision. Produce a coverage/missingness manifest and deterministic as-of replay.
+Owned exports are free. Historical intraday odds/props and reliable timestamped lineup archives may require paid providers; Odds API historical access is paid. Purchase nothing without a separate budget decision. Produce a coverage/missingness manifest and deterministic as-of replay. November's manifest is done (TKT-0015: 0 verified closes in 2026, so 2026 is development data only).
 
 ## Rules lock
 
@@ -57,7 +59,7 @@ Change design between seasons, or register a new shadow version and untouched pr
 | Date | Deliverable | Done means |
 | --- | --- | --- |
 | November 2026 | Data inventory and credit budget | Coverage manifest identifies unrecoverable history; shared allocations total 500 |
-| December 2026 | Point-in-time dataset | As-of audit finds no future inputs; uncertain lineage excluded |
+| December 2026 | Point-in-time dataset from the 2026 export only (no backfill) | As-of audit finds no future inputs; every feature traced to an exported column and timestamp; missing fields labeled, not fetched; uncertain lineage excluded |
 | January 2027 | Chronological model comparison | Baselines, count distributions and 0.82 ablation replay reproducibly; 2026 labeled development data |
 | February 2027 | Confirmation and collection rehearsal | Scratches, missing lineups, restart, pushes and quota exhaustion produce recorded skips/settlements |
 | March 2027, before Opening Day | Signed rules and version manifest | Independent replay matches saved decisions; candidate/gate and quota locked |
